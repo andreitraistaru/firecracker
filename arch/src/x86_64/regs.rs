@@ -9,8 +9,8 @@ use std::{io, mem, result};
 
 use super::gdt::{gdt_entry, kvm_segment_from_gdt};
 use arch_gen::x86::msr_index;
-use kvm::VcpuFd;
-use kvm_bindings::{kvm_fpu, kvm_msr_entry, kvm_msrs, kvm_regs, kvm_sregs};
+use kvm::{KvmMsrs, VcpuFd};
+use kvm_bindings::{kvm_fpu, kvm_msr_entry, kvm_regs, kvm_sregs};
 use memory_model::{GuestAddress, GuestMemory};
 
 // Initial pagetables.
@@ -66,25 +66,10 @@ pub fn setup_fpu(vcpu: &VcpuFd) -> Result<()> {
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
 pub fn setup_msrs(vcpu: &VcpuFd) -> Result<()> {
     let entry_vec = create_msr_entries();
-    let vec_size_bytes =
-        mem::size_of::<kvm_msrs>() + (entry_vec.len() * mem::size_of::<kvm_msr_entry>());
-    let vec: Vec<u8> = Vec::with_capacity(vec_size_bytes);
-    #[allow(clippy::cast_ptr_alignment)]
-    let msrs: &mut kvm_msrs = unsafe {
-        // Converting the vector's memory to a struct is unsafe.  Carefully using the read-only
-        // vector to size and set the members ensures no out-of-bounds errors below.
-        &mut *(vec.as_ptr() as *mut kvm_msrs)
-    };
 
-    unsafe {
-        // Mapping the unsized array to a slice is unsafe because the length isn't known.
-        // Providing the length used to create the struct guarantees the entire slice is valid.
-        let entries: &mut [kvm_msr_entry] = msrs.entries.as_mut_slice(entry_vec.len());
-        entries.copy_from_slice(&entry_vec);
-    }
-    msrs.nmsrs = entry_vec.len() as u32;
+    let kvm_msrs_wrapper = KvmMsrs::from_entries(&entry_vec);
 
-    vcpu.set_msrs(msrs)
+    vcpu.set_msrs(&kvm_msrs_wrapper)
         .map(|_| ())
         .map_err(Error::SetModelSpecificRegisters)
 }
@@ -383,37 +368,24 @@ mod tests {
         setup_msrs(&vcpu).unwrap();
 
         // This test will check against the last MSR entry configured (the tenth one).
-        // See create_msr_entries for details.
+        // See create_msr_entries() for details.
         let test_kvm_msrs_entry = [kvm_msr_entry {
             index: msr_index::MSR_IA32_MISC_ENABLE,
             ..Default::default()
         }];
-        let vec_size_bytes = mem::size_of::<kvm_msrs>() + mem::size_of::<kvm_msr_entry>();
-        let vec: Vec<u8> = Vec::with_capacity(vec_size_bytes);
-        let mut msrs: &mut kvm_msrs = unsafe {
-            // Converting the vector's memory to a struct is unsafe.  Carefully using the read-only
-            // vector to size and set the members ensures no out-of-bounds errors below.
-            &mut *(vec.as_ptr() as *mut kvm_msrs)
-        };
+        let mut kvm_msrs_wrapper = KvmMsrs::from_entries(&test_kvm_msrs_entry);
 
-        unsafe {
-            let entries: &mut [kvm_msr_entry] = msrs.entries.as_mut_slice(1);
-            entries.copy_from_slice(&test_kvm_msrs_entry);
-        }
-
-        msrs.nmsrs = 1;
-        // get_msrs returns the number of msrs that it succeed in reading. We only want to read 1
-        // in this test case scenario.
-        let read_msrs = vcpu.get_msrs(&mut msrs).unwrap();
-        assert_eq!(read_msrs, 1);
+        // Get_msrs() returns the number of msrs that it succeeded in reading.
+        // We only want to read one in this test case scenario.
+        let read_nmsrs = vcpu.get_msrs(&mut kvm_msrs_wrapper).unwrap();
+        // Validate it only read one.
+        assert_eq!(read_nmsrs, 1);
 
         // Official entries that were setup when we did setup_msrs. We need to assert that the
         // tenth one (i.e the one with index msr_index::MSR_IA32_MISC_ENABLE has the data we
         // expect.
         let entry_vec = create_msr_entries();
-        unsafe {
-            assert_eq!(entry_vec[9], msrs.entries.as_slice(1)[0]);
-        }
+        assert_eq!(entry_vec[9], kvm_msrs_wrapper.as_mut_entries_slice()[0]);
     }
 
     #[test]
