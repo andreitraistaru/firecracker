@@ -53,7 +53,7 @@ mod brand_string;
 /// filter_cpuid(0, 1, true, &mut kvm_cpuid).unwrap();
 ///
 /// // Get expected `kvm_cpuid` entries.
-/// let entries = kvm_cpuid.mut_entries_slice();
+/// let entries = kvm_cpuid.as_entries_slice();
 /// ```
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub fn filter_cpuid(
@@ -73,7 +73,7 @@ pub fn filter_cpuid(
 
     if let Some(cpuid_transformer) = maybe_cpuid_transformer {
         cpuid_transformer.preprocess_cpuid(kvm_cpuid)?;
-        for entry in kvm_cpuid.mut_entries_slice().iter_mut() {
+        for entry in kvm_cpuid.as_mut_entries_slice().iter_mut() {
             cpuid_transformer.transform_entry(entry, &vm_spec)?;
         }
     }
