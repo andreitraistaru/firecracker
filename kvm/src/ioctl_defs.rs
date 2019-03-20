@@ -9,10 +9,15 @@ use kvm_bindings::*;
 
 ioctl_io_nr!(KVM_GET_API_VERSION, KVMIO, 0x00);
 ioctl_io_nr!(KVM_CREATE_VM, KVMIO, 0x01);
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+ioctl_iowr_nr!(KVM_GET_MSR_INDEX_LIST, KVMIO, 0x02, kvm_msr_list);
 ioctl_io_nr!(KVM_CHECK_EXTENSION, KVMIO, 0x03);
 ioctl_io_nr!(KVM_GET_VCPU_MMAP_SIZE, KVMIO, 0x04);
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 ioctl_iowr_nr!(KVM_GET_SUPPORTED_CPUID, KVMIO, 0x05, kvm_cpuid2);
+/* Available with KVM_CAP_GET_MSR_FEATURES */
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+ioctl_iowr_nr!(KVM_GET_MSR_FEATURE_INDEX_LIST, KVMIO, 0x0a, kvm_msr_list);
 
 // Ioctls for VM fds.
 

@@ -208,6 +208,38 @@ impl Kvm {
         Ok(cpuid)
     }
 
+    /// X86 specific call to read list of MSRs available for VMs.
+    ///
+    /// See the documentation for `KVM_GET_MSR_INDEX_LIST`.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub fn get_msr_index_list(&self) -> Result<MsrList> {
+        let mut indexes = MsrList::new(MAX_KVM_MSR_ENTRIES);
+        let ret = unsafe {
+            // Here we trust the kernel not to read past the end of the kvm_msr_list struct.
+            ioctl_with_mut_ptr(self, KVM_GET_MSR_INDEX_LIST(), indexes.as_mut_ptr())
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(indexes)
+    }
+
+    /// X86 specific call to read list of MSRs available on this host.
+    ///
+    /// See the documentation for `KVM_GET_MSR_FEATURE_INDEX_LIST`.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub fn get_msr_feature_index_list(&self) -> Result<MsrList> {
+        let mut indexes = MsrList::new(MAX_KVM_MSR_ENTRIES);
+        let ret = unsafe {
+            // Here we trust the kernel not to read past the end of the kvm_msr_list struct.
+            ioctl_with_mut_ptr(self, KVM_GET_MSR_FEATURE_INDEX_LIST(), indexes.as_mut_ptr())
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(indexes)
+    }
+
     /// Creates a VM fd using the KVM fd (`KVM_CREATE_VM`).
     ///
     /// A call to this function will also initialize the supported cpuid (`KVM_GET_SUPPORTED_CPUID`)
@@ -1808,6 +1840,26 @@ mod tests {
         kvm.create_vm().unwrap();
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn msr_index_list() {
+        let kvm = Kvm::new().unwrap();
+        if kvm.check_extension(Cap::MsrFeatures) {
+            let msr_list = kvm.get_msr_index_list().unwrap();
+            assert!(msr_list.as_original_struct().len() <= MAX_KVM_MSR_ENTRIES);
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn msr_feature_index_list() {
+        let kvm = Kvm::new().unwrap();
+        if kvm.check_extension(Cap::MsrFeatures) {
+            let msr_list = kvm.get_msr_feature_index_list().unwrap();
+            assert!(msr_list.as_original_struct().len() <= MAX_KVM_MSR_ENTRIES);
+        }
+    }
+
     #[test]
     fn get_vm_run_size() {
         let kvm = Kvm::new().unwrap();
@@ -2207,6 +2259,11 @@ mod tests {
         assert_eq!(max_cpus, 4);
         assert_eq!(
             get_raw_errno(faulty_kvm.get_supported_cpuid(max_cpus)),
+            badf_errno
+        );
+        assert_eq!(get_raw_errno(faulty_kvm.get_msr_index_list()), badf_errno);
+        assert_eq!(
+            get_raw_errno(faulty_kvm.get_msr_feature_index_list()),
             badf_errno
         );
 

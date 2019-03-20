@@ -125,4 +125,5 @@ pub enum Cap {
     CheckExtensionVm = KVM_CAP_CHECK_EXTENSION_VM,
     S390UserSigp = KVM_CAP_S390_USER_SIGP,
     ImmediateExit = KVM_CAP_IMMEDIATE_EXIT,
+    MsrFeatures = KVM_CAP_GET_MSR_FEATURES,
 }
