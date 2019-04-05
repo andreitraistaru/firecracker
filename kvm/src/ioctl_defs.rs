@@ -51,6 +51,8 @@ ioctl_iow_nr!(KVM_CREATE_PIT2, KVMIO, 0x77, kvm_pit_config);
 /* Available with KVM_CAP_IOEVENTFD */
 ioctl_iow_nr!(KVM_IOEVENTFD, KVMIO, 0x79, kvm_ioeventfd);
 /* Available with KVM_CAP_IRQCHIP */
+ioctl_iow_nr!(KVM_IRQ_LINE, KVMIO, 0x61, kvm_irq_level);
+/* Available with KVM_CAP_IRQCHIP */
 ioctl_iowr_nr!(KVM_GET_IRQCHIP, KVMIO, 0x62, kvm_irqchip);
 /* Available with KVM_CAP_IRQCHIP */
 ioctl_ior_nr!(KVM_SET_IRQCHIP, KVMIO, 0x63, kvm_irqchip);

@@ -401,6 +401,28 @@ impl VmFd {
         }
     }
 
+    /// Sets the level on the given irq to 1 if `active` is true, and 0 otherwise.
+    #[cfg(any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "arm",
+        target_arch = "aarch64"
+    ))]
+    pub fn set_irq_line(&self, irq: u32, active: bool) -> Result<()> {
+        let mut irq_level = kvm_irq_level::default();
+        irq_level.__bindgen_anon_1.irq = irq;
+        irq_level.level = if active { 1 } else { 0 };
+
+        // Safe because we know that our file is a VM fd, we know the kernel will only read the
+        // correct amount of memory from our pointer, and we verify the return result.
+        let ret = unsafe { ioctl_with_ref(self, KVM_IRQ_LINE(), &irq_level) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
     /// Creates a PIT as per the `KVM_CREATE_PIT2` ioctl.
     ///
     /// Note that this call can only succeed after a call to `Vm::create_irq_chip`.
@@ -523,6 +545,31 @@ impl VmFd {
         let irqfd = kvm_irqfd {
             fd: evt.as_raw_fd() as u32,
             gsi,
+            ..Default::default()
+        };
+        // Safe because we know that our file is a VM fd, we know the kernel will only read the
+        // correct amount of memory from our pointer, and we verify the return result.
+        let ret = unsafe { ioctl_with_ref(self, KVM_IRQFD(), &irqfd) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    /// Deregisters the event `evt` that would trigger the `gsi` IRQ.
+    ///
+    #[cfg(any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "arm",
+        target_arch = "aarch64"
+    ))]
+    pub fn deregister_irqfd(&self, evt: &EventFd, gsi: u32) -> Result<()> {
+        let irqfd = kvm_irqfd {
+            fd: evt.as_raw_fd() as u32,
+            gsi,
+            flags: KVM_IRQFD_FLAG_DEASSIGN,
             ..Default::default()
         };
         // Safe because we know that our file is a VM fd, we know the kernel will only read the
@@ -1915,17 +1962,27 @@ mod tests {
     }
 
     #[test]
-    fn register_irqfd() {
+    fn irqfd() {
         let kvm = Kvm::new().unwrap();
-        let vm_fd = kvm.create_vm().unwrap();
+        let vm = kvm.create_vm().unwrap();
+        vm.create_irq_chip().unwrap();
+
         let evtfd1 = EventFd::new().unwrap();
         let evtfd2 = EventFd::new().unwrap();
         let evtfd3 = EventFd::new().unwrap();
-        vm_fd.register_irqfd(&evtfd1, 4).unwrap();
-        vm_fd.register_irqfd(&evtfd2, 8).unwrap();
-        vm_fd.register_irqfd(&evtfd3, 4).unwrap();
-        vm_fd.register_irqfd(&evtfd3, 4).unwrap_err();
-        vm_fd.register_irqfd(&evtfd3, 5).unwrap_err();
+        vm.register_irqfd(&evtfd1, 4).unwrap();
+        vm.register_irqfd(&evtfd2, 8).unwrap();
+        vm.register_irqfd(&evtfd3, 4).unwrap();
+        vm.register_irqfd(&evtfd3, 4).unwrap_err();
+        vm.register_irqfd(&evtfd3, 5).unwrap_err();
+
+        vm.set_irq_line(4, true).unwrap();
+        vm.set_irq_line(4, false).unwrap();
+
+        // Deregister evt3 from IRQ 4.
+        vm.deregister_irqfd(&evtfd3, 4).unwrap();
+        // Re-registering evt3 for IRQ 4 should now work.
+        vm.register_irqfd(&evtfd3, 4).unwrap();
     }
 
     #[test]
@@ -2260,7 +2317,14 @@ mod tests {
             get_raw_errno(faulty_vm_fd.register_irqfd(&event_fd, 0)),
             badf_errno
         );
-
+        assert_eq!(
+            get_raw_errno(faulty_vm_fd.deregister_irqfd(&event_fd, 0)),
+            badf_errno
+        );
+        assert_eq!(
+            get_raw_errno(faulty_vm_fd.set_irq_line(1, true)),
+            badf_errno
+        );
         assert_eq!(get_raw_errno(faulty_vm_fd.create_vcpu(0)), badf_errno);
         let faulty_vcpu_fd = VcpuFd {
             vcpu: unsafe { File::from_raw_fd(-1) },
