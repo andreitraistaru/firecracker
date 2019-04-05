@@ -9,6 +9,7 @@ mod gdt;
 pub mod interrupts;
 pub mod layout;
 mod mptable;
+pub mod msr;
 pub mod regs;
 
 use std::mem;

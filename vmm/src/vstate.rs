@@ -69,7 +69,7 @@ pub enum Error {
     SetUserMemoryRegion(io::Error),
     #[cfg(target_arch = "x86_64")]
     /// Error configuring the MSR registers
-    MSRSConfiguration(arch::x86_64::regs::Error),
+    MSRSConfiguration(arch::x86_64::msr::Error),
     #[cfg(target_arch = "aarch64")]
     /// Error configuring the general purpose aarch64 registers.
     REGSConfiguration(arch::aarch64::regs::Error),
@@ -401,7 +401,7 @@ impl Vcpu {
             .set_cpuid2(&self.cpuid)
             .map_err(Error::SetSupportedCpusFailed)?;
 
-        arch::x86_64::regs::setup_msrs(&self.fd).map_err(Error::MSRSConfiguration)?;
+        arch::x86_64::msr::setup_msrs(&self.fd).map_err(Error::MSRSConfiguration)?;
         // Safe to unwrap because this method is called after the VM is configured
         let vm_memory = vm
             .get_memory()
