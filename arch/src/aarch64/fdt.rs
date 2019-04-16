@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn test_create_fdt_with_devices() {
         let regions = arch_memory_regions(layout::FDT_MAX_SIZE + 0x1000);
-        let mem = GuestMemory::new(&regions).expect("Cannot initialize memory");
+        let mem = GuestMemory::new_anon_from_tuples(&regions).expect("Cannot initialize memory");
 
         let dev_info: HashMap<(DeviceType, std::string::String), MMIODeviceInfo> = [
             (
@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn test_create_fdt() {
         let regions = arch_memory_regions(layout::FDT_MAX_SIZE + 0x1000);
-        let mem = GuestMemory::new(&regions).expect("Cannot initialize memory");
+        let mem = GuestMemory::new_anon_from_tuples(&regions).expect("Cannot initialize memory");
         let mut dtb = create_fdt(
             &mem,
             1,

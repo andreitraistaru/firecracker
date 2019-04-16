@@ -769,7 +769,7 @@ mod tests {
         bad_qlen: bool,
         bad_evtlen: bool,
     ) -> ActivateResult {
-        let m = GuestMemory::new(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)]).unwrap();
         let ievt = EventFd::new().unwrap();
         let stat = Arc::new(AtomicUsize::new(0));
 
@@ -803,7 +803,7 @@ mod tests {
 
     #[test]
     fn test_request_type() {
-        let m = &GuestMemory::new(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let m = &GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)]).unwrap();
         let a = GuestAddress(0);
 
         // We write values associated with different request type at an address in memory,
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn test_sector() {
-        let m = &GuestMemory::new(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let m = &GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)]).unwrap();
         let a = GuestAddress(0);
 
         // Here we test that a sector number is parsed correctly from memory. The actual sector
@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_parse() {
-        let m = &GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let m = &GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
         let vq = VirtQueue::new(GuestAddress(0), &m, 16);
 
         assert!(vq.end().0 < 0x1000);
@@ -1081,7 +1081,7 @@ mod tests {
 
     #[test]
     fn test_invalid_event_handler() {
-        let m = GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
         let (mut h, _vq) = default_test_blockepollhandler(&m);
         let r = h.handle_event(BLOCK_EVENTS_COUNT as DeviceEventT);
         match r {
@@ -1100,7 +1100,7 @@ mod tests {
     #[test]
     #[allow(clippy::cyclomatic_complexity)]
     fn test_handler() {
-        let m = GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
         let (mut h, vq) = default_test_blockepollhandler(&m);
 
         let blk_metadata = h.disk_image.metadata();

@@ -10,10 +10,12 @@
 
 use std;
 use std::io::{self, Read, Write};
+use std::os::unix::io::RawFd;
 use std::ptr::null_mut;
 
 use libc;
 
+use guest_address::GuestAddress;
 use DataInit;
 
 /// Errors associated with memory mapping.
@@ -27,12 +29,78 @@ pub enum Error {
     ReadFromSource(io::Error),
     /// `mmap` returned the given error.
     SystemCallFailed(io::Error),
-    /// Writing to memory failed
+    /// Writing to memory failed.
     WriteToMemory(io::Error),
-    /// Reading from memory failed
+    /// Reading from memory failed.
     ReadFromMemory(io::Error),
 }
 type Result<T> = std::result::Result<T, Error>;
+
+fn range_overlap(range1: (usize, usize), range2: (usize, usize)) -> bool {
+    let first_start = std::cmp::min(range1.0, range2.0);
+    let second_start = std::cmp::max(range1.0, range2.0);
+    let first_size = if first_start == range1.0 {
+        range1.1
+    } else {
+        range2.1
+    };
+    if first_start
+        .checked_add(first_size)
+        .map_or(true, |first_end| first_end > second_start)
+    {
+        return true;
+    }
+    false
+}
+
+/// Describes an anonymous memory region mapping.
+pub struct AnonMemoryDesc {
+    /// Guest physical address.
+    pub gpa: GuestAddress,
+    /// Size of the memory region.
+    pub size: usize,
+}
+
+impl AnonMemoryDesc {
+    /// Returns true if the two memory regions overlap.
+    pub fn overlap(&self, other: &AnonMemoryDesc) -> bool {
+        range_overlap((self.gpa.0, self.size), (other.gpa.0, other.size))
+    }
+}
+
+impl From<&(GuestAddress, usize)> for AnonMemoryDesc {
+    fn from(tuple: &(GuestAddress, usize)) -> Self {
+        AnonMemoryDesc {
+            gpa: tuple.0,
+            size: tuple.1,
+        }
+    }
+}
+
+/// Describes a file-backed memory region mapping.
+pub struct FileMemoryDesc {
+    /// Guest physical address.
+    pub gpa: GuestAddress,
+    /// Size of the memory region.
+    pub size: usize,
+    /// File descriptor of backing file.
+    pub fd: RawFd,
+    /// Offset in file where mapping starts.
+    pub offset: usize,
+    /// Visibility of mapping.
+    pub shared: bool,
+}
+
+impl FileMemoryDesc {
+    /// Returns true if the two memory region mappings overlap. Overlap occurs when either:
+    ///   1) The [`GuestAddress`](struct.GuestAddress.html)es overlap.
+    ///   2) The physical backings overlap.
+    pub fn overlap(&self, other: &FileMemoryDesc) -> bool {
+        range_overlap((self.gpa.0, self.size), (other.gpa.0, other.size))
+            || (self.fd == other.fd
+                && range_overlap((self.offset, self.size), (other.offset, other.size)))
+    }
+}
 
 /// Wraps an anonymous shared memory mapping in the current process.
 pub struct MemoryMapping {
@@ -48,19 +116,46 @@ unsafe impl Send for MemoryMapping {}
 unsafe impl Sync for MemoryMapping {}
 
 impl MemoryMapping {
-    /// Creates an anonymous shared mapping of `size` bytes.
+    /// Creates a shared memory mapping of described by a `FileMemoryDesc` descriptor.
     ///
     /// # Arguments
-    /// * `size` - Size of memory region in bytes.
-    pub fn new(size: usize) -> Result<MemoryMapping> {
-        // This is safe because we are creating an anonymous mapping in a place not already used by
-        // any other area in this process.
+    /// * `descriptor` - `FileMemoryDesc` describing mapping details.
+    pub fn new_file_backed(descriptor: &FileMemoryDesc) -> Result<MemoryMapping> {
+        let addr = unsafe {
+            libc::mmap(
+                null_mut(),
+                descriptor.size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_NORESERVE
+                    | if descriptor.shared {
+                        libc::MAP_SHARED
+                    } else {
+                        libc::MAP_PRIVATE
+                    },
+                descriptor.fd,
+                descriptor.offset as i64,
+            )
+        };
+        if addr == libc::MAP_FAILED {
+            return Err(Error::SystemCallFailed(io::Error::last_os_error()));
+        }
+        Ok(MemoryMapping {
+            addr: addr as *mut u8,
+            size: descriptor.size,
+        })
+    }
+
+    /// Creates an anonymous shared memory mapping.
+    ///
+    /// # Arguments
+    /// * `size` - Size of the memory mapping.
+    pub fn new_anon(size: usize) -> Result<MemoryMapping> {
         let addr = unsafe {
             libc::mmap(
                 null_mut(),
                 size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_ANONYMOUS | libc::MAP_SHARED | libc::MAP_NORESERVE,
+                libc::MAP_ANONYMOUS | libc::MAP_NORESERVE | libc::MAP_PRIVATE,
                 -1,
                 0,
             )
@@ -80,6 +175,17 @@ impl MemoryMapping {
         self.addr
     }
 
+    /// Memory syncs the underlying mappings for all regions.
+    pub fn sync(&self) -> io::Result<()> {
+        // Safe because we check the return value.
+        let ret = unsafe { libc::msync(self.addr as *mut libc::c_void, self.size, libc::MS_SYNC) };
+        if ret == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
     /// Returns the size of the memory region in bytes.
     pub fn size(&self) -> usize {
         self.size
@@ -95,7 +201,7 @@ impl MemoryMapping {
     ///
     /// ```
     /// #   use memory_model::MemoryMapping;
-    /// #   let mut mem_map = MemoryMapping::new(1024).unwrap();
+    /// #   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
     ///     let res = mem_map.write_slice(&[1,2,3,4,5], 256);
     ///     assert!(res.is_ok());
     ///     assert_eq!(res.unwrap(), 5);
@@ -123,7 +229,7 @@ impl MemoryMapping {
     ///
     /// ```
     /// #   use memory_model::MemoryMapping;
-    /// #   let mut mem_map = MemoryMapping::new(1024).unwrap();
+    /// #   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
     ///     let buf = &mut [0u8; 16];
     ///     let res = mem_map.read_slice(buf, 256);
     ///     assert!(res.is_ok());
@@ -150,7 +256,7 @@ impl MemoryMapping {
     ///
     /// ```
     /// #   use memory_model::MemoryMapping;
-    /// #   let mut mem_map = MemoryMapping::new(1024).unwrap();
+    /// #   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
     ///     let res = mem_map.write_obj(55u64, 16);
     ///     assert!(res.is_ok());
     /// ```
@@ -160,7 +266,7 @@ impl MemoryMapping {
             // volatile.  Writing to it with what compiles down to a memcpy
             // won't hurt anything as long as we get the bounds checks right.
             let (end, fail) = offset.overflowing_add(std::mem::size_of::<T>());
-            if fail || end > self.size() {
+            if fail || end > self.size {
                 return Err(Error::InvalidAddress);
             }
             std::ptr::write_volatile(&mut self.as_mut_slice()[offset..] as *mut _ as *mut T, val);
@@ -178,7 +284,7 @@ impl MemoryMapping {
     ///
     /// ```
     /// #   use memory_model::MemoryMapping;
-    /// #   let mut mem_map = MemoryMapping::new(1024).unwrap();
+    /// #   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
     ///     let res = mem_map.write_obj(55u64, 32);
     ///     assert!(res.is_ok());
     ///     let num: u64 = mem_map.read_obj(32).unwrap();
@@ -186,7 +292,7 @@ impl MemoryMapping {
     /// ```
     pub fn read_obj<T: DataInit>(&self, offset: usize) -> Result<T> {
         let (end, fail) = offset.overflowing_add(std::mem::size_of::<T>());
-        if fail || end > self.size() {
+        if fail || end > self.size {
             return Err(Error::InvalidAddress);
         }
         unsafe {
@@ -214,7 +320,7 @@ impl MemoryMapping {
     /// # use std::fs::File;
     /// # use std::path::Path;
     /// # fn test_read_random() -> Result<u32, ()> {
-    /// #     let mut mem_map = MemoryMapping::new(1024).unwrap();
+    /// #     let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
     ///       let mut file = File::open(Path::new("/dev/urandom")).map_err(|_| ())?;
     ///       mem_map.read_to_memory(32, &mut file, 128).map_err(|_| ())?;
     ///       let rand_val: u32 =  mem_map.read_obj(40).map_err(|_| ())?;
@@ -226,7 +332,7 @@ impl MemoryMapping {
         F: Read,
     {
         let (mem_end, fail) = mem_offset.overflowing_add(count);
-        if fail || mem_end > self.size() {
+        if fail || mem_end > self.size {
             return Err(Error::InvalidRange(mem_offset, count));
         }
         unsafe {
@@ -255,7 +361,7 @@ impl MemoryMapping {
     /// # use std::fs::File;
     /// # use std::path::Path;
     /// # fn test_write_null() -> Result<(), ()> {
-    /// #     let mut mem_map = MemoryMapping::new(1024).unwrap();
+    /// #     let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
     ///       let mut file = File::open(Path::new("/dev/null")).map_err(|_| ())?;
     ///       mem_map.write_from_memory(32, &mut file, 128).map_err(|_| ())?;
     /// #     Ok(())
@@ -266,7 +372,7 @@ impl MemoryMapping {
         F: Write,
     {
         let (mem_end, fail) = mem_offset.overflowing_add(count);
-        if fail || mem_end > self.size() {
+        if fail || mem_end > self.size {
             return Err(Error::InvalidRange(mem_offset, count));
         }
         unsafe {
@@ -315,13 +421,13 @@ mod tests {
 
     #[test]
     fn basic_map() {
-        let m = MemoryMapping::new(1024).unwrap();
+        let m = MemoryMapping::new_anon(1024).unwrap();
         assert_eq!(1024, m.size());
     }
 
     #[test]
     fn map_invalid_size() {
-        let res = MemoryMapping::new(0);
+        let res = MemoryMapping::new_anon(0);
         match res {
             Ok(_) => panic!("should panic!"),
             Err(err) => {
@@ -336,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_write_past_end() {
-        let m = MemoryMapping::new(5).unwrap();
+        let m = MemoryMapping::new_anon(5).unwrap();
         let res = m.write_slice(&[1, 2, 3, 4, 5, 6], 0);
         assert!(res.is_ok());
         assert_eq!(res.unwrap(), 5);
@@ -344,7 +450,7 @@ mod tests {
 
     #[test]
     fn slice_read_and_write() {
-        let mem_map = MemoryMapping::new(5).unwrap();
+        let mem_map = MemoryMapping::new_anon(5).unwrap();
         let sample_buf = [1, 2, 3];
         assert!(mem_map.write_slice(&sample_buf, 5).is_err());
         assert!(mem_map.write_slice(&sample_buf, 2).is_ok());
@@ -356,7 +462,7 @@ mod tests {
 
     #[test]
     fn obj_read_and_write() {
-        let mem_map = MemoryMapping::new(5).unwrap();
+        let mem_map = MemoryMapping::new_anon(5).unwrap();
         assert!(mem_map.write_obj(55u16, 4).is_err());
         assert!(mem_map.write_obj(55u16, core::usize::MAX).is_err());
         assert!(mem_map.write_obj(55u16, 2).is_ok());
@@ -367,7 +473,7 @@ mod tests {
 
     #[test]
     fn mem_read_and_write() {
-        let mem_map = MemoryMapping::new(5).unwrap();
+        let mem_map = MemoryMapping::new_anon(5).unwrap();
         assert!(mem_map.write_obj(!0u32, 1).is_ok());
         let mut file = File::open(Path::new("/dev/zero")).unwrap();
         assert!(mem_map

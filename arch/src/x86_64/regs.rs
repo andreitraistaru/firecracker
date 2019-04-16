@@ -276,7 +276,7 @@ mod tests {
     use memory_model::{GuestAddress, GuestMemory};
 
     fn create_guest_mem() -> GuestMemory {
-        GuestMemory::new(&[(GuestAddress(0), 0x10000)]).unwrap()
+        GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap()
     }
 
     fn read_u64(gm: &GuestMemory, offset: usize) -> u64 {

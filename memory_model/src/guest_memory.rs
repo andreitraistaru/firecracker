@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::{mem, result};
 
 use guest_address::GuestAddress;
-use mmap::{self, MemoryMapping};
+use mmap::{self, AnonMemoryDesc, FileMemoryDesc, MemoryMapping};
 use DataInit;
 
 /// Errors associated with handling guest memory regions.
@@ -30,6 +30,8 @@ pub enum Error {
     MemoryNotInitialized,
     /// Two of the memory regions are overlapping.
     MemoryRegionOverlap,
+    /// Syncing memory failed for one of the regions.
+    MemorySync(std::io::Error),
     /// No memory regions were provided for initializing the guest memory.
     NoMemoryRegions,
 }
@@ -60,35 +62,89 @@ pub struct GuestMemory {
 }
 
 impl GuestMemory {
-    /// Creates a container for guest memory regions.
-    /// Valid memory regions are specified as a Vec of (Address, Size) tuples sorted by Address.
-    pub fn new(ranges: &[(GuestAddress, usize)]) -> Result<GuestMemory> {
+    /// Maps and creates a container for guest memory regions as described by the argument.
+    ///
+    /// # Arguments
+    /// * `ranges` - a slice of `FileMemoryDesc` describing the guest memory mappings.
+    pub fn new_file_backed(ranges: &[FileMemoryDesc]) -> Result<GuestMemory> {
         if ranges.is_empty() {
             return Err(Error::NoMemoryRegions);
         }
 
-        let mut regions = Vec::<MemoryRegion>::new();
-        for range in ranges.iter() {
-            if let Some(last) = regions.last() {
-                if last
-                    .guest_base
-                    .checked_add(last.mapping.size())
-                    .map_or(true, |a| a > range.0)
-                {
+        // Guard against overlapping regions.
+        let mut iter = ranges.iter();
+        while let Some(range1) = iter.next() {
+            for range2 in iter.clone() {
+                if range1.overlap(range2) {
                     return Err(Error::MemoryRegionOverlap);
                 }
             }
+        }
 
-            let mapping = MemoryMapping::new(range.1).map_err(Error::MemoryMappingFailed)?;
+        let mut regions = Vec::<MemoryRegion>::with_capacity(ranges.len());
+        for range in ranges {
+            let mapping =
+                MemoryMapping::new_file_backed(range).map_err(Error::MemoryMappingFailed)?;
             regions.push(MemoryRegion {
                 mapping,
-                guest_base: range.0,
+                guest_base: range.gpa,
             });
         }
 
         Ok(GuestMemory {
             regions: Arc::new(regions),
         })
+    }
+
+    /// Maps and creates a container for anonymous guest memory given a list of memory regions.
+    ///
+    /// # Arguments
+    /// * `ranges` - a slice of `AnonMemoryDesc` describing guest memory regions.
+    pub fn new_anon(ranges: &[AnonMemoryDesc]) -> Result<GuestMemory> {
+        if ranges.is_empty() {
+            return Err(Error::NoMemoryRegions);
+        }
+
+        // Guard against overlapping regions.
+        let mut iter = ranges.iter();
+        while let Some(range1) = iter.next() {
+            for range2 in iter.clone() {
+                if range1.overlap(range2) {
+                    return Err(Error::MemoryRegionOverlap);
+                }
+            }
+        }
+
+        let mut regions = Vec::<MemoryRegion>::with_capacity(ranges.len());
+        for range in ranges {
+            let mapping =
+                MemoryMapping::new_anon(range.size).map_err(Error::MemoryMappingFailed)?;
+            regions.push(MemoryRegion {
+                mapping,
+                guest_base: range.gpa,
+            });
+        }
+
+        Ok(GuestMemory {
+            regions: Arc::new(regions),
+        })
+    }
+
+    /// Maps and creates a container for anonymous guest memory given a list of memory regions.
+    ///
+    /// # Arguments
+    /// * `ranges` - a slice of tuples `(GuestAddress, usize)` describing guest memory regions.
+    pub fn new_anon_from_tuples(ranges: &[(GuestAddress, usize)]) -> Result<GuestMemory> {
+        let descriptors: Vec<AnonMemoryDesc> = ranges.iter().map(AnonMemoryDesc::from).collect();
+        Self::new_anon(&descriptors)
+    }
+
+    /// Memory syncs the underlying mappings for all regions.
+    pub fn sync(&self) -> Result<()> {
+        for region in self.regions.iter() {
+            region.mapping.sync().map_err(Error::MemorySync)?;
+        }
+        Ok(())
     }
 
     /// Returns the end address of memory.
@@ -99,7 +155,7 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory, MemoryMapping};
     /// # fn test_end_addr() -> Result<(), ()> {
     ///     let start_addr = GuestAddress(0x1000);
-    ///     let mut gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    ///     let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
     ///     assert_eq!(start_addr.checked_add(0x400), Some(gm.end_addr()));
     ///     Ok(())
     /// # }
@@ -182,7 +238,7 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory, MemoryMapping};
     /// # fn test_write_u64() -> Result<(), ()> {
     /// #   let start_addr = GuestAddress(0x1000);
-    /// #   let mut gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    /// #   let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
     ///     let res = gm.write_slice_at_addr(&[1,2,3,4,5], GuestAddress(0x200)).map_err(|_| ())?;
     ///     assert_eq!(5, res);
     ///     Ok(())
@@ -208,7 +264,7 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory, MemoryMapping};
     /// # fn test_write_u64() -> Result<(), ()> {
     /// #   let start_addr = GuestAddress(0x1000);
-    /// #   let mut gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    /// #   let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
     ///     let buf = &mut [0u8; 16];
     ///     let res = gm.read_slice_at_addr(buf, GuestAddress(0x200)).map_err(|_| ())?;
     ///     assert_eq!(16, res);
@@ -243,7 +299,7 @@ impl GuestMemory {
     /// # fn test_read_u64() -> Result<u64, ()> {
     /// #     let start_addr1 = GuestAddress(0x0);
     /// #     let start_addr2 = GuestAddress(0x400);
-    /// #     let mut gm = GuestMemory::new(&vec![(start_addr1, 0x400), (start_addr2, 0x400)])
+    /// #     let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr1, 0x400), (start_addr2, 0x400)])
     /// #         .map_err(|_| ())?;
     ///       let num1: u64 = gm.read_obj_from_addr(GuestAddress(32)).map_err(|_| ())?;
     ///       let num2: u64 = gm.read_obj_from_addr(GuestAddress(0x400+32)).map_err(|_| ())?;
@@ -271,7 +327,7 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory, MemoryMapping};
     /// # fn test_write_u64() -> Result<(), ()> {
     /// #   let start_addr = GuestAddress(0x1000);
-    /// #   let mut gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    /// #   let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
     ///     gm.write_obj_at_addr(55u64, GuestAddress(0x1100))
     ///         .map_err(|_| ())
     /// # }
@@ -301,7 +357,7 @@ impl GuestMemory {
     /// # use std::path::Path;
     /// # fn test_read_random() -> Result<u32, ()> {
     /// #     let start_addr = GuestAddress(0x1000);
-    /// #     let gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    /// #     let gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
     ///       let mut file = File::open(Path::new("/dev/urandom")).map_err(|_| ())?;
     ///       let addr = GuestAddress(0x1010);
     ///       gm.read_to_memory(addr, &mut file, 128).map_err(|_| ())?;
@@ -343,7 +399,7 @@ impl GuestMemory {
     /// # use std::path::Path;
     /// # fn test_write_null() -> Result<(), ()> {
     /// #     let start_addr = GuestAddress(0x1000);
-    /// #     let gm = GuestMemory::new(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    /// #     let gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
     ///       let mut file = File::open(Path::new("/dev/null")).map_err(|_| ())?;
     ///       let addr = GuestAddress(0x1010);
     ///       gm.write_from_memory(addr, &mut file, 128).map_err(|_| ())?;
@@ -380,7 +436,7 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory};
     /// # fn test_host_addr() -> Result<(), ()> {
     ///     let start_addr = GuestAddress(0x1000);
-    ///     let mut gm = GuestMemory::new(&vec![(start_addr, 0x500)]).map_err(|_| ())?;
+    ///     let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x500)]).map_err(|_| ())?;
     ///     let addr = gm.get_host_address(GuestAddress(0x1200)).unwrap();
     ///     println!("Host address is {:p}", addr);
     ///     Ok(())
@@ -415,7 +471,7 @@ impl GuestMemory {
     /// # fn test_map_fold() -> Result<(), ()> {
     ///     let start_addr1 = GuestAddress(0x0);
     ///     let start_addr2 = GuestAddress(0x400);
-    ///     let mem = GuestMemory::new(&vec![(start_addr1, 1024), (start_addr2, 2048)]).unwrap();
+    ///     let mem = GuestMemory::new_anon_from_tuples(&vec![(start_addr1, 1024), (start_addr2, 2048)]).unwrap();
     ///     let total_size = mem.map_and_fold(
     ///         0,
     ///         |(_, region)| region.size() / 1024,
@@ -466,22 +522,31 @@ impl GuestMemory {
 
 #[cfg(test)]
 mod tests {
+    extern crate tempfile;
+
+    use self::tempfile::tempfile;
     use super::*;
     use std::fs::File;
     use std::mem;
+    use std::os::unix::io::AsRawFd;
     use std::path::Path;
 
     #[test]
     fn test_regions() {
         // No regions provided should return error.
         assert_eq!(
-            format!("{:?}", GuestMemory::new(&[]).err().unwrap()),
+            format!(
+                "{:?}",
+                GuestMemory::new_anon_from_tuples(&[]).err().unwrap()
+            ),
             format!("{:?}", Error::NoMemoryRegions)
         );
 
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x800);
-        let guest_mem = GuestMemory::new(&[(start_addr1, 0x400), (start_addr2, 0x400)]).unwrap();
+        let guest_mem =
+            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x400), (start_addr2, 0x400)])
+                .unwrap();
         assert_eq!(guest_mem.num_regions(), 2);
         assert!(guest_mem.address_in_range(GuestAddress(0x200)));
         assert!(!guest_mem.address_in_range(GuestAddress(0x600)));
@@ -492,13 +557,15 @@ mod tests {
         assert!(guest_mem.checked_offset(start_addr1, 0x900).is_some());
         assert!(guest_mem.checked_offset(start_addr1, 0x700).is_none());
         assert!(guest_mem.checked_offset(start_addr2, 0xc00).is_none());
+        assert!(guest_mem.sync().is_ok());
     }
 
     #[test]
     fn overlap_memory() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
-        let res = GuestMemory::new(&[(start_addr1, 0x2000), (start_addr2, 0x2000)]);
+        let res =
+            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x2000), (start_addr2, 0x2000)]);
         assert_eq!(
             format!("{:?}", res.err().unwrap()),
             format!("{:?}", Error::MemoryRegionOverlap)
@@ -512,7 +579,8 @@ mod tests {
         let bad_addr = GuestAddress(0x2001);
         let bad_addr2 = GuestAddress(0x1ffc);
 
-        let gm = GuestMemory::new(&[(start_addr1, 0x1000), (start_addr2, 0x1000)]).unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
+            .unwrap();
 
         let val1: u64 = 0xaa55_aa55_aa55_aa55;
         let val2: u64 = 0x55aa_55aa_55aa_55aa;
@@ -545,7 +613,7 @@ mod tests {
     #[test]
     fn write_and_read_slice() {
         let mut start_addr = GuestAddress(0x1000);
-        let gm = GuestMemory::new(&[(start_addr, 0x400)]).unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&[(start_addr, 0x400)]).unwrap();
         let sample_buf = &[1, 2, 3, 4, 5];
 
         assert_eq!(gm.write_slice_at_addr(sample_buf, start_addr).unwrap(), 5);
@@ -562,7 +630,7 @@ mod tests {
 
     #[test]
     fn read_to_and_write_from_mem() {
-        let gm = GuestMemory::new(&[(GuestAddress(0x1000), 0x400)]).unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0x1000), 0x400)]).unwrap();
         let addr = GuestAddress(0x1010);
         gm.write_obj_at_addr(!0u32, addr).unwrap();
         gm.read_to_memory(
@@ -588,7 +656,7 @@ mod tests {
             (GuestAddress(0x1000), region_size),
         ];
         let mut iterated_regions = Vec::new();
-        let gm = GuestMemory::new(&regions).unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&regions).unwrap();
 
         let res: Result<()> = gm.with_regions(|_, _, size, _| {
             assert_eq!(size, region_size);
@@ -615,7 +683,8 @@ mod tests {
     fn guest_to_host() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x100);
-        let mem = GuestMemory::new(&[(start_addr1, 0x100), (start_addr2, 0x400)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x100), (start_addr2, 0x400)])
+            .unwrap();
 
         // Verify the host addresses match what we expect from the mappings.
         let addr1_base = get_mapping(&mem, start_addr1).unwrap();
@@ -634,7 +703,8 @@ mod tests {
     fn test_map_fold() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x400);
-        let mem = GuestMemory::new(&[(start_addr1, 1024), (start_addr2, 2048)]).unwrap();
+        let mem =
+            GuestMemory::new_anon_from_tuples(&[(start_addr1, 1024), (start_addr2, 2048)]).unwrap();
 
         assert_eq!(
             mem.map_and_fold(
@@ -643,6 +713,149 @@ mod tests {
                 |acc, size| acc + size
             ),
             3
+        );
+    }
+
+    #[test]
+    fn test_memory_sync() {
+        let file = tempfile().unwrap();
+        let size = 0x100;
+        let ranges = [FileMemoryDesc {
+            gpa: GuestAddress(0),
+            size,
+            fd: file.as_raw_fd(),
+            offset: 0,
+            shared: false,
+        }];
+        let mem = GuestMemory::new_file_backed(&ranges).unwrap();
+        assert!(mem.sync().is_ok());
+
+        // Force munmap() memory so that sync() fails.
+        let paddr = mem.get_host_address(GuestAddress(0)).unwrap();
+        unsafe {
+            libc::munmap(paddr as *mut libc::c_void, size);
+        }
+        assert!(mem.sync().is_err());
+
+        // Don't run the destructor again as it is unsafe since we already `munmap`ed.
+        std::mem::forget(mem);
+    }
+
+    #[test]
+    fn test_invalid_fd_for_range_descriptors() {
+        let mut ranges = Vec::new();
+        let range = FileMemoryDesc {
+            gpa: GuestAddress(0),
+            size: 1024,
+            fd: -1,
+            offset: 0x100000,
+            shared: false,
+        };
+        ranges.push(range);
+        assert!(GuestMemory::new_file_backed(&ranges).is_err());
+    }
+
+    #[test]
+    fn test_invalid_offset_for_range_descriptors() {
+        let file = tempfile().unwrap();
+        let mut ranges = Vec::new();
+        let range = FileMemoryDesc {
+            gpa: GuestAddress(0),
+            size: 1024,
+            fd: file.as_raw_fd(),
+            offset: 3, // mmap needs page size multiples.
+            shared: false,
+        };
+        ranges.push(range);
+        let mem = GuestMemory::new_file_backed(&ranges);
+        assert!(mem.is_err());
+
+        let mut ranges = Vec::new();
+        let range = FileMemoryDesc {
+            gpa: GuestAddress(0),
+            size: std::usize::MAX / 2 + 3, // offset + size overflows.
+            fd: file.as_raw_fd(),
+            offset: std::usize::MAX / 2, // offset + size overflows.
+            shared: false,
+        };
+
+        ranges.push(range);
+        let mem = GuestMemory::new_file_backed(&ranges);
+        assert!(mem.is_err());
+    }
+
+    #[test]
+    fn test_valid_range_descriptors() {
+        let file = tempfile().unwrap();
+        let mut ranges = Vec::new();
+        let chunk_size = 0x100000;
+        let num_ranges = 5;
+        for i in { 0..num_ranges } {
+            let range = FileMemoryDesc {
+                gpa: GuestAddress(i * chunk_size),
+                size: chunk_size,
+                fd: file.as_raw_fd(),
+                offset: i * chunk_size,
+                shared: false,
+            };
+            ranges.push(range);
+        }
+        let mem = GuestMemory::new_file_backed(&ranges);
+        assert!(mem.is_ok());
+        assert_eq!(mem.unwrap().num_regions(), num_ranges);
+    }
+
+    #[test]
+    fn test_overlapping_range_descriptors() {
+        let file = tempfile().unwrap();
+        let chunk_size = 0x100000;
+        let num_ranges = 5;
+        let fd = file.as_raw_fd();
+        let create_ranges = move || {
+            let mut ranges = Vec::new();
+            for i in { 0..num_ranges } {
+                let range = FileMemoryDesc {
+                    gpa: GuestAddress(i * chunk_size),
+                    size: chunk_size,
+                    fd,
+                    offset: i * chunk_size,
+                    shared: false,
+                };
+                ranges.push(range);
+            }
+            ranges
+        };
+
+        let mut invalid_gpa_ranges = create_ranges();
+        let invalid_range = FileMemoryDesc {
+            gpa: GuestAddress(num_ranges * chunk_size / 2), // Overlaps with previous ranges.
+            size: chunk_size,
+            fd,
+            offset: num_ranges * chunk_size,
+            shared: false,
+        };
+        invalid_gpa_ranges.push(invalid_range);
+        let mem = GuestMemory::new_file_backed(&invalid_gpa_ranges);
+        assert!(mem.is_err());
+        assert_eq!(
+            format!("{:?}", mem.err().unwrap()),
+            format!("{:?}", Error::MemoryRegionOverlap)
+        );
+
+        let mut invalid_offset_ranges = create_ranges();
+        let invalid_range = FileMemoryDesc {
+            gpa: GuestAddress(num_ranges * chunk_size),
+            size: chunk_size,
+            fd,
+            offset: num_ranges * chunk_size / 2, // Overlaps with previous range.
+            shared: false,
+        };
+        invalid_offset_ranges.push(invalid_range);
+        let mem = GuestMemory::new_file_backed(&invalid_offset_ranges);
+        assert!(mem.is_err());
+        assert_eq!(
+            format!("{:?}", mem.err().unwrap()),
+            format!("{:?}", Error::MemoryRegionOverlap)
         );
     }
 }

@@ -1057,9 +1057,11 @@ impl Vmm {
                 memory_model::GuestMemoryError::MemoryNotInitialized,
             ))?
             << 20;
-        let arch_mem_regions = arch::arch_memory_regions(mem_size);
-        self.guest_memory =
-            Some(GuestMemory::new(&arch_mem_regions).map_err(StartMicrovmError::GuestMemory)?);
+
+        self.guest_memory = Some(
+            GuestMemory::new_anon_from_tuples(&arch::arch_memory_regions(mem_size))
+                .map_err(StartMicrovmError::GuestMemory)?,
+        );
         self.vm
             .memory_init(
                 self.guest_memory
