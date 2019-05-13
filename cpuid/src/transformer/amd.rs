@@ -2,12 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-
-use kvm_bindings::KVM_CPUID_FLAG_SIGNIFCANT_INDEX;
-use kvm_ioctls::CpuId;
-
 use bit_helper::BitHelper;
 use cpu_leaf::*;
+use kvm::CpuId;
+use kvm_bindings::KVM_CPUID_FLAG_SIGNIFCANT_INDEX;
 use transformer::common::use_host_cpuid_function;
 
 // Largest extended function. It has to be larger then 0x8000001d (Extended Cache Topology).

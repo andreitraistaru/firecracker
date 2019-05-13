@@ -8,10 +8,10 @@
 #![deny(missing_docs)]
 //! Utility for configuring the CPUID (CPU identification) for the guest microVM.
 
+extern crate kvm;
 extern crate kvm_bindings;
-extern crate kvm_ioctls;
 
-use kvm_ioctls::CpuId;
+use kvm::CpuId;
 
 mod common;
 use common::*;
@@ -43,10 +43,10 @@ mod brand_string;
 /// # Example
 /// ```
 /// extern crate cpuid;
-/// extern crate kvm_ioctls;
+/// extern crate kvm;
 ///
 /// use cpuid::filter_cpuid;
-/// use kvm_ioctls::{CpuId, Kvm, MAX_KVM_CPUID_ENTRIES};
+/// use kvm::{CpuId, Kvm, MAX_KVM_CPUID_ENTRIES};
 ///
 /// let kvm = Kvm::new().unwrap();
 /// let mut kvm_cpuid: CpuId = kvm.get_supported_cpuid(MAX_KVM_CPUID_ENTRIES).unwrap();

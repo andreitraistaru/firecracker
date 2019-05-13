@@ -14,8 +14,8 @@ use arch;
 #[cfg(target_arch = "x86_64")]
 use cpuid::{c3, filter_cpuid, t2};
 use default_syscalls;
+use kvm::*;
 use kvm_bindings::{kvm_pit_config, kvm_userspace_memory_region, KVM_PIT_SPEAKER_DUMMY};
-use kvm_ioctls::*;
 use logger::{LogOption, Metric, LOGGER, METRICS};
 use memory_model::{GuestAddress, GuestMemory, GuestMemoryError};
 use sys_util::EventFd;

@@ -13,7 +13,6 @@ extern crate chrono;
 extern crate epoll;
 extern crate futures;
 extern crate kvm_bindings;
-extern crate kvm_ioctls;
 extern crate libc;
 extern crate serde;
 #[macro_use]
@@ -28,6 +27,7 @@ extern crate cpuid;
 extern crate devices;
 extern crate fc_util;
 extern crate kernel;
+extern crate kvm;
 #[macro_use]
 extern crate logger;
 extern crate memory_model;
@@ -58,8 +58,6 @@ use std::sync::{Arc, Barrier, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use kvm_bindings::KVM_API_VERSION;
-use kvm_ioctls::{Cap, Kvm};
 use timerfd::{ClockId, SetTimeFlags, TimerFd, TimerState};
 
 #[cfg(target_arch = "aarch64")]
@@ -79,6 +77,7 @@ use devices::{DeviceEventT, EpollHandler};
 use fc_util::now_cputime_us;
 use kernel::cmdline as kernel_cmdline;
 use kernel::loader as kernel_loader;
+use kvm::*;
 use logger::error::LoggerError;
 use logger::{AppInfo, Level, LogOption, Metric, LOGGER, METRICS};
 use memory_model::{GuestAddress, GuestMemory};
@@ -149,7 +148,7 @@ pub enum Error {
     /// The host kernel reports an invalid KVM API version.
     KvmApiVersion(i32),
     /// Cannot initialize the KVM context due to missing capabilities.
-    KvmCap(kvm_ioctls::Cap),
+    KvmCap(kvm::Cap),
     /// Epoll wait failed.
     Poll(io::Error),
     /// Write to the serial console failed.
@@ -486,7 +485,7 @@ impl KvmContext {
 
         let kvm = Kvm::new().map_err(Error::Kvm)?;
 
-        if kvm.get_api_version() != KVM_API_VERSION as i32 {
+        if kvm.get_api_version() != kvm::KVM_API_VERSION as i32 {
             return Err(Error::KvmApiVersion(kvm.get_api_version()));
         }
 
@@ -1160,19 +1159,19 @@ impl Vmm {
 
         self.vm
             .get_fd()
-            .register_irqfd(self.legacy_device_manager.com_evt_1_3.as_raw_fd(), 4)
+            .register_irqfd(&self.legacy_device_manager.com_evt_1_3, 4)
             .map_err(|e| {
                 StartMicrovmError::LegacyIOBus(device_manager::legacy::Error::EventFd(e))
             })?;
         self.vm
             .get_fd()
-            .register_irqfd(self.legacy_device_manager.com_evt_2_4.as_raw_fd(), 3)
+            .register_irqfd(&self.legacy_device_manager.com_evt_2_4, 3)
             .map_err(|e| {
                 StartMicrovmError::LegacyIOBus(device_manager::legacy::Error::EventFd(e))
             })?;
         self.vm
             .get_fd()
-            .register_irqfd(self.legacy_device_manager.kbd_evt.as_raw_fd(), 1)
+            .register_irqfd(&self.legacy_device_manager.kbd_evt, 1)
             .map_err(|e| StartMicrovmError::LegacyIOBus(device_manager::legacy::Error::EventFd(e)))
     }
 
