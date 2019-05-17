@@ -182,7 +182,7 @@ impl MMIODeviceManager {
             Some(4),
         );
 
-        vm.register_irqfd(com_evt.as_raw_fd(), self.irq)
+        vm.register_irqfd(&com_evt, self.irq)
             .map_err(Error::RegisterIrqFd)?;
 
         self.bus
@@ -219,7 +219,7 @@ impl MMIODeviceManager {
         // Attaching the RTC device.
         let rtc_evt = sys_util::EventFd::new().map_err(Error::EventFd)?;
         let device = devices::legacy::RTC::new(rtc_evt.try_clone().map_err(Error::EventFd)?);
-        vm.register_irqfd(rtc_evt.as_raw_fd(), self.irq)
+        vm.register_irqfd(&rtc_evt, self.irq)
             .map_err(Error::RegisterIrqFd)?;
 
         self.bus

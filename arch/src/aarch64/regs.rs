@@ -7,7 +7,7 @@
 
 use std::{io, mem, result};
 
-use kvm_ioctls::VcpuFd;
+use kvm::VcpuFd;
 
 use super::get_fdt_addr;
 use kvm_bindings::{user_pt_regs, KVM_REG_ARM64, KVM_REG_ARM_CORE, KVM_REG_SIZE_U64};
@@ -113,7 +113,7 @@ pub fn setup_regs(vcpu: &VcpuFd, cpu_id: u8, boot_ip: usize, mem: &GuestMemory) 
 mod tests {
     use super::*;
     use aarch64::{arch_memory_regions, layout};
-    use kvm_ioctls::Kvm;
+    use kvm::Kvm;
 
     #[test]
     fn test_setup_regs() {

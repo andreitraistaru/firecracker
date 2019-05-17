@@ -3,7 +3,7 @@
 
 use std::{io, result};
 
-use kvm_ioctls::{DeviceFd, VmFd};
+use kvm::{DeviceFd, VmFd};
 
 // Unfortunately bindgen omits defines that are based on other defines.
 // See arch/arm64/include/uapi/asm/kvm.h file from the linux kernel.
@@ -125,7 +125,7 @@ pub fn get_redists_size(vcpu_count: u64) -> u64 {
 mod tests {
 
     use super::*;
-    use kvm_ioctls::Kvm;
+    use kvm::Kvm;
 
     #[test]
     fn test_create_gicv3() {

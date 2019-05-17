@@ -16,6 +16,7 @@ extern crate kvm_bindings;
 extern crate sys_util;
 
 mod cap;
+mod device;
 mod ioctl_defs;
 
 use std::fs::File;
@@ -38,6 +39,8 @@ use sys_util::{
 pub type Result<T> = result::Result<T, io::Error>;
 
 pub use cap::*;
+use device::new_device;
+pub use device::DeviceFd;
 use ioctl_defs::*;
 pub use kvm_bindings::KVM_API_VERSION;
 
@@ -544,6 +547,87 @@ impl VmFd {
 
         Ok(VcpuFd { vcpu, kvm_run_ptr })
     }
+
+    /// Creates an emulated device in the kernel.
+    ///
+    /// See the documentation for `KVM_CREATE_DEVICE`.
+    ///
+    /// # Arguments
+    ///
+    /// * `device`: device configuration. For details check the `kvm_create_device` structure in the
+    ///                [KVM API doc](https://www.kernel.org/doc/Documentation/virtual/kvm/api.txt).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # extern crate kvm;
+    /// # extern crate kvm_bindings;
+    /// # use kvm::{Kvm, VmFd, VcpuFd};
+    /// use kvm_bindings::{
+    ///     kvm_device_type_KVM_DEV_TYPE_VFIO,
+    ///     kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3,
+    ///     KVM_CREATE_DEVICE_TEST,
+    /// };
+    /// let kvm = Kvm::new().unwrap();
+    /// let vm = kvm.create_vm().unwrap();
+    ///
+    /// // Creating a device with the KVM_CREATE_DEVICE_TEST flag to check
+    /// // whether the device type is supported. This will not create the device.
+    /// // To create the device the flag needs to be removed.
+    /// let mut device = kvm_bindings::kvm_create_device {
+    ///     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    ///     type_: kvm_device_type_KVM_DEV_TYPE_VFIO,
+    ///     #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    ///     type_: kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3,
+    ///     fd: 0,
+    ///     flags: KVM_CREATE_DEVICE_TEST,
+    /// };
+    /// let device_fd = vm
+    ///     .create_device(&mut device).unwrap();
+    /// ```
+    ///
+    pub fn create_device(&self, device: &mut kvm_create_device) -> Result<DeviceFd> {
+        let ret = unsafe { ioctl_with_ref(self, KVM_CREATE_DEVICE(), device) };
+        if ret == 0 {
+            Ok(new_device(unsafe { File::from_raw_fd(device.fd as i32) }))
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    /// Returns the preferred CPU target type which can be emulated by KVM on underlying host.
+    ///
+    /// The preferred CPU target is returned in the `kvi` parameter.
+    /// See documentation for `KVM_ARM_PREFERRED_TARGET`.
+    ///
+    /// # Arguments
+    /// * `kvi` - CPU target configuration (out). For details check the `kvm_vcpu_init`
+    ///           structure in the
+    ///           [KVM API doc](https://www.kernel.org/doc/Documentation/virtual/kvm/api.txt).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # extern crate kvm;
+    /// # extern crate kvm_bindings;
+    /// # use kvm::{Kvm, VmFd, VcpuFd};
+    /// use kvm_bindings::kvm_vcpu_init;
+    /// let kvm = Kvm::new().unwrap();
+    /// let vm = kvm.create_vm().unwrap();
+    /// let mut kvi = kvm_vcpu_init::default();
+    /// vm.get_preferred_target(&mut kvi).unwrap();
+    /// ```
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    pub fn get_preferred_target(&self, kvi: &mut kvm_vcpu_init) -> Result<()> {
+        // The ioctl is safe because we allocated the struct and we know the
+        // kernel will write exactly the size of the struct.
+        let ret = unsafe { ioctl_with_mut_ref(self, KVM_ARM_PREFERRED_TARGET(), kvi) };
+        if ret != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 impl AsRawFd for VmFd {
@@ -828,6 +912,70 @@ impl VcpuFd {
         };
         if ret < 0 {
             // KVM_SET_MSRS actually returns the number of msr entries written.
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Sets the type of CPU to be exposed to the guest and optional features.
+    ///
+    /// This initializes an ARM vCPU to the specified type with the specified features
+    /// and resets the values of all of its registers to defaults. See the documentation for
+    /// `KVM_ARM_VCPU_INIT`.
+    ///
+    /// # Arguments
+    ///
+    /// * `kvi` - information about preferred CPU target type and recommended features for it.
+    ///           For details check the `kvm_vcpu_init` structure in the
+    ///           [KVM API doc](https://www.kernel.org/doc/Documentation/virtual/kvm/api.txt).
+    ///
+    /// # Example
+    /// ```rust
+    /// # extern crate kvm;
+    /// # extern crate kvm_bindings;
+    /// # use kvm::{Kvm, VmFd, VcpuFd};
+    /// use kvm_bindings::kvm_vcpu_init;
+    /// let kvm = Kvm::new().unwrap();
+    /// let vm = kvm.create_vm().unwrap();
+    /// let vcpu = vm.create_vcpu(0).unwrap();
+    ///
+    /// let mut kvi = kvm_vcpu_init::default();
+    /// vm.get_preferred_target(&mut kvi).unwrap();
+    /// vcpu.vcpu_init(&kvi).unwrap();
+    /// ```
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    pub fn vcpu_init(&self, kvi: &kvm_vcpu_init) -> Result<()> {
+        // This is safe because we allocated the struct and we know the kernel will read
+        // exactly the size of the struct.
+        let ret = unsafe { ioctl_with_ref(self, KVM_ARM_VCPU_INIT(), kvi) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Sets the value of one register for this vCPU.
+    ///
+    /// The id of the register is encoded as specified in the kernel documentation
+    /// for `KVM_SET_ONE_REG`.
+    ///
+    /// # Arguments
+    ///
+    /// * `reg_id` - ID of the register for which we are setting the value.
+    /// * `data` - value for the specified register.
+    ///
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    pub fn set_one_reg(&self, reg_id: u64, data: u64) -> Result<()> {
+        let data_ref = &data as *const u64;
+        let onereg = kvm_one_reg {
+            id: reg_id,
+            addr: data_ref as u64,
+        };
+        // This is safe because we allocated the struct and we know the kernel will read
+        // exactly the size of the struct.
+        let ret = unsafe { ioctl_with_ref(self, KVM_SET_ONE_REG(), &onereg) };
+        if ret < 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
