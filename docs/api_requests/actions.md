@@ -86,6 +86,38 @@ curl --unix-socket /tmp/firecracker.socket -i \
     }"
 ```
 
+## PauseVCPUs
+
+The `PauseVCPUs` pauses VCPUs, effectively pausing the microVM guest.
+
+### PauseVCPUs Example
+
+```bash
+curl --unix-socket /tmp/firecracker.socket -i \
+    -X PUT "http://localhost/actions" \
+    -H  "accept: application/json" \
+    -H  "Content-Type: application/json" \
+    -d "{
+             \"action_type\": \"PauseVCPUs\"
+    }"
+```
+
+## ResumeVCPUs
+
+The `ResumeVCPUs` resumes VCPUs, effectively resuming a paused microVM guest.
+
+### ResumeVCPUs Example
+
+```bash
+curl --unix-socket /tmp/firecracker.socket -i \
+    -X PUT "http://localhost/actions" \
+    -H  "accept: application/json" \
+    -H  "Content-Type: application/json" \
+    -d "{
+             \"action_type\": \"ResumeVCPUs\"
+    }"
+```
+
 ## SendCtrlAltDel
 
 This action will send the CTRL+ALT+DEL key sequence to the microVM. By

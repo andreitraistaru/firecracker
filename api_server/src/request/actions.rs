@@ -18,6 +18,8 @@ enum ActionType {
     BlockDeviceRescan,
     FlushMetrics,
     InstanceStart,
+    PauseVCPUs,
+    ResumeVCPUs,
     SendCtrlAltDel,
 }
 
@@ -48,8 +50,12 @@ fn validate_payload(action_body: &ActionBody) -> Result<(), String> {
                 None => Err("Payload is required for block device rescan.".to_string()),
             }
         }
-        ActionType::FlushMetrics | ActionType::InstanceStart | ActionType::SendCtrlAltDel => {
-            // Neither FlushMetrics nor InstanceStart should have a payload.
+        ActionType::FlushMetrics
+        | ActionType::InstanceStart
+        | ActionType::SendCtrlAltDel
+        | ActionType::PauseVCPUs
+        | ActionType::ResumeVCPUs => {
+            // These actions don't have a payload.
             if action_body.payload.is_some() {
                 return Err(format!(
                     "{:?} does not support a payload.",
@@ -92,6 +98,20 @@ impl IntoParsedRequest for ActionBody {
                     sync_receiver,
                 ))
             }
+            ActionType::PauseVCPUs => {
+                let (sync_sender, sync_receiver) = oneshot::channel();
+                Ok(ParsedRequest::Sync(
+                    VmmAction::PauseVCPUs(sync_sender),
+                    sync_receiver,
+                ))
+            }
+            ActionType::ResumeVCPUs => {
+                let (sync_sender, sync_receiver) = oneshot::channel();
+                Ok(ParsedRequest::Sync(
+                    VmmAction::ResumeVCPUs(sync_sender),
+                    sync_receiver,
+                ))
+            }
             ActionType::SendCtrlAltDel => {
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
@@ -105,36 +125,30 @@ impl IntoParsedRequest for ActionBody {
 
 #[cfg(test)]
 mod tests {
+    use super::ActionType::*;
     use super::*;
     use serde_json;
 
+    fn action_body_no_payload(action_type: ActionType) -> ActionBody {
+        ActionBody {
+            action_type,
+            payload: None,
+        }
+    }
+
+    fn action_body_dummy_payload(action_type: ActionType) -> ActionBody {
+        ActionBody {
+            action_type,
+            payload: Some(Value::String("dummy-payload".to_string())),
+        }
+    }
+
     #[test]
     fn test_validate_payload() {
-        // Test InstanceStart.
-        let action_body = ActionBody {
-            action_type: ActionType::InstanceStart,
-            payload: None,
-        };
-        assert!(validate_payload(&action_body).is_ok());
-        // Error case: InstanceStart with payload.
-        let action_body = ActionBody {
-            action_type: ActionType::InstanceStart,
-            payload: Some(Value::String("dummy-payload".to_string())),
-        };
-        assert!(validate_payload(&action_body).is_err());
-
-        // Test BlockDeviceRescan
-        let action_body = ActionBody {
-            action_type: ActionType::BlockDeviceRescan,
-            payload: Some(Value::String(String::from("dummy_id"))),
-        };
-        assert!(validate_payload(&action_body).is_ok());
+        // Test BlockDeviceRescan.
+        assert!(validate_payload(&action_body_dummy_payload(BlockDeviceRescan)).is_ok());
         // Error case: no payload.
-        let action_body = ActionBody {
-            action_type: ActionType::BlockDeviceRescan,
-            payload: None,
-        };
-        assert!(validate_payload(&action_body).is_err());
+        assert!(validate_payload(&action_body_no_payload(BlockDeviceRescan)).is_err());
         // Error case: payload is not String.
         let action_body = ActionBody {
             action_type: ActionType::BlockDeviceRescan,
@@ -143,37 +157,37 @@ mod tests {
         assert!(validate_payload(&action_body).is_err());
 
         // Test FlushMetrics.
-        let action_body = ActionBody {
-            action_type: ActionType::FlushMetrics,
-            payload: None,
-        };
-
-        assert!(validate_payload(&action_body).is_ok());
+        assert!(validate_payload(&action_body_no_payload(FlushMetrics)).is_ok());
         // Error case: FlushMetrics with payload.
-        let action_body = ActionBody {
-            action_type: ActionType::FlushMetrics,
-            payload: Some(Value::String("metrics-payload".to_string())),
-        };
-        let res = validate_payload(&action_body);
+        let res = validate_payload(&action_body_dummy_payload(FlushMetrics));
         assert!(res.is_err());
+        // Also test the error formatting.
         assert_eq!(res.unwrap_err(), "FlushMetrics does not support a payload.");
 
+        // Test InstanceStart.
+        assert!(validate_payload(&action_body_no_payload(InstanceStart)).is_ok());
+        // Error case: InstanceStart with payload.
+        assert!(validate_payload(&action_body_dummy_payload(InstanceStart)).is_err());
+
+        // Test PauseVCPUs.
+        assert!(validate_payload(&action_body_no_payload(PauseVCPUs)).is_ok());
+        // Error case: PauseVCPUs with payload.
+        assert!(validate_payload(&action_body_dummy_payload(PauseVCPUs)).is_err());
+
+        // Test ResumeVCPUs.
+        assert!(validate_payload(&action_body_no_payload(ResumeVCPUs)).is_ok());
+        // Error case: ResumeVCPUs with payload.
+        assert!(validate_payload(&action_body_dummy_payload(ResumeVCPUs)).is_err());
+
         // Test SendCtrlAltDel.
-        let action_body = ActionBody {
-            action_type: ActionType::SendCtrlAltDel,
-            payload: None,
-        };
-        assert!(validate_payload(&action_body).is_ok());
+        assert!(validate_payload(&action_body_no_payload(SendCtrlAltDel)).is_ok());
         // Error case: SendCtrlAltDel with payload.
-        let action_body = ActionBody {
-            action_type: ActionType::SendCtrlAltDel,
-            payload: Some(Value::String("dummy-payload".to_string())),
-        };
-        assert!(validate_payload(&action_body).is_err());
+        assert!(validate_payload(&action_body_dummy_payload(SendCtrlAltDel)).is_err());
     }
 
     #[test]
     fn test_into_parsed_request() {
+        // Test BlockDeviceRescan.
         {
             let json = r#"{
                 "action_type": "BlockDeviceRescan",
@@ -184,7 +198,6 @@ mod tests {
                 VmmAction::RescanBlockDevice("dummy_id".to_string(), sender),
                 receiver,
             );
-
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
             assert!(result
@@ -194,39 +207,7 @@ mod tests {
                 .eq(&req));
         }
 
-        {
-            let json = r#"{
-                "action_type": "InstanceStart"
-            }"#;
-
-            let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest = ParsedRequest::Sync(VmmAction::StartMicroVm(sender), receiver);
-            let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
-            assert!(result.is_ok());
-            assert!(result
-                .unwrap()
-                .into_parsed_request(None, Method::Put)
-                .unwrap()
-                .eq(&req));
-        }
-
-        {
-            let json = r#"{
-                "action_type": "SendCtrlAltDel"
-            }"#;
-
-            let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest =
-                ParsedRequest::Sync(VmmAction::SendCtrlAltDel(sender), receiver);
-            let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
-            assert!(result.is_ok());
-            assert!(result
-                .unwrap()
-                .into_parsed_request(None, Method::Put)
-                .unwrap()
-                .eq(&req));
-        }
-
+        // Test FlushMetrics.
         {
             let json = r#"{
                 "action_type": "FlushMetrics"
@@ -252,6 +233,75 @@ mod tests {
             let res = result.unwrap().into_parsed_request(None, Method::Put);
             assert!(res.is_err());
             assert!(res == Err("FlushMetrics does not support a payload.".to_string()));
+        }
+
+        // Test InstanceStart.
+        {
+            let json = r#"{
+                "action_type": "InstanceStart"
+            }"#;
+
+            let (sender, receiver) = oneshot::channel();
+            let req: ParsedRequest = ParsedRequest::Sync(VmmAction::StartMicroVm(sender), receiver);
+            let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
+            assert!(result.is_ok());
+            assert!(result
+                .unwrap()
+                .into_parsed_request(None, Method::Put)
+                .unwrap()
+                .eq(&req));
+        }
+
+        // Test PauseVCPUs.
+        {
+            let json = r#"{
+                "action_type": "PauseVCPUs"
+            }"#;
+
+            let (sender, receiver) = oneshot::channel();
+            let req: ParsedRequest = ParsedRequest::Sync(VmmAction::PauseVCPUs(sender), receiver);
+            let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
+            assert!(result.is_ok());
+            assert!(result
+                .unwrap()
+                .into_parsed_request(None, Method::Put)
+                .unwrap()
+                .eq(&req));
+        }
+
+        // Test ResumeVCPUs.
+        {
+            let json = r#"{
+                "action_type": "ResumeVCPUs"
+            }"#;
+
+            let (sender, receiver) = oneshot::channel();
+            let req: ParsedRequest = ParsedRequest::Sync(VmmAction::ResumeVCPUs(sender), receiver);
+            let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
+            assert!(result.is_ok());
+            assert!(result
+                .unwrap()
+                .into_parsed_request(None, Method::Put)
+                .unwrap()
+                .eq(&req));
+        }
+
+        // Test SendCtrlAltDel.
+        {
+            let json = r#"{
+                "action_type": "SendCtrlAltDel"
+            }"#;
+
+            let (sender, receiver) = oneshot::channel();
+            let req: ParsedRequest =
+                ParsedRequest::Sync(VmmAction::SendCtrlAltDel(sender), receiver);
+            let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
+            assert!(result.is_ok());
+            assert!(result
+                .unwrap()
+                .into_parsed_request(None, Method::Put)
+                .unwrap()
+                .eq(&req));
         }
     }
 }

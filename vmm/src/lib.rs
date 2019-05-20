@@ -410,10 +410,14 @@ pub enum VmmAction {
     /// `VsockDeviceConfig` as input. This action can only be called before the microVM has
     /// booted. The response is sent using the `OutcomeSender`.
     InsertVsockDevice(VsockDeviceConfig, OutcomeSender),
+    /// Pause the microVM VCPUs, effectively pausing the guest.
+    PauseVCPUs(OutcomeSender),
     /// Update the size of an existing block device specified by an ID. The ID is the first data
     /// associated with this enum variant. This action can only be called after the microVM is
     /// started. The response is sent using the `OutcomeSender`.
     RescanBlockDevice(String, OutcomeSender),
+    /// Resume the microVM VCPUs, thus resuming a paused guest.
+    ResumeVCPUs(OutcomeSender),
     /// Set the microVM configuration (memory & vcpu) using `VmConfig` as input. This
     /// action can only be called before the microVM has booted. The action
     /// response is sent using the `OutcomeSender`.
@@ -2060,8 +2064,14 @@ impl Vmm {
             VmmAction::InsertVsockDevice(vsock_cfg, sender) => {
                 Vmm::send_response(self.insert_vsock_device(vsock_cfg), sender);
             }
+            VmmAction::PauseVCPUs(sender) => {
+                Vmm::send_response(self.pause_vcpus(), sender);
+            }
             VmmAction::RescanBlockDevice(drive_id, sender) => {
                 Vmm::send_response(self.rescan_block_device(&drive_id), sender);
+            }
+            VmmAction::ResumeVCPUs(sender) => {
+                Vmm::send_response(self.resume_vcpus(), sender);
             }
             VmmAction::StartMicroVm(sender) => {
                 Vmm::send_response(self.start_microvm(), sender);
@@ -2105,40 +2115,43 @@ impl PartialEq for VmmAction {
     fn eq(&self, other: &VmmAction) -> bool {
         match (self, other) {
             (
-                &VmmAction::UpdateBlockDevicePath(ref drive_id, ref path_on_host, _),
-                &VmmAction::UpdateBlockDevicePath(ref other_drive_id, ref other_path_on_host, _),
-            ) => drive_id == other_drive_id && path_on_host == other_path_on_host,
-            (
                 &VmmAction::ConfigureBootSource(ref boot_source, _),
                 &VmmAction::ConfigureBootSource(ref other_boot_source, _),
             ) => boot_source == other_boot_source,
+            (
+                &VmmAction::ConfigureLogger(ref log, _),
+                &VmmAction::ConfigureLogger(ref other_log, _),
+            ) => log == other_log,
+            (&VmmAction::GetVmConfiguration(_), &VmmAction::GetVmConfiguration(_)) => true,
+            (&VmmAction::FlushMetrics(_), &VmmAction::FlushMetrics(_)) => true,
             (
                 &VmmAction::InsertBlockDevice(ref block_device, _),
                 &VmmAction::InsertBlockDevice(ref other_other_block_device, _),
             ) => block_device == other_other_block_device,
             (
-                &VmmAction::ConfigureLogger(ref log, _),
-                &VmmAction::ConfigureLogger(ref other_log, _),
-            ) => log == other_log,
-            (
-                &VmmAction::SetVmConfiguration(ref vm_config, _),
-                &VmmAction::SetVmConfiguration(ref other_vm_config, _),
-            ) => vm_config == other_vm_config,
-            (
                 &VmmAction::InsertNetworkDevice(ref net_dev, _),
                 &VmmAction::InsertNetworkDevice(ref other_net_dev, _),
             ) => net_dev == other_net_dev,
-            (
-                &VmmAction::UpdateNetworkInterface(ref net_dev, _),
-                &VmmAction::UpdateNetworkInterface(ref other_net_dev, _),
-            ) => net_dev == other_net_dev,
+            (&VmmAction::PauseVCPUs(_), &VmmAction::PauseVCPUs(_)) => true,
             (
                 &VmmAction::RescanBlockDevice(ref req, _),
                 &VmmAction::RescanBlockDevice(ref other_req, _),
             ) => req == other_req,
+            (&VmmAction::ResumeVCPUs(_), &VmmAction::ResumeVCPUs(_)) => true,
+            (
+                &VmmAction::SetVmConfiguration(ref vm_config, _),
+                &VmmAction::SetVmConfiguration(ref other_vm_config, _),
+            ) => vm_config == other_vm_config,
             (&VmmAction::StartMicroVm(_), &VmmAction::StartMicroVm(_)) => true,
             (&VmmAction::SendCtrlAltDel(_), &VmmAction::SendCtrlAltDel(_)) => true,
-            (&VmmAction::FlushMetrics(_), &VmmAction::FlushMetrics(_)) => true,
+            (
+                &VmmAction::UpdateBlockDevicePath(ref drive_id, ref path_on_host, _),
+                &VmmAction::UpdateBlockDevicePath(ref other_drive_id, ref other_path_on_host, _),
+            ) => drive_id == other_drive_id && path_on_host == other_path_on_host,
+            (
+                &VmmAction::UpdateNetworkInterface(ref net_dev, _),
+                &VmmAction::UpdateNetworkInterface(ref other_net_dev, _),
+            ) => net_dev == other_net_dev,
             _ => false,
         }
     }
