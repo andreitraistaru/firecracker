@@ -46,7 +46,7 @@ fn SIGRTMAX() -> c_int {
 ///
 /// * `signum`: signal number.
 ///
-fn validate_vcpu_signal_num(signum: c_int) -> io::Result<c_int> {
+pub fn validate_vcpu_signal_num(signum: c_int) -> io::Result<c_int> {
     let actual_num = signum + SIGRTMIN();
     if actual_num <= SIGRTMAX() {
         Ok(actual_num)

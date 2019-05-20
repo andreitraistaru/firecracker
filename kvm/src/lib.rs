@@ -1439,6 +1439,12 @@ impl VcpuFd {
         Ok(())
     }
 
+    /// Sets the `immediate_exit` flag on the `kvm_run` struct associated with this object to `val`.
+    pub fn set_kvm_immediate_exit(&self, val: u8) {
+        let kvm_run = self.kvm_run_ptr.as_mut_ref();
+        kvm_run.immediate_exit = val;
+    }
+
     /// Triggers the running of the current virtual CPU returning an exit reason.
     ///
     pub fn run(&self) -> Result<VcpuExit> {
@@ -1727,6 +1733,16 @@ mod tests {
                 .unwrap(),
             22
         );
+    }
+
+    #[test]
+    fn set_kvm_immediate_exit() {
+        let kvm = Kvm::new().unwrap();
+        let vm = kvm.create_vm().unwrap();
+        let vcpu = vm.create_vcpu(0).unwrap();
+        assert_eq!(vcpu.kvm_run_ptr.as_mut_ref().immediate_exit, 0);
+        vcpu.set_kvm_immediate_exit(1);
+        assert_eq!(vcpu.kvm_run_ptr.as_mut_ref().immediate_exit, 1);
     }
 
     #[cfg(target_arch = "x86_64")]

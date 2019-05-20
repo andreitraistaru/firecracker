@@ -5,8 +5,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+extern crate kvm_bindings;
+
+use libc::{c_int, c_void, siginfo_t, EINVAL};
+use std::cell::Cell;
 use std::io;
 use std::result;
+use std::sync::atomic::{fence, Ordering};
 use std::sync::{Arc, Barrier};
 
 use super::{KvmContext, TimestampUs};
@@ -18,7 +23,7 @@ use kvm::*;
 use kvm_bindings::{kvm_pit_config, kvm_userspace_memory_region, KVM_PIT_SPEAKER_DUMMY};
 use logger::{LogOption, Metric, LOGGER, METRICS};
 use memory_model::{GuestAddress, GuestMemory, GuestMemoryError};
-use sys_util::EventFd;
+use sys_util::{register_vcpu_signal_handler, EventFd};
 #[cfg(target_arch = "x86_64")]
 use vmm_config::machine_config::CpuFeaturesTemplate;
 use vmm_config::machine_config::VmConfig;
@@ -30,6 +35,8 @@ const MAGIC_IOPORT_SIGNAL_GUEST_BOOT_COMPLETE: u64 = 0x03f0;
 #[cfg(target_arch = "aarch64")]
 const MAGIC_IOPORT_SIGNAL_GUEST_BOOT_COMPLETE: u64 = 0x40000000;
 const MAGIC_VALUE_SIGNAL_GUEST_BOOT_COMPLETE: u8 = 123;
+
+pub(crate) const VCPU_RTSIG_OFFSET: i32 = 0;
 
 /// Errors associated with the wrappers over KVM ioctls.
 #[derive(Debug)]
@@ -213,7 +220,70 @@ pub struct Vcpu {
     create_ts: TimestampUs,
 }
 
+// Using this for easier explicit type-casting to help IDEs interpret the code.
+type VcpuCell = Cell<Option<*mut Vcpu>>;
+
 impl Vcpu {
+    thread_local!(static TLS_VCPU_PTR: VcpuCell = Cell::new(None));
+
+    /// Associates `self` with the current thread.
+    ///
+    /// Is a prerequisite to succesfully run `run_on_thread_local_vcpu()` on the current thread.
+    fn init_thread_local_data(&mut self) {
+        Self::TLS_VCPU_PTR.with(|cell: &VcpuCell| {
+            if cell.get().is_some() {
+                panic!("Thread already has a copy of a `Vcpu` pointer in its TLS.");
+            }
+            cell.set(Some(self as *mut Vcpu));
+        });
+    }
+
+    /// Deassociates `self` from the current thread.
+    ///
+    /// Should be called if the current `self` had called `init_thread_local_data()` and
+    /// now needs to move to a different thread.
+    ///
+    /// Returns EINVAL if `self` was not previously associated with the current thread.
+    fn reset_thread_local_data(&mut self) -> io::Result<()> {
+        // Best-effort to clean up TLS. If the `Vcpu` was moved to another thread
+        // _before_ running this, then there is nothing we can do.
+        let mut tls_contains_self = false;
+        Self::TLS_VCPU_PTR.with(|cell: &VcpuCell| {
+            if let Some(vcpu_ptr) = cell.get() {
+                if vcpu_ptr == self as *mut Vcpu {
+                    tls_contains_self = true;
+                }
+            }
+        });
+
+        if tls_contains_self {
+            Self::TLS_VCPU_PTR.with(|cell: &VcpuCell| cell.take());
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(EINVAL))
+        }
+    }
+
+    /// Runs `func` for the `Vcpu` associated with the current thread.
+    ///
+    /// It requires that `init_thread_local_data()` was run on this thread.
+    ///
+    /// Returns EINVAL if there is no `Vcpu` associated with the current thread.
+    fn run_on_thread_local_vcpu<F>(func: F) -> io::Result<()>
+    where
+        F: FnOnce(&mut Vcpu),
+    {
+        Self::TLS_VCPU_PTR.with(|cell: &VcpuCell| {
+            if let Some(vcpu_ptr) = cell.get() {
+                let vcpu_ref: &mut Vcpu = unsafe { &mut *vcpu_ptr };
+                func(vcpu_ref);
+                Ok(())
+            } else {
+                Err(io::Error::from_raw_os_error(EINVAL))
+            }
+        })
+    }
+
     /// Constructs a new VCPU for `vm`.
     ///
     /// # Arguments
@@ -407,6 +477,22 @@ impl Vcpu {
                     }
                 }
             }
+        }
+    }
+
+    /// Registers a signal handler which makes use of TLS and kvm immediate exit to
+    /// kick the vcpu running on the current thread, if there is one.
+    pub fn register_vcpu_kick_signal_handler() {
+        unsafe {
+            extern "C" fn handle_signal(_: c_int, _: *mut siginfo_t, _: *mut c_void) {
+                let _ = Vcpu::run_on_thread_local_vcpu(|vcpu| {
+                    vcpu.fd.set_kvm_immediate_exit(1);
+                    fence(Ordering::Release);
+                });
+            }
+            // This uses an async signal safe handler to kill the vcpu handles.
+            register_vcpu_signal_handler(VCPU_RTSIG_OFFSET, handle_signal)
+                .expect("Failed to register vcpu signal handler");
         }
     }
 
@@ -651,6 +737,42 @@ mod tests {
         .unwrap();
 
         assert!(vcpu.configure(&vm_config, GuestAddress(0), &vm).is_ok());
+    }
+
+    #[test]
+    fn vcpu_tls() {
+        let (_, mut vcpu) = setup_vcpu();
+
+        // Running on the TLS vcpu should fail before we actually initialize it.
+        assert!(Vcpu::run_on_thread_local_vcpu(|_| {}).is_err());
+
+        // Initialize vcpu TLS.
+        vcpu.init_thread_local_data();
+
+        // Validate TLS vcpu is the local vcpu by changing the `id` through the TLS
+        // interface, then validating it locally.
+        assert_eq!(vcpu.id, 1);
+        assert!(Vcpu::run_on_thread_local_vcpu(|v| v.id = 2).is_ok());
+        assert_eq!(vcpu.id, 2);
+
+        // Reset vcpu TLS.
+        assert!(vcpu.reset_thread_local_data().is_ok());
+
+        // Running on the TLS vcpu after TLS reset should fail.
+        assert!(Vcpu::run_on_thread_local_vcpu(|_| {}).is_err());
+
+        // Second reset should return EINVAL.
+        assert!(vcpu.reset_thread_local_data().is_err());
+    }
+
+    #[test]
+    #[should_panic]
+    fn invalid_tls() {
+        let (_, mut vcpu) = setup_vcpu();
+        // Initialize vcpu TLS.
+        vcpu.init_thread_local_data();
+        // Trying to initialize non-empty TLS should panic.
+        vcpu.init_thread_local_data();
     }
 
     #[test]
