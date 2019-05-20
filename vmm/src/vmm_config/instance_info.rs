@@ -77,6 +77,8 @@ pub enum StartMicrovmError {
     LoadCommandline(kernel::cmdline::Error),
     /// The start command was issued more than once.
     MicroVMAlreadyRunning,
+    /// The microVM hasn't been started.
+    MicroVMIsNotRunning,
     /// Cannot start the VM because the kernel was not configured.
     MissingKernelConfig,
     /// The net device configuration is missing the tap device.
@@ -173,6 +175,7 @@ impl Display for StartMicrovmError {
                 write!(f, "Cannot load command line string. {}", err_msg)
             }
             MicroVMAlreadyRunning => write!(f, "Microvm already running."),
+            MicroVMIsNotRunning => write!(f, "Microvm is not running."),
             MissingKernelConfig => write!(f, "Cannot start microvm without kernel configuration."),
             NetDeviceNotConfigured => {
                 write!(f, "The net device configuration is missing the tap device.")

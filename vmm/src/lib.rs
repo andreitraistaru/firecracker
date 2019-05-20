@@ -84,7 +84,7 @@ use memory_model::{GuestAddress, GuestMemory};
 use net_util::TapError;
 #[cfg(target_arch = "aarch64")]
 use serde_json::Value;
-use sys_util::{EventFd, Terminal};
+use sys_util::{EventFd, Killable, Terminal};
 use vmm_config::boot_source::{BootSourceConfig, BootSourceConfigError};
 use vmm_config::drive::{BlockDeviceConfig, BlockDeviceConfigs, DriveError};
 use vmm_config::instance_info::{InstanceInfo, InstanceState, StartMicrovmError};
@@ -96,7 +96,7 @@ use vmm_config::net::{
 };
 #[cfg(feature = "vsock")]
 use vmm_config::vsock::{VsockDeviceConfig, VsockDeviceConfigs, VsockError};
-use vstate::{Vcpu, Vm};
+use vstate::{Vcpu, VcpuEvent, Vm, VCPU_RTSIG_OFFSET};
 
 /// Default guest kernel command line:
 /// - `reboot=k` shut down the guest on reboot, instead of well... rebooting;
@@ -310,6 +310,7 @@ impl std::convert::From<StartMicrovmError> for VmmActionError {
             | StartMicrovmError::KernelCmdline(_)
             | StartMicrovmError::KernelLoader(_)
             | StartMicrovmError::MicroVMAlreadyRunning
+            | StartMicrovmError::MicroVMIsNotRunning
             | StartMicrovmError::MissingKernelConfig
             | StartMicrovmError::NetDeviceNotConfigured
             | StartMicrovmError::OpenBlockDevice(_)
@@ -492,7 +493,7 @@ impl KvmContext {
         check_cap(&kvm, Cap::Irqchip)?;
         check_cap(&kvm, Cap::Ioeventfd)?;
         check_cap(&kvm, Cap::Irqfd)?;
-        // check_cap(&kvm, Cap::ImmediateExit)?;
+        check_cap(&kvm, Cap::ImmediateExit)?;
         #[cfg(target_arch = "x86_64")]
         check_cap(&kvm, Cap::SetTssAddr)?;
         check_cap(&kvm, Cap::UserMemory)?;
@@ -713,6 +714,11 @@ struct KernelConfig {
     cmdline_addr: GuestAddress,
 }
 
+struct VcpuHandle {
+    event_sender: Sender<VcpuEvent>,
+    thread: thread::JoinHandle<()>,
+}
+
 struct Vmm {
     kvm: KvmContext,
 
@@ -722,7 +728,7 @@ struct Vmm {
     // Guest VM core resources.
     guest_memory: Option<GuestMemory>,
     kernel_config: Option<KernelConfig>,
-    vcpus_handles: Vec<thread::JoinHandle<()>>,
+    vcpus_handles: Vec<VcpuHandle>,
     exit_evt: Option<EpollEvent<EventFd>>,
     vm: Vm,
 
@@ -1209,7 +1215,7 @@ impl Vmm {
         &mut self,
         entry_addr: GuestAddress,
         request_ts: TimestampUs,
-    ) -> std::result::Result<Vec<Vcpu>, StartMicrovmError> {
+    ) -> std::result::Result<Vec<(Vcpu, Sender<VcpuEvent>)>, StartMicrovmError> {
         let vcpu_count = self
             .vm_config
             .vcpu_count
@@ -1218,16 +1224,39 @@ impl Vmm {
 
         for cpu_id in 0..vcpu_count {
             let io_bus = self.legacy_device_manager.io_bus.clone();
-            let mut vcpu = Vcpu::new(cpu_id, &self.vm, io_bus, request_ts.clone())
-                .map_err(StartMicrovmError::Vcpu)?;
+
+            // If the lock is poisoned, it's OK to panic.
+            let vcpu_exit_evt = self
+                .legacy_device_manager
+                .i8042
+                .lock()
+                .expect("Failed to start VCPUs due to poisoned i8042 lock")
+                .get_reset_evt_clone()
+                .map_err(|_| StartMicrovmError::EventFd)?;
+
+            let (vcpu_event_sender, vcpu_event_receiver) = channel();
+
+            let mut vcpu = Vcpu::new(
+                cpu_id,
+                &self.vm,
+                io_bus,
+                vcpu_exit_evt,
+                vcpu_event_receiver,
+                request_ts.clone(),
+            )
+            .map_err(StartMicrovmError::Vcpu)?;
+
             vcpu.configure(&self.vm_config, entry_addr, &self.vm)
                 .map_err(StartMicrovmError::VcpuConfigure)?;
-            vcpus.push(vcpu);
+            vcpus.push((vcpu, vcpu_event_sender));
         }
         Ok(vcpus)
     }
 
-    fn start_vcpus(&mut self, mut vcpus: Vec<Vcpu>) -> std::result::Result<(), StartMicrovmError> {
+    fn start_vcpus(
+        &mut self,
+        mut vcpus: Vec<(Vcpu, Sender<VcpuEvent>)>,
+    ) -> std::result::Result<(), StartMicrovmError> {
         // vm_config has a default value for vcpu_count.
         let vcpu_count = self
             .vm_config
@@ -1239,6 +1268,8 @@ impl Vmm {
             "The number of vCPU fds is corrupted!"
         );
 
+        Vcpu::register_vcpu_kick_signal_handler();
+
         self.vcpus_handles.reserve(vcpu_count as usize);
 
         let vcpus_thread_barrier = Arc::new(Barrier::new((vcpu_count + 1) as usize));
@@ -1246,31 +1277,24 @@ impl Vmm {
         // We're going in reverse so we can `.pop()` on the vec and still maintain order.
         for cpu_id in (0..vcpu_count).rev() {
             let vcpu_thread_barrier = vcpus_thread_barrier.clone();
-            // If the lock is poisoned, it's OK to panic.
-            let vcpu_exit_evt = self
-                .legacy_device_manager
-                .i8042
-                .lock()
-                .expect("Failed to start VCPUs due to poisoned i8042 lock")
-                .get_reset_evt_clone()
-                .map_err(|_| StartMicrovmError::EventFd)?;
 
             // `unwrap` is safe since we are asserting that the `vcpu_count` is equal to the number
             // of items of `vcpus` vector.
-            let mut vcpu = vcpus.pop().unwrap();
+            let (mut vcpu, vcpu_event_sender) = vcpus.pop().unwrap();
 
             if let Some(ref mmio_device_manager) = self.mmio_device_manager {
                 vcpu.set_mmio_bus(mmio_device_manager.bus.clone());
             }
             let seccomp_level = self.seccomp_level;
-            self.vcpus_handles.push(
-                thread::Builder::new()
+            self.vcpus_handles.push(VcpuHandle {
+                event_sender: vcpu_event_sender,
+                thread: thread::Builder::new()
                     .name(format!("fc_vcpu{}", cpu_id))
                     .spawn(move || {
-                        vcpu.run(vcpu_thread_barrier, seccomp_level, vcpu_exit_evt);
+                        vcpu.run(vcpu_thread_barrier, seccomp_level);
                     })
                     .map_err(StartMicrovmError::VcpuSpawn)?,
-            );
+            });
         }
 
         // Load seccomp filters for the VMM thread.
@@ -1490,16 +1514,26 @@ impl Vmm {
         }
     }
 
+    fn instance_state(&self) -> InstanceState {
+        // Use expect() to crash if the other thread poisoned this lock.
+        let shared_info = self.shared_info.read().expect(
+            "Failed to determine if instance is initialized because \
+             shared info couldn't be read due to poisoned lock",
+        );
+        shared_info.state.clone()
+    }
+
     fn is_instance_initialized(&self) -> bool {
-        let instance_state = {
-            // Use expect() to crash if the other thread poisoned this lock.
-            let shared_info = self.shared_info.read()
-                .expect("Failed to determine if instance is initialized because shared info couldn't be read due to poisoned lock");
-            shared_info.state.clone()
-        };
-        match instance_state {
+        match self.instance_state() {
             InstanceState::Uninitialized => false,
             _ => true,
+        }
+    }
+
+    fn is_instance_running(&self) -> bool {
+        match self.instance_state() {
+            InstanceState::Running => true,
+            _ => false,
         }
     }
 
@@ -1948,6 +1982,39 @@ impl Vmm {
             .send(outcome)
             .map_err(|_| ())
             .expect("one-shot channel closed");
+    }
+
+    fn pause_vcpus(&mut self) -> VmmRequestOutcome {
+        if !self.is_instance_running() {
+            Err(StartMicrovmError::MicroVMIsNotRunning)?;
+        }
+
+        for vcpu in self.vcpus_handles.iter() {
+            vcpu.event_sender
+                .send(VcpuEvent::Pause)
+                .expect("vCPU channel closed");
+            vcpu.thread
+                .kill(VCPU_RTSIG_OFFSET)
+                .expect("kill() failed on vCPU.");
+        }
+
+        Ok(VmmData::Empty)
+    }
+
+    fn resume_vcpus(&mut self) -> VmmRequestOutcome {
+        if !self.is_instance_running() {
+            Err(StartMicrovmError::MicroVMIsNotRunning)?;
+        }
+
+        for vcpu in self.vcpus_handles.iter() {
+            vcpu.event_sender
+                .send(VcpuEvent::Resume)
+                .expect("vCPU channel closed");
+            vcpu.thread
+                .kill(VCPU_RTSIG_OFFSET)
+                .expect("kill() failed on vCPU.");
+        }
+        Ok(VmmData::Empty)
     }
 
     fn run_vmm_action(&mut self) -> Result<()> {
@@ -2762,21 +2829,40 @@ mod tests {
     }
 
     #[test]
-    fn test_is_instance_initialized() {
+    fn microvm_start() {
+        let mut vmm = create_vmm_object(InstanceState::Uninitialized);
+
+        vmm.default_kernel_config(Some(good_kernel_file()));
+        // The kernel provided contains  "return 0" which will make the
+        // advanced seccomp filter return bad syscall so we disable it.
+        vmm.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
+        let res = vmm.start_microvm();
+        let stdin_handle = io::stdin();
+        stdin_handle.lock().set_canon_mode().unwrap();
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn instance_state() {
         let vmm = create_vmm_object(InstanceState::Uninitialized);
-        assert_eq!(vmm.is_instance_initialized(), false);
+        assert!(!vmm.is_instance_initialized());
+        assert!(!vmm.is_instance_running());
 
         let vmm = create_vmm_object(InstanceState::Starting);
-        assert_eq!(vmm.is_instance_initialized(), true);
+        assert!(vmm.is_instance_initialized());
+        assert!(!vmm.is_instance_running());
 
         let vmm = create_vmm_object(InstanceState::Halting);
-        assert_eq!(vmm.is_instance_initialized(), true);
+        assert!(vmm.is_instance_initialized());
+        assert!(!vmm.is_instance_running());
 
         let vmm = create_vmm_object(InstanceState::Halted);
-        assert_eq!(vmm.is_instance_initialized(), true);
+        assert!(vmm.is_instance_initialized());
+        assert!(!vmm.is_instance_running());
 
         let vmm = create_vmm_object(InstanceState::Running);
-        assert_eq!(vmm.is_instance_initialized(), true);
+        assert!(vmm.is_instance_initialized());
+        assert!(vmm.is_instance_running());
     }
 
     #[test]
