@@ -15,7 +15,7 @@ use vstate;
 /// Once start_microvm method is called, the state goes from Uninitialized to Starting.
 /// The state is changed to Running before ending the start_microvm method.
 /// Halting and Halted are currently unsupported.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub enum InstanceState {
     /// Microvm is not initialized.
     Uninitialized,
@@ -30,7 +30,7 @@ pub enum InstanceState {
 }
 
 /// The strongly typed that contains general information about the microVM.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct InstanceInfo {
     /// The ID of the microVM.
     pub id: String,

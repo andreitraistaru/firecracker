@@ -380,7 +380,6 @@ impl Vcpu {
         kernel_start_addr: GuestAddress,
         vm: &Vm,
     ) -> Result<()> {
-        // the MachineConfiguration has defaults for ht_enabled and vcpu_count hence it is safe to unwrap
         filter_cpuid(
             self.id,
             machine_config
@@ -668,6 +667,8 @@ mod tests {
     use super::*;
     use std::sync::mpsc::{channel, Sender};
 
+    use libc::EBADF;
+
     use sys_util::Killable;
 
     // Auxiliary function being used throughout the tests.
@@ -720,6 +721,21 @@ mod tests {
                 vm.get_supported_cpuid().as_mut_entries_slice(),
                 cpuid.as_mut_entries_slice()
             );
+        }
+
+        use super::Error::VmFd;
+        let faulty_kvm = unsafe { Kvm::new_with_fd_number(-1) };
+        match Vm::new(&faulty_kvm) {
+            Err(VmFd(_)) => (),
+            Err(e) => panic!(
+                "{:?} != {:?}.",
+                e,
+                VmFd(io::Error::from_raw_os_error(EBADF))
+            ),
+            Ok(_) => panic!(
+                "Expected error {:?}, got Ok()",
+                VmFd(io::Error::from_raw_os_error(EBADF))
+            ),
         }
     }
 
@@ -833,7 +849,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_configure_vcpu() {
-        let (vm, mut vcpu, _, _) = setup_vcpu();
+        let (mut vm, mut vcpu, _, _) = setup_vcpu();
 
         let vm_config = VmConfig::default();
         assert!(vcpu.configure(&vm_config, GuestAddress(0), &vm).is_ok());
@@ -847,6 +863,44 @@ mod tests {
         let mut vm_config = VmConfig::default();
         vm_config.cpu_template = Some(CpuFeaturesTemplate::C3);
         assert!(vcpu.configure(&vm_config, GuestAddress(0), &vm).is_ok());
+
+        // Test errors.
+        use super::Error::{GuestMemory, HTNotInitialized, VcpuCountNotInitialized};
+
+        let mut vm_config = VmConfig::default();
+        vm_config.vcpu_count = None;
+        // Expect Error::VcpuCountNotInitialized.
+        match vcpu.configure(&vm_config, GuestAddress(0), &vm) {
+            Err(VcpuCountNotInitialized) => (),
+            Err(e) => panic!("{:?} != {:?}.", e, VcpuCountNotInitialized),
+            Ok(()) => panic!("Expected error {:?}, got Ok()", VcpuCountNotInitialized),
+        };
+
+        let mut vm_config = VmConfig::default();
+        vm_config.ht_enabled = None;
+        // Expect Error::HTNotInitialized.
+        match vcpu.configure(&vm_config, GuestAddress(0), &vm) {
+            Err(HTNotInitialized) => (),
+            Err(e) => panic!("{:?} != {:?}.", e, HTNotInitialized),
+            Ok(()) => panic!("Expected error {:?}, got Ok()", HTNotInitialized),
+        };
+
+        use super::super::memory_model::GuestMemoryError;
+        let vm_config = VmConfig::default();
+        vm.guest_mem = None;
+        // Expect Error::GuestMemory.
+        match vcpu.configure(&vm_config, GuestAddress(0), &vm) {
+            Err(GuestMemory(_)) => (),
+            Err(e) => panic!(
+                "{:?} != {:?}.",
+                e,
+                GuestMemory(GuestMemoryError::MemoryNotInitialized)
+            ),
+            Ok(()) => panic!(
+                "Expected error {:?}, got Ok()",
+                GuestMemory(GuestMemoryError::MemoryNotInitialized)
+            ),
+        };
     }
 
     #[cfg(target_arch = "aarch64")]
