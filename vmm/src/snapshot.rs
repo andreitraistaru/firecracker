@@ -30,7 +30,7 @@ use kvm_bindings::{
 use vmm_config::machine_config::VmConfig;
 use vstate::{VcpuState, VmState};
 
-pub const SNAPSHOT_MAGIC: u64 = 0xEDA3_25D9_EDA3_25D9;
+pub(super) const SNAPSHOT_MAGIC: u64 = 0xEDA3_25D9_EDA3_25D9;
 
 // Snapshot flags.
 const VM_STATE_PRESENT: u64 = 1;
@@ -63,6 +63,7 @@ pub enum Error {
     InvalidFileType,
     InvalidSnapshot,
     InvalidSnapshotSize,
+    MissingSnapshot,
     MissingVcpuNum,
     MissingMemSize,
     Mmap(io::Error),
@@ -292,14 +293,6 @@ impl SnapshotImage {
         nmsrs: u32,
         ncpuids: u32,
     ) -> Result<SnapshotImage> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path.as_ref())
-            .map_err(Error::CreateNew)?;
-
         let vcpu_count = *vm_cfg.vcpu_count.as_ref().ok_or(Error::MissingVcpuNum)?;
         let mem_size_mib = *vm_cfg.mem_size_mib.as_ref().ok_or(Error::MissingMemSize)?;
 
@@ -313,6 +306,14 @@ impl SnapshotImage {
         let memory_offset = (((mapping_size - 1) / page_size) + 1) * page_size;
         let mem_size = mem_size_mib << 20;
         let file_size = memory_offset + mem_size;
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path.as_ref())
+            .map_err(Error::CreateNew)?;
         file.set_len(file_size as u64).map_err(Error::Truncate)?;
 
         // Any changes to the mapping should be visible on the snapshot file.
@@ -614,6 +615,7 @@ mod tests {
                 | Error::InvalidSnapshot
                 | Error::InvalidSnapshotSize
                 | Error::MissingVcpuNum
+                | Error::MissingSnapshot
                 | Error::MissingMemSize
                 | Error::Mmap(_)
                 | Error::Munmap(_)
@@ -630,6 +632,7 @@ mod tests {
                 (Error::InvalidSnapshot, Error::InvalidSnapshot) => true,
                 (Error::InvalidSnapshotSize, Error::InvalidSnapshotSize) => true,
                 (Error::MissingVcpuNum, Error::MissingVcpuNum) => true,
+                (Error::MissingSnapshot, Error::MissingSnapshot) => true,
                 (Error::MissingMemSize, Error::MissingMemSize) => true,
                 (Error::Mmap(_), Error::Mmap(_)) => true,
                 (Error::Munmap(_), Error::Munmap(_)) => true,

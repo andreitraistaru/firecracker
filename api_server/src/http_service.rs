@@ -817,6 +817,17 @@ mod tests {
         );
         assert_eq!(body_to_string(response.body()), err_message);
 
+        response = Error::InvalidID.into();
+        let json_err_val =
+            "API Resource IDs can only contain alphanumeric characters and underscores.";
+        let err_message = format!("{{\n  \"{}\": \"{}\"\n}}", &json_err_key, &json_err_val);
+        assert_eq!(response.status(), StatusCode::BadRequest);
+        assert_eq!(
+            response.headers().get::<ContentType>(),
+            Some(&ContentType::json())
+        );
+        assert_eq!(body_to_string(response.body()), err_message);
+
         let path = String::from("/foo");
         let method = Method::Options;
         response = Error::InvalidPathMethod(&path, method.clone()).into();
@@ -864,7 +875,24 @@ mod tests {
             Ok(pr) => {
                 let (sender, receiver) = oneshot::channel();
                 assert!(pr.eq(&ParsedRequest::Sync(
-                    VmmAction::StartMicroVm(sender),
+                    VmmAction::StartMicroVm(None, sender),
+                    receiver
+                )));
+            }
+            _ => assert!(false),
+        }
+
+        let json = "{
+                \"action_type\": \"InstanceStart\",
+                \"payload\": \"/tmp/foo\"
+              }";
+        let body: Chunk = Chunk::from(json);
+
+        match parse_actions_req(path, Method::Put, &body) {
+            Ok(pr) => {
+                let (sender, receiver) = oneshot::channel();
+                assert!(pr.eq(&ParsedRequest::Sync(
+                    VmmAction::StartMicroVm(Some("/tmp/foo".to_string()), sender),
                     receiver
                 )));
             }
@@ -906,7 +934,7 @@ mod tests {
         // Test PUT BadRequest due to invalid payload.
         let expected_err = Error::Generic(
             StatusCode::BadRequest,
-            "InstanceStart does not support a payload.".to_string(),
+            "Invalid payload type. Expected a string representing the snapshot path".to_string(),
         );
         let body = r#"{
             "action_type": "InstanceStart",
