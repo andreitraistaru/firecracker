@@ -314,7 +314,7 @@ impl Display for StartMicrovmError {
                 )
             }
             LegacyIOBus(ref err) => {
-                let mut err_msg = format!("{:?}", err);
+                let mut err_msg = format!("{}", err);
                 err_msg = err_msg.replace("\"", "");
 
                 write!(f, "Cannot add devices to the legacy I/O Bus. {}", err_msg)
@@ -377,7 +377,7 @@ impl Display for StartMicrovmError {
             SignalVcpu(ref err) => write!(f, "Failed to signal vCPU. {:?}", err),
             #[cfg(target_arch = "x86_64")]
             SnapshotBackingFile(ref err) => {
-                write!(f, "Cannot create snapshot backing file. {:?}", err)
+                write!(f, "Cannot create snapshot backing file: {}", err)
             }
             Vcpu(ref err) => {
                 let mut err_msg = format!("{:?}", err);
@@ -593,6 +593,18 @@ mod tests {
             )
         );
         assert_eq!(
+            format!(
+                "{}",
+                LegacyIOBus(device_manager::legacy::Error::EventFd(
+                    std::io::Error::from_raw_os_error(0)
+                ))
+            ),
+            format!(
+                "Cannot add devices to the legacy I/O Bus. {}",
+                device_manager::legacy::Error::EventFd(std::io::Error::from_raw_os_error(0))
+            )
+        );
+        assert_eq!(
             format!("{}", MicroVMInvalidState(StateError::MicroVMAlreadyRunning)),
             format!("{}", StateError::MicroVMAlreadyRunning)
         );
@@ -687,7 +699,7 @@ mod tests {
                 ))
             ),
             format!(
-                "Cannot create snapshot backing file. {:?}",
+                "Cannot create snapshot backing file: {}",
                 snapshot::Error::Truncate(std::io::Error::from_raw_os_error(0))
             )
         );

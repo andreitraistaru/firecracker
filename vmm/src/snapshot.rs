@@ -12,6 +12,7 @@
 
 extern crate kvm_bindings;
 
+use std::fmt::{self, Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
@@ -63,7 +64,6 @@ pub enum Error {
     InvalidFileType,
     InvalidSnapshot,
     InvalidSnapshotSize,
-    MissingSnapshot,
     MissingVcpuNum,
     MissingMemSize,
     Mmap(io::Error),
@@ -73,6 +73,28 @@ pub enum Error {
     Truncate(io::Error),
     VcpusNotSerialized,
     VmNotSerialized,
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        use self::Error::*;
+        match *self {
+            CreateNew(ref e) => write!(f, "Failed to create new snapshot file: {}", e),
+            InvalidVcpuIndex => write!(f, "Invalid vCPU index"),
+            InvalidFileType => write!(f, "Invalid snapshot file type"),
+            InvalidSnapshot => write!(f, "Invalid snapshot file"),
+            InvalidSnapshotSize => write!(f, "Invalid snapshot file size"),
+            MissingVcpuNum => write!(f, "Missing number of vCPUs"),
+            MissingMemSize => write!(f, "Missing guest memory size"),
+            Mmap(ref e) => write!(f, "Failed to map memory: {}", e),
+            Munmap(ref e) => write!(f, "Failed to unmap memory: {}", e),
+            MsyncHeader(ref e) => write!(f, "Failed to synchronize snapshot header: {}", e),
+            OpenExisting(ref e) => write!(f, "Failed to open snapshot file: {}", e),
+            Truncate(ref e) => write!(f, "Failed to truncate snapshot file: {}", e),
+            VcpusNotSerialized => write!(f, "vCPUs not serialized in the snapshot"),
+            VmNotSerialized => write!(f, "VM state not serialized in the snapshot"),
+        }
+    }
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -615,7 +637,6 @@ mod tests {
                 | Error::InvalidSnapshot
                 | Error::InvalidSnapshotSize
                 | Error::MissingVcpuNum
-                | Error::MissingSnapshot
                 | Error::MissingMemSize
                 | Error::Mmap(_)
                 | Error::Munmap(_)
@@ -632,7 +653,6 @@ mod tests {
                 (Error::InvalidSnapshot, Error::InvalidSnapshot) => true,
                 (Error::InvalidSnapshotSize, Error::InvalidSnapshotSize) => true,
                 (Error::MissingVcpuNum, Error::MissingVcpuNum) => true,
-                (Error::MissingSnapshot, Error::MissingSnapshot) => true,
                 (Error::MissingMemSize, Error::MissingMemSize) => true,
                 (Error::Mmap(_), Error::Mmap(_)) => true,
                 (Error::Munmap(_), Error::Munmap(_)) => true,
@@ -1029,5 +1049,67 @@ mod tests {
             && one.regs == other.regs
             && one.vcpu_events == other.vcpu_events
             && one.xcrs == other.xcrs
+    }
+
+    #[test]
+    fn test_error_messages() {
+        #[cfg(target_env = "musl")]
+        let err0_str = "No error information (os error 0)";
+        #[cfg(target_env = "gnu")]
+        let err0_str = "Success (os error 0)";
+
+        assert_eq!(
+            format!("{}", Error::CreateNew(io::Error::from_raw_os_error(0))),
+            format!("Failed to create new snapshot file: {}", err0_str)
+        );
+        assert_eq!(format!("{}", Error::InvalidVcpuIndex), "Invalid vCPU index");
+        assert_eq!(
+            format!("{}", Error::InvalidFileType),
+            "Invalid snapshot file type"
+        );
+        assert_eq!(
+            format!("{}", Error::InvalidSnapshot),
+            "Invalid snapshot file"
+        );
+        assert_eq!(
+            format!("{}", Error::InvalidSnapshotSize),
+            "Invalid snapshot file size"
+        );
+        assert_eq!(
+            format!("{}", Error::MissingVcpuNum),
+            "Missing number of vCPUs"
+        );
+        assert_eq!(
+            format!("{}", Error::MissingMemSize),
+            "Missing guest memory size"
+        );
+        assert_eq!(
+            format!("{}", Error::Mmap(io::Error::from_raw_os_error(0))),
+            format!("Failed to map memory: {}", err0_str)
+        );
+        assert_eq!(
+            format!("{}", Error::Munmap(io::Error::from_raw_os_error(0))),
+            format!("Failed to unmap memory: {}", err0_str)
+        );
+        assert_eq!(
+            format!("{}", Error::MsyncHeader(io::Error::from_raw_os_error(0))),
+            format!("Failed to synchronize snapshot header: {}", err0_str)
+        );
+        assert_eq!(
+            format!("{}", Error::OpenExisting(io::Error::from_raw_os_error(0))),
+            format!("Failed to open snapshot file: {}", err0_str)
+        );
+        assert_eq!(
+            format!("{}", Error::Truncate(io::Error::from_raw_os_error(0))),
+            format!("Failed to truncate snapshot file: {}", err0_str)
+        );
+        assert_eq!(
+            format!("{}", Error::VcpusNotSerialized),
+            "vCPUs not serialized in the snapshot"
+        );
+        assert_eq!(
+            format!("{}", Error::VmNotSerialized),
+            "VM state not serialized in the snapshot"
+        );
     }
 }
