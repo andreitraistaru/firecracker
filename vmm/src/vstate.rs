@@ -374,16 +374,19 @@ pub enum VcpuEvent {
 
 /// List of responses that the Vcpu reports.
 pub enum VcpuResponse {
+    #[cfg(target_arch = "x86_64")]
+    /// Vcpu is deserialized.
+    Deserialized,
     /// Vcpu is paused.
     Paused,
     /// Vcpu is paused to snapshot.
     #[cfg(target_arch = "x86_64")]
     PausedToSnapshot(Box<VcpuState>),
+    #[cfg(target_arch = "x86_64")]
     /// Vcpu is resumed.
     Resumed,
-    /// Vcpu is deserialized.
-    #[cfg(target_arch = "x86_64")]
-    Deserialized,
+    /// Vcpu state could not be saved.
+    SaveStateFailed(Error),
 }
 
 // Rustacean implementation of a state machine.
@@ -937,13 +940,16 @@ impl Vcpu {
             }
         }
 
+        // By default don't change state.
+        let mut state = StateStruct::next(Self::running);
+
         // Break this emulation loop on any transition request/external event.
         match self.event_receiver.try_recv() {
             // Running ---- Exit ----> Exited
             #[cfg(target_arch = "x86_64")]
             Ok(VcpuEvent::Exit) => {
                 // Move to 'exited' state.
-                StateStruct::next(Self::exited)
+                state = StateStruct::next(Self::exited);
             }
             // Running ---- Pause ----> Paused
             Ok(VcpuEvent::Pause) => {
@@ -952,7 +958,7 @@ impl Vcpu {
                     .send(VcpuResponse::Paused)
                     .expect("failed to send pause status");
                 // Move to 'paused' state.
-                StateStruct::next(Self::paused)
+                state = StateStruct::next(Self::paused);
             }
             #[cfg(target_arch = "x86_64")]
             Ok(VcpuEvent::PauseToSnapshot(thread_barrier)) => {
@@ -960,22 +966,33 @@ impl Vcpu {
                 thread_barrier.wait();
 
                 // Save vcpu state.
-                let vcpu_state = self.save_state().expect("failed to get vcpu state");
-                self.response_sender
-                    .send(VcpuResponse::PausedToSnapshot(Box::new(vcpu_state)))
-                    .expect("failed to send vcpu state");
+                self.save_state()
+                    .map(|vcpu_state| {
+                        self.response_sender
+                            .send(VcpuResponse::PausedToSnapshot(Box::new(vcpu_state)))
+                            .expect("failed to send vcpu state");
 
-                // Move to 'paused' state.
-                StateStruct::next(Self::paused)
+                        // Finish run in 'snapshotted' state.
+                        state = StateStruct::next(Self::paused);
+                    })
+                    .map_err(|e| self.response_sender.send(VcpuResponse::SaveStateFailed(e)))
+                    .expect("failed to send vcpu state");
+            }
+            Ok(VcpuEvent::Resume) => {
+                self.response_sender
+                    .send(VcpuResponse::Resumed)
+                    .expect("failed to send resume status");
             }
             // Unhandled exit of the other end.
             Err(TryRecvError::Disconnected) => {
                 // Move to 'exited' state.
-                StateStruct::next(Self::exited)
+                state = StateStruct::next(Self::exited);
             }
             // All other events or lack thereof have no effect on current 'running' state.
-            Ok(_) | Err(TryRecvError::Empty) => StateStruct::next(Self::running),
+            Ok(_) | Err(TryRecvError::Empty) => (),
         }
+
+        state
     }
 
     // This is the main loop of the `Paused` state.
@@ -1180,13 +1197,16 @@ mod tests {
             use VcpuResponse::*;
             // Guard match with no wildcard to make sure we catch new enum variants.
             match self {
-                Paused | PausedToSnapshot(_) | Resumed | Deserialized => (),
+                Deserialized | Paused | PausedToSnapshot(_) | Resumed | SaveStateFailed(_) => (),
             };
             match (self, other) {
+                (Deserialized, Deserialized) => true,
                 (Paused, Paused) => true,
                 (PausedToSnapshot(_), PausedToSnapshot(_)) => true,
                 (Resumed, Resumed) => true,
-                (Deserialized, Deserialized) => true,
+                (SaveStateFailed(ref err), SaveStateFailed(ref other_err)) => {
+                    format!("{:?}", err) == format!("{:?}", other_err)
+                }
                 _ => false,
             }
         }
@@ -1196,10 +1216,11 @@ mod tests {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             use VcpuResponse::*;
             match self {
+                Deserialized => write!(f, "VcpuResponse::Deserialized"),
                 Paused => write!(f, "VcpuResponse::Paused"),
                 PausedToSnapshot(_) => write!(f, "VcpuResponse::PausedToSnapshot"),
                 Resumed => write!(f, "VcpuResponse::Resumed"),
-                Deserialized => write!(f, "VcpuResponse::Deserialized"),
+                SaveStateFailed(ref err) => write!(f, "VcpuResponse::SaveStateFailed({:?})", err),
             }
         }
     }
@@ -1763,8 +1784,8 @@ mod tests {
         // Queue a Resume event, expect a response.
         queue_event_expect_response(&vcpu_handle, VcpuEvent::Resume, VcpuResponse::Resumed);
 
-        // Queue another Resume event, expect no answer.
-        queue_event_expect_timeout(&vcpu_handle, VcpuEvent::Resume);
+        // Queue another Resume event, expect a response.
+        queue_event_expect_response(&vcpu_handle, VcpuEvent::Resume, VcpuResponse::Resumed);
 
         // Queue another Pause event, expect a response.
         queue_event_expect_response(&vcpu_handle, VcpuEvent::Pause, VcpuResponse::Paused);

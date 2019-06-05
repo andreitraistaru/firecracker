@@ -54,7 +54,7 @@ use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::result;
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Barrier, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -81,7 +81,7 @@ use kernel::loader as kernel_loader;
 use kvm::*;
 use logger::error::LoggerError;
 use logger::{AppInfo, Level, LogOption, Metric, LOGGER, METRICS};
-use memory_model::{FileMemoryDesc, GuestAddress, GuestMemory};
+use memory_model::{FileMemoryDesc, GuestAddress, GuestMemory, GuestMemoryError};
 use net_util::TapError;
 #[cfg(target_arch = "aarch64")]
 use serde_json::Value;
@@ -325,7 +325,7 @@ impl std::convert::From<PauseMicrovmError> for VmmActionError {
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(_) => ErrorKind::User,
             VcpuPause => ErrorKind::User,
-            InvalidSnapshot | SaveVmState(_) | SaveVcpuState | StopVcpus(_) | SyncMemory(_)
+            InvalidSnapshot | SaveVmState(_) | SaveVcpuState(_) | StopVcpus(_) | SyncMemory(_)
             | SignalVcpu(_) => ErrorKind::Internal,
             #[cfg(target_arch = "x86_64")]
             SerializeVcpu(_) | SyncHeader(_) => ErrorKind::Internal,
@@ -2156,6 +2156,86 @@ impl Vmm {
         Ok(())
     }
 
+    fn initiate_vcpu_pause(&mut self) -> VmmRequestOutcome {
+        let vcpus_thread_barrier = Arc::new(Barrier::new(self.vcpus_handles.len() + 1));
+        for handle in self.vcpus_handles.iter() {
+            handle
+                .send_event(VcpuEvent::PauseToSnapshot(vcpus_thread_barrier.clone()))
+                .map_err(PauseMicrovmError::SignalVcpu)?;
+        }
+        // All vcpus need to be out of KVM_RUN before trying serialization.
+        vcpus_thread_barrier.wait();
+        Ok(VmmData::Empty)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn serialize_microvm(&mut self) -> VmmRequestOutcome {
+        // Retrieve the vcpus states and serialize them.
+        // Should any fail, force-resume all.
+        // Consume the responses from all vCPUs; otherwise, if the `?` operator breaks the loop
+        // while a `VcpuResponse` is still pending, it will be consumed at the next run, where
+        // it will most likely be unexpected.
+        let responses = self
+            .vcpus_handles
+            .iter()
+            .map(|handle| {
+                handle
+                    .response_receiver()
+                    .recv_timeout(Duration::from_millis(400))
+            })
+            .collect::<std::result::Result<Vec<VcpuResponse>, RecvTimeoutError>>()
+            .map_err(|_| PauseMicrovmError::VcpuPause)?;
+
+        // Check that all the vCPUs responded with `PausedToSnapshot`.
+        responses
+            .iter()
+            .find(|resp| match resp {
+                VcpuResponse::PausedToSnapshot(_) => false,
+                _ => true,
+            })
+            .map(|_| PauseMicrovmError::SaveVcpuState(None));
+
+        // Serialize kvm VM state after the vCPUs are paused.
+        self.snapshot_image
+            .as_mut()
+            .ok_or(PauseMicrovmError::InvalidSnapshot)?
+            .set_kvm_vm_state(
+                self.vm
+                    .save_state()
+                    .map_err(PauseMicrovmError::SaveVmState)?,
+            );
+
+        for (idx, response) in responses.into_iter().enumerate() {
+            match response {
+                VcpuResponse::PausedToSnapshot(vcpu_state) => self
+                    .snapshot_image
+                    .as_mut()
+                    .unwrap()
+                    .serialize_vcpu(idx, vcpu_state)
+                    .map_err(PauseMicrovmError::SerializeVcpu)?,
+                VcpuResponse::SaveStateFailed(err) => {
+                    Err(PauseMicrovmError::SaveVcpuState(Some(err)))?
+                }
+                _ => Err(PauseMicrovmError::SaveVcpuState(None))?,
+            }
+        }
+
+        // Persist the snapshot header and the guest memory.
+        self.snapshot_image
+            .as_mut()
+            .ok_or(PauseMicrovmError::InvalidSnapshot)?
+            .sync_header()
+            .map_err(PauseMicrovmError::SyncHeader)?;
+        self.guest_memory
+            .as_ref()
+            .ok_or(PauseMicrovmError::SyncMemory(
+                GuestMemoryError::MemoryNotInitialized,
+            ))?
+            .sync()
+            .map_err(PauseMicrovmError::SyncMemory)?;
+        Ok(VmmData::Empty)
+    }
+
     #[cfg(target_arch = "x86_64")]
     fn pause_to_snapshot(&mut self) -> VmmRequestOutcome {
         let request_ts = TimestampUs {
@@ -2166,56 +2246,19 @@ impl Vmm {
         self.validate_vcpus_are_active()
             .map_err(PauseMicrovmError::MicroVMInvalidState)?;
 
-        if self.snapshot_image.is_none() {
-            Err(PauseMicrovmError::OpenSnapshotFile(
-                snapshot::Error::MissingSnapshot,
-            ))?;
-        };
-
         // Signal vcpus to pause to snapshot.
-        let vcpus_thread_barrier = Arc::new(Barrier::new(self.vcpus_handles.len() + 1));
-        for handle in self.vcpus_handles.iter() {
-            handle
-                .send_event(VcpuEvent::PauseToSnapshot(vcpus_thread_barrier.clone()))
-                .map_err(PauseMicrovmError::SignalVcpu)?;
-        }
-        // All vcpus need to be out of KVM_RUN before trying serialization.
-        vcpus_thread_barrier.wait();
+        self.initiate_vcpu_pause().map_err(|e| {
+            self.resume_vcpus()
+                .expect("Failed to resume vCPUs after an unsuccessful microVM pause");
+            e
+        })?;
 
-        // Serialize kvm VM state.
-        self.snapshot_image.as_mut().unwrap().set_kvm_vm_state(
-            self.vm
-                .save_state()
-                .map_err(PauseMicrovmError::SaveVmState)?,
-        );
-
-        // Retrieve the vcpus states and serialize them.
-        for (idx, mut handle) in self.vcpus_handles.iter().enumerate() {
-            match handle
-                .response_receiver()
-                .recv_timeout(Duration::from_millis(100))
-            {
-                Ok(VcpuResponse::PausedToSnapshot(vcpu_state)) => {
-                    self.snapshot_image
-                        .as_mut()
-                        .unwrap()
-                        .serialize_vcpu(idx, *vcpu_state)
-                        .map_err(PauseMicrovmError::SerializeVcpu)?;
-                }
-                _ => Err(PauseMicrovmError::SaveVcpuState)?,
-            }
-        }
-
-        self.snapshot_image
-            .as_mut()
-            .unwrap()
-            .sync_header()
-            .map_err(PauseMicrovmError::SyncHeader)?;
-        self.guest_memory
-            .as_ref()
-            .unwrap()
-            .sync()
-            .map_err(PauseMicrovmError::SyncMemory)?;
+        // Serialize vCPUs and guest memory.
+        self.serialize_microvm().map_err(|e| {
+            self.resume_vcpus()
+                .expect("Failed to resume vCPUs after an unsuccessful microVM pause");
+            e
+        })?;
 
         // This will also notify the VMM (current) thread and will lead to firecracker exit.
         self.kill_vcpus().map_err(PauseMicrovmError::StopVcpus)?;
@@ -3855,7 +3898,8 @@ mod tests {
             vmm1.snapshot_image = None;
             assert!(vmm1.pause_to_snapshot().is_err());
             vmm1.snapshot_image = tmp_img;
-            assert!(vmm1.pause_to_snapshot().is_ok());
+            vmm1.pause_to_snapshot().unwrap();
+            //            assert!(vmm1.pause_to_snapshot().is_ok());
         }
 
         // Wait a bit to make sure all the kvm resources associated with this thread are released.
@@ -4097,6 +4141,18 @@ mod tests {
     #[allow(clippy::cyclomatic_complexity)]
     fn test_start_microvm_error_conversion_mv() {
         assert_eq!(
+            error_kind(StartMicrovmError::MicroVMInvalidState(
+                StateError::MicroVMAlreadyRunning
+            )),
+            ErrorKind::User
+        );
+        assert_eq!(
+            error_kind(StartMicrovmError::MicroVMInvalidState(
+                StateError::VcpusInvalidState
+            )),
+            ErrorKind::Internal
+        );
+        assert_eq!(
             error_kind(StartMicrovmError::MissingKernelConfig),
             ErrorKind::User
         );
@@ -4191,7 +4247,7 @@ mod tests {
             ErrorKind::User
         );
         assert_eq!(
-            error_kind(PauseMicrovmError::SaveVcpuState),
+            error_kind(PauseMicrovmError::SaveVcpuState(None)),
             ErrorKind::Internal
         );
         assert_eq!(
@@ -4414,9 +4470,12 @@ mod tests {
         assert_eq!(
             format!(
                 "{:?}",
-                VmmActionError::PauseMicrovm(ErrorKind::Internal, PauseMicrovmError::SaveVcpuState)
+                VmmActionError::PauseMicrovm(
+                    ErrorKind::Internal,
+                    PauseMicrovmError::SaveVcpuState(None)
+                )
             ),
-            "PauseMicrovm(Internal, SaveVcpuState)"
+            "PauseMicrovm(Internal, SaveVcpuState(None))"
         );
         assert_eq!(
             format!(
@@ -4519,9 +4578,22 @@ mod tests {
         assert_eq!(
             format!(
                 "{}",
-                VmmActionError::PauseMicrovm(ErrorKind::User, PauseMicrovmError::SaveVcpuState)
+                VmmActionError::PauseMicrovm(
+                    ErrorKind::User,
+                    PauseMicrovmError::SaveVcpuState(None)
+                )
             ),
             "Failed to save vCPU state."
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                VmmActionError::PauseMicrovm(
+                    ErrorKind::User,
+                    PauseMicrovmError::SaveVcpuState(Some(vstate::Error::VcpuCountNotInitialized))
+                )
+            ),
+            "Failed to save vCPU state: VcpuCountNotInitialized"
         );
         assert_eq!(
             format!(

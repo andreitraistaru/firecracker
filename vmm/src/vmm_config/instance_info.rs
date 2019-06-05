@@ -96,7 +96,7 @@ pub enum PauseMicrovmError {
     #[cfg(target_arch = "x86_64")]
     OpenSnapshotFile(snapshot::Error),
     /// Failed to save vCPU state.
-    SaveVcpuState,
+    SaveVcpuState(Option<vstate::Error>),
     /// Failed to save VM state.
     SaveVmState(vstate::Error),
     /// Failed to serialize vCPU state.
@@ -123,7 +123,10 @@ impl Display for PauseMicrovmError {
             MicroVMInvalidState(ref e) => write!(f, "{}", e),
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(ref e) => write!(f, "Cannot open the snapshot image file. {:?}", e),
-            SaveVcpuState => write!(f, "Failed to save vCPU state."),
+            SaveVcpuState(ref e) => match e {
+                None => write!(f, "Failed to save vCPU state."),
+                Some(err) => write!(f, "Failed to save vCPU state: {:?}", err),
+            },
             SaveVmState(ref e) => write!(f, "Failed to save VM state: {:?}", e),
             #[cfg(target_arch = "x86_64")]
             SerializeVcpu(ref e) => write!(f, "Failed to serialize vCPU state: {:?}", e),
@@ -443,8 +446,15 @@ mod tests {
             )
         );
         assert_eq!(
-            format!("{}", SaveVcpuState),
+            format!("{}", SaveVcpuState(None)),
             "Failed to save vCPU state.".to_string()
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                SaveVcpuState(Some(vstate::Error::VcpuCountNotInitialized))
+            ),
+            "Failed to save vCPU state: VcpuCountNotInitialized".to_string()
         );
         assert_eq!(
             format!("{}", SaveVmState(vstate::Error::NotEnoughMemorySlots)),
@@ -636,6 +646,13 @@ mod tests {
         assert_eq!(
             format!("{}", RegisterEvent),
             "Cannot add event to Epoll.".to_string()
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                RegisterMMIODevice(device_manager::mmio::Error::IrqsExhausted)
+            ),
+            "Cannot add a device to the MMIO Bus. no more IRQs are available".to_string()
         );
         assert_eq!(
             format!(

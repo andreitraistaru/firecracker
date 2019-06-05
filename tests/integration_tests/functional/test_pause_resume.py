@@ -60,11 +60,9 @@ def test_pause_resume(test_microvm_with_ssh, network_config):
     retcode, _, _ = ssh_connection.execute_command("true")
     assert retcode == 0
 
-    # Subsequent `ResumeVCPUs` actions are no longer allowed.
+    # Subsequent `ResumeVCPUs` actions are allowed.
     response = test_microvm.actions.put(action_type='ResumeVCPUs')
-    assert test_microvm.api_session.is_status_bad_request(response.status_code)
-    response = test_microvm.actions.put(action_type='ResumeVCPUs')
-    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
 
 
 def test_snapshot_without_devices(test_microvm_with_api):

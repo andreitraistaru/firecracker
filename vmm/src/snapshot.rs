@@ -471,7 +471,7 @@ impl SnapshotImage {
         (vcpu_regs_offset, msrs_offset, cpuid_offset)
     }
 
-    pub fn serialize_vcpu(&mut self, vcpu_index: usize, vcpu_state: VcpuState) -> Result<()> {
+    pub fn serialize_vcpu(&mut self, vcpu_index: usize, vcpu_state: Box<VcpuState>) -> Result<()> {
         if vcpu_index >= self.header.vcpu_count as usize {
             return Err(Error::InvalidVcpuIndex);
         }
@@ -962,12 +962,14 @@ mod tests {
             // Test vcpu serialization.
             // Invalid vcpu index.
             assert_eq!(
-                image.serialize_vcpu((vcpu_count + 1) as usize, vcpu_state()),
+                image.serialize_vcpu((vcpu_count + 1) as usize, Box::new(vcpu_state())),
                 Err(Error::InvalidVcpuIndex)
             );
             // Success.
             for i in 0..vcpu_count {
-                assert!(image.serialize_vcpu(i as usize, vcpu_state()).is_ok());
+                assert!(image
+                    .serialize_vcpu(i as usize, Box::new(vcpu_state()))
+                    .is_ok());
             }
 
             // Serialization should be complete.
