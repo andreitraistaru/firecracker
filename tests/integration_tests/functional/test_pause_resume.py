@@ -42,11 +42,11 @@ def test_pause_resume(test_microvm_with_ssh, network_config):
     retcode, _, _ = ssh_connection.execute_command("true")
     assert retcode != 0
 
-    # Multiple sequential `PauseVCPUs` actions are also allowed.
+    # Subsequent `PauseVCPUs` actions are no longer allowed.
     response = test_microvm.actions.put(action_type='PauseVCPUs')
-    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
     response = test_microvm.actions.put(action_type='PauseVCPUs')
-    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
 
     # Resuming the microVM is successful.
     response = test_microvm.actions.put(action_type='ResumeVCPUs')
@@ -56,8 +56,8 @@ def test_pause_resume(test_microvm_with_ssh, network_config):
     retcode, _, _ = ssh_connection.execute_command("true")
     assert retcode == 0
 
-    # Multiple sequential `ResumeVCPUs` actions are also allowed.
+    # Subsequent `ResumeVCPUs` actions are no longer allowed.
     response = test_microvm.actions.put(action_type='ResumeVCPUs')
-    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
     response = test_microvm.actions.put(action_type='ResumeVCPUs')
-    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)

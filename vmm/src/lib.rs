@@ -54,7 +54,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::result;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Barrier, RwLock};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -84,10 +84,13 @@ use memory_model::{GuestAddress, GuestMemory};
 use net_util::TapError;
 #[cfg(target_arch = "aarch64")]
 use serde_json::Value;
-use sys_util::{EventFd, Killable, Terminal};
+use sys_util::{EventFd, Terminal};
 use vmm_config::boot_source::{BootSourceConfig, BootSourceConfigError};
 use vmm_config::drive::{BlockDeviceConfig, BlockDeviceConfigs, DriveError};
-use vmm_config::instance_info::{InstanceInfo, InstanceState, StartMicrovmError};
+use vmm_config::instance_info::{
+    InstanceInfo, InstanceState, PauseMicrovmError, ResumeMicrovmError, StartMicrovmError,
+    StateError,
+};
 use vmm_config::logger::{LoggerConfig, LoggerConfigError, LoggerLevel};
 use vmm_config::machine_config::{VmConfig, VmConfigError};
 use vmm_config::net::{
@@ -96,7 +99,7 @@ use vmm_config::net::{
 };
 #[cfg(feature = "vsock")]
 use vmm_config::vsock::{VsockDeviceConfig, VsockDeviceConfigs, VsockError};
-use vstate::{Vcpu, VcpuEvent, Vm, VCPU_RTSIG_OFFSET};
+use vstate::{Vcpu, VcpuEvent, VcpuHandle, VcpuResponse, Vm};
 
 /// Default guest kernel command line:
 /// - `reboot=k` shut down the guest on reboot, instead of well... rebooting;
@@ -227,6 +230,12 @@ pub enum VmmActionError {
     /// The action `InsertNetworkDevice` failed either because of bad user input (`ErrorKind::User`)
     /// or an internal error (`ErrorKind::Internal`).
     NetworkConfig(ErrorKind, NetworkInterfaceError),
+    /// The action `ResumeFromSnapshot` failed either because of bad user input (`ErrorKind::User`) or
+    /// an internal error (`ErrorKind::Internal`).
+    PauseMicrovm(ErrorKind, PauseMicrovmError),
+    /// The action `ResumeFromSnapshot` failed either because of bad user input (`ErrorKind::User`) or
+    /// an internal error (`ErrorKind::Internal`).
+    ResumeMicrovm(ErrorKind, ResumeMicrovmError),
     /// The action `StartMicroVm` failed either because of bad user input (`ErrorKind::User`) or
     /// an internal error (`ErrorKind::Internal`).
     StartMicrovm(ErrorKind, StartMicrovmError),
@@ -298,9 +307,42 @@ impl std::convert::From<NetworkInterfaceError> for VmmActionError {
     }
 }
 
+// It's convenient to turn PauseMicrovmError into VmmActionErrors directly.
+impl std::convert::From<PauseMicrovmError> for VmmActionError {
+    fn from(e: PauseMicrovmError) -> Self {
+        use self::PauseMicrovmError::*;
+        use self::StateError::*;
+        let kind = match e {
+            MicroVMInvalidState(ref err) => match err {
+                MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
+                VcpusInvalidState => ErrorKind::Internal,
+            },
+            SignalVcpu(_) | VcpuPause => ErrorKind::Internal,
+        };
+        VmmActionError::PauseMicrovm(kind, e)
+    }
+}
+
+// It's convenient to turn ResumeMicrovmError into VmmActionErrors directly.
+impl std::convert::From<ResumeMicrovmError> for VmmActionError {
+    fn from(e: ResumeMicrovmError) -> Self {
+        use self::ResumeMicrovmError::*;
+        use self::StateError::*;
+        let kind = match e {
+            MicroVMInvalidState(ref err) => match err {
+                MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
+                VcpusInvalidState => ErrorKind::Internal,
+            },
+            SignalVcpu(_) | VcpuResume => ErrorKind::Internal,
+        };
+        VmmActionError::ResumeMicrovm(kind, e)
+    }
+}
+
 // It's convenient to turn StartMicrovmErrors into VmmActionErrors directly.
 impl std::convert::From<StartMicrovmError> for VmmActionError {
     fn from(e: StartMicrovmError) -> Self {
+        use self::StateError::*;
         let kind = match e {
             // User errors.
             #[cfg(feature = "vsock")]
@@ -309,8 +351,6 @@ impl std::convert::From<StartMicrovmError> for VmmActionError {
             | StartMicrovmError::CreateNetDevice(_)
             | StartMicrovmError::KernelCmdline(_)
             | StartMicrovmError::KernelLoader(_)
-            | StartMicrovmError::MicroVMAlreadyRunning
-            | StartMicrovmError::MicroVMIsNotRunning
             | StartMicrovmError::MissingKernelConfig
             | StartMicrovmError::NetDeviceNotConfigured
             | StartMicrovmError::OpenBlockDevice(_)
@@ -330,13 +370,19 @@ impl std::convert::From<StartMicrovmError> for VmmActionError {
             | StartMicrovmError::RegisterMMIODevice(_)
             | StartMicrovmError::RegisterNetDevice(_)
             | StartMicrovmError::SeccompFilters(_)
+            | StartMicrovmError::SignalVcpu(_)
             | StartMicrovmError::Vcpu(_)
             | StartMicrovmError::VcpuConfigure(_)
+            | StartMicrovmError::VcpusAlreadyPresent
             | StartMicrovmError::VcpuSpawn(_) => ErrorKind::Internal,
             // The only user `LoadCommandline` error is `CommandLineOverflow`.
             StartMicrovmError::LoadCommandline(ref cle) => match cle {
                 kernel::cmdline::Error::CommandLineOverflow => ErrorKind::User,
                 _ => ErrorKind::Internal,
+            },
+            StartMicrovmError::MicroVMInvalidState(ref err) => match err {
+                MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
+                VcpusInvalidState => ErrorKind::Internal,
             },
         };
         VmmActionError::StartMicrovm(kind, e)
@@ -354,6 +400,8 @@ impl VmmActionError {
             Logger(ref kind, _) => kind,
             MachineConfig(ref kind, _) => kind,
             NetworkConfig(ref kind, _) => kind,
+            PauseMicrovm(ref kind, _) => kind,
+            ResumeMicrovm(ref kind, _) => kind,
             StartMicrovm(ref kind, _) => kind,
             SendCtrlAltDel(ref kind, _) => kind,
             #[cfg(feature = "vsock")]
@@ -372,6 +420,8 @@ impl Display for VmmActionError {
             Logger(_, ref err) => write!(f, "{}", err.to_string()),
             MachineConfig(_, ref err) => write!(f, "{}", err.to_string()),
             NetworkConfig(_, ref err) => write!(f, "{}", err.to_string()),
+            PauseMicrovm(_, ref err) => write!(f, "{}", err.to_string()),
+            ResumeMicrovm(_, ref err) => write!(f, "{}", err.to_string()),
             StartMicrovm(_, ref err) => write!(f, "{}", err.to_string()),
             SendCtrlAltDel(_, ref err) => write!(f, "{}", err.to_string()),
             #[cfg(feature = "vsock")]
@@ -718,11 +768,6 @@ struct KernelConfig {
     cmdline_addr: GuestAddress,
 }
 
-struct VcpuHandle {
-    event_sender: Sender<VcpuEvent>,
-    thread: thread::JoinHandle<()>,
-}
-
 struct Vmm {
     kvm: KvmContext,
 
@@ -1027,7 +1072,7 @@ impl Vmm {
         self.kernel_config = Some(kernel_config);
     }
 
-    fn flush_metrics(&mut self) -> std::result::Result<VmmData, VmmActionError> {
+    fn flush_metrics(&mut self) -> VmmRequestOutcome {
         if let Err(e) = self.write_metrics() {
             if let LoggerError::NeverInitialized(s) = e {
                 return Err(VmmActionError::Logger(
@@ -1217,14 +1262,18 @@ impl Vmm {
     // Search for `kvm_arch_vcpu_create` in arch/arm/kvm/arm.c.
     fn create_vcpus(
         &mut self,
-        entry_addr: GuestAddress,
         request_ts: TimestampUs,
-    ) -> std::result::Result<Vec<(Vcpu, Sender<VcpuEvent>)>, StartMicrovmError> {
+    ) -> std::result::Result<(), StartMicrovmError> {
         let vcpu_count = self
             .vm_config
             .vcpu_count
             .ok_or(StartMicrovmError::VcpusNotConfigured)?;
-        let mut vcpus = Vec::with_capacity(vcpu_count as usize);
+
+        if !self.vcpus_handles.is_empty() {
+            Err(StartMicrovmError::VcpusAlreadyPresent)?;
+        }
+
+        self.vcpus_handles.reserve(vcpu_count as usize);
 
         for cpu_id in 0..vcpu_count {
             let io_bus = self.legacy_device_manager.io_bus.clone();
@@ -1238,77 +1287,38 @@ impl Vmm {
                 .get_reset_evt_clone()
                 .map_err(|_| StartMicrovmError::EventFd)?;
 
-            let (vcpu_event_sender, vcpu_event_receiver) = channel();
+            let vcpu_handle =
+                VcpuHandle::new(cpu_id, &self.vm, io_bus, vcpu_exit_evt, request_ts.clone())
+                    .map_err(StartMicrovmError::Vcpu)?;
 
-            let mut vcpu = Vcpu::new(
-                cpu_id,
-                &self.vm,
-                io_bus,
-                vcpu_exit_evt,
-                vcpu_event_receiver,
-                request_ts.clone(),
-            )
-            .map_err(StartMicrovmError::Vcpu)?;
-
-            vcpu.configure(&self.vm_config, entry_addr, &self.vm)
-                .map_err(StartMicrovmError::VcpuConfigure)?;
-            vcpus.push((vcpu, vcpu_event_sender));
+            self.vcpus_handles.push(vcpu_handle);
         }
-        Ok(vcpus)
+        Ok(())
     }
 
-    fn start_vcpus(
+    fn configure_vcpus_for_boot(
         &mut self,
-        mut vcpus: Vec<(Vcpu, Sender<VcpuEvent>)>,
+        entry_addr: GuestAddress,
     ) -> std::result::Result<(), StartMicrovmError> {
-        // vm_config has a default value for vcpu_count.
-        let vcpu_count = self
-            .vm_config
-            .vcpu_count
-            .ok_or(StartMicrovmError::VcpusNotConfigured)?;
-        assert_eq!(
-            vcpus.len(),
-            vcpu_count as usize,
-            "The number of vCPU fds is corrupted!"
-        );
-
-        Vcpu::register_vcpu_kick_signal_handler();
-
-        self.vcpus_handles.reserve(vcpu_count as usize);
-
-        let vcpus_thread_barrier = Arc::new(Barrier::new((vcpu_count + 1) as usize));
-
-        // We're going in reverse so we can `.pop()` on the vec and still maintain order.
-        for cpu_id in (0..vcpu_count).rev() {
-            let vcpu_thread_barrier = vcpus_thread_barrier.clone();
-
-            // `unwrap` is safe since we are asserting that the `vcpu_count` is equal to the number
-            // of items of `vcpus` vector.
-            let (mut vcpu, vcpu_event_sender) = vcpus.pop().unwrap();
-
-            if let Some(ref mmio_device_manager) = self.mmio_device_manager {
-                vcpu.set_mmio_bus(mmio_device_manager.bus.clone());
-            }
-            let seccomp_level = self.seccomp_level;
-            self.vcpus_handles.push(VcpuHandle {
-                event_sender: vcpu_event_sender,
-                thread: thread::Builder::new()
-                    .name(format!("fc_vcpu{}", cpu_id))
-                    .spawn(move || {
-                        vcpu.run(vcpu_thread_barrier, seccomp_level);
-                    })
-                    .map_err(StartMicrovmError::VcpuSpawn)?,
-            });
+        for handle in self.vcpus_handles.iter_mut() {
+            handle
+                .configure_vcpu(&self.vm_config, entry_addr, &self.vm)
+                .map_err(StartMicrovmError::VcpuConfigure)?;
         }
+        Ok(())
+    }
 
-        // Load seccomp filters for the VMM thread.
-        // Execution panics if filters cannot be loaded, use --seccomp-level=0 if skipping filters
-        // altogether is the desired behaviour.
-        default_syscalls::set_seccomp_level(self.seccomp_level)
-            .map_err(StartMicrovmError::SeccompFilters)?;
-
-        vcpus_thread_barrier.wait();
-
+    /// Creates vcpu threads and runs the vcpu main loop which starts off 'Paused'.
+    fn start_vcpus(&mut self) -> std::result::Result<(), StartMicrovmError> {
+        Vcpu::register_vcpu_kick_signal_handler();
+        for handle in self.vcpus_handles.iter_mut() {
+            handle
+                .start_vcpu(
+                    self.seccomp_level,
+                    self.mmio_device_manager.as_ref().map(|devmgr| devmgr.bus.clone()),
+                )
+                .map_err(StartMicrovmError::VcpuSpawn)?
+        }
         Ok(())
     }
 
@@ -1319,7 +1329,6 @@ impl Vmm {
             .as_mut()
             .ok_or(StartMicrovmError::MissingKernelConfig)?;
 
-        // It is safe to unwrap because the VM memory was initialized before in vm.memory_init().
         let vm_memory = self.vm.get_memory().ok_or(StartMicrovmError::GuestMemory(
             memory_model::GuestMemoryError::MemoryNotInitialized,
         ))?;
@@ -1407,10 +1416,10 @@ impl Vmm {
         Ok(())
     }
 
-    fn start_microvm(&mut self) -> std::result::Result<VmmData, VmmActionError> {
+    fn start_microvm(&mut self) -> VmmRequestOutcome {
         info!("VMM received instance start command");
         if self.is_instance_initialized() {
-            Err(StartMicrovmError::MicroVMAlreadyRunning)?;
+            Err(StartMicrovmError::from(StateError::MicroVMAlreadyRunning))?;
         }
         let request_ts = TimestampUs {
             time_us: get_time_us(),
@@ -1426,8 +1435,6 @@ impl Vmm {
 
         self.init_guest_memory()?;
 
-        let vcpus;
-
         // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
         // while on aarch64 we need to do it the other way around.
         #[cfg(target_arch = "x86_64")]
@@ -1437,13 +1444,15 @@ impl Vmm {
             self.attach_legacy_devices()?;
 
             let entry_addr = self.load_kernel()?;
-            vcpus = self.create_vcpus(entry_addr, request_ts)?;
+            self.create_vcpus(request_ts)?;
+            self.configure_vcpus_for_boot(entry_addr)?;
         }
 
         #[cfg(target_arch = "aarch64")]
         {
             let entry_addr = self.load_kernel()?;
-            vcpus = self.create_vcpus(entry_addr, request_ts)?;
+            self.create_vcpus(request_ts)?;
+            self.configure_vcpus_for_boot(entry_addr)?;
 
             self.setup_interrupt_controller()?;
             self.attach_virtio_devices()?;
@@ -1454,7 +1463,18 @@ impl Vmm {
 
         self.register_events()?;
 
-        self.start_vcpus(vcpus)?;
+        // Will create vcpu threads and run their main loop. Initial vcpu state is 'Paused'.
+        self.start_vcpus()?;
+
+        // Load seccomp filters for the VMM thread.
+        // Execution panics if filters cannot be loaded, use --seccomp-level=0 if skipping filters
+        // altogether is the desired behaviour.
+        default_syscalls::set_seccomp_level(self.seccomp_level)
+            .map_err(StartMicrovmError::SeccompFilters)?;
+
+        // Send the 'resume' command so that vcpus actually start running.
+        self.resume_vcpus()?;
+
         // Use expect() to crash if the other thread poisoned this lock.
         self.shared_info
             .write()
@@ -1479,7 +1499,7 @@ impl Vmm {
         Ok(VmmData::Empty)
     }
 
-    fn send_ctrl_alt_del(&mut self) -> std::result::Result<VmmData, VmmActionError> {
+    fn send_ctrl_alt_del(&mut self) -> VmmRequestOutcome {
         self.legacy_device_manager
             .i8042
             .lock()
@@ -1534,6 +1554,7 @@ impl Vmm {
         }
     }
 
+    #[allow(dead_code)]
     fn is_instance_running(&self) -> bool {
         match self.instance_state() {
             InstanceState::Running => true,
@@ -1576,7 +1597,7 @@ impl Vmm {
                                     self.epoll_context.disable_stdin_event()?;
                                 }
                                 Err(e) => {
-                                    warn!("error while reading stdin: {:?}", e);
+                                    error!("error while reading stdin: {}", e);
                                     self.epoll_context.disable_stdin_event()?;
                                 }
                                 Ok(count) => {
@@ -1664,7 +1685,7 @@ impl Vmm {
         &mut self,
         kernel_image_path: String,
         kernel_cmdline: Option<String>,
-    ) -> std::result::Result<VmmData, VmmActionError> {
+    ) -> VmmRequestOutcome {
         if self.is_instance_initialized() {
             return Err(VmmActionError::BootSource(
                 ErrorKind::User,
@@ -1696,10 +1717,7 @@ impl Vmm {
         Ok(VmmData::Empty)
     }
 
-    fn set_vm_configuration(
-        &mut self,
-        machine_config: VmConfig,
-    ) -> std::result::Result<VmmData, VmmActionError> {
+    fn set_vm_configuration(&mut self, machine_config: VmConfig) -> VmmRequestOutcome {
         if self.is_instance_initialized() {
             Err(VmConfigError::UpdateNotAllowedPostBoot)?;
         }
@@ -1749,10 +1767,7 @@ impl Vmm {
         Ok(VmmData::Empty)
     }
 
-    fn insert_net_device(
-        &mut self,
-        body: NetworkInterfaceConfig,
-    ) -> std::result::Result<VmmData, VmmActionError> {
+    fn insert_net_device(&mut self, body: NetworkInterfaceConfig) -> VmmRequestOutcome {
         if self.is_instance_initialized() {
             Err(NetworkInterfaceError::UpdateNotAllowedPostBoot)?;
         }
@@ -1762,10 +1777,7 @@ impl Vmm {
             .map_err(|e| VmmActionError::NetworkConfig(ErrorKind::User, e))
     }
 
-    fn update_net_device(
-        &mut self,
-        new_cfg: NetworkInterfaceUpdateConfig,
-    ) -> std::result::Result<VmmData, VmmActionError> {
+    fn update_net_device(&mut self, new_cfg: NetworkInterfaceUpdateConfig) -> VmmRequestOutcome {
         if !self.is_instance_initialized() {
             // VM not started yet, so we only need to update the device configs, not the actual
             // live device.
@@ -1831,10 +1843,7 @@ impl Vmm {
     }
 
     #[cfg(feature = "vsock")]
-    fn insert_vsock_device(
-        &mut self,
-        body: VsockDeviceConfig,
-    ) -> std::result::Result<VmmData, VmmActionError> {
+    fn insert_vsock_device(&mut self, body: VsockDeviceConfig) -> VmmRequestOutcome {
         if self.is_instance_initialized() {
             return Err(VmmActionError::VsockConfig(
                 ErrorKind::User,
@@ -1851,7 +1860,7 @@ impl Vmm {
         &mut self,
         drive_id: String,
         path_on_host: String,
-    ) -> std::result::Result<VmmData, VmmActionError> {
+    ) -> VmmRequestOutcome {
         // Get the block device configuration specified by drive_id.
         let block_device_index = self
             .block_device_configs
@@ -1878,10 +1887,7 @@ impl Vmm {
         Ok(VmmData::Empty)
     }
 
-    fn rescan_block_device(
-        &mut self,
-        drive_id: &str,
-    ) -> std::result::Result<VmmData, VmmActionError> {
+    fn rescan_block_device(&mut self, drive_id: &str) -> VmmRequestOutcome {
         // Rescan can only happen after the guest is booted.
         if !self.is_instance_initialized() {
             Err(DriveError::OperationNotAllowedPreBoot)?;
@@ -1914,10 +1920,7 @@ impl Vmm {
 
     // Only call this function as part of the API.
     // If the drive_id does not exist, a new Block Device Config is added to the list.
-    fn insert_block_device(
-        &mut self,
-        block_device_config: BlockDeviceConfig,
-    ) -> std::result::Result<VmmData, VmmActionError> {
+    fn insert_block_device(&mut self, block_device_config: BlockDeviceConfig) -> VmmRequestOutcome {
         if self.is_instance_initialized() {
             Err(DriveError::UpdateNotAllowedPostBoot)?;
         }
@@ -1928,10 +1931,7 @@ impl Vmm {
             .map_err(VmmActionError::from)
     }
 
-    fn init_logger(
-        &self,
-        api_logger: LoggerConfig,
-    ) -> std::result::Result<VmmData, VmmActionError> {
+    fn init_logger(&self, api_logger: LoggerConfig) -> VmmRequestOutcome {
         if self.is_instance_initialized() {
             return Err(VmmActionError::Logger(
                 ErrorKind::User,
@@ -1988,35 +1988,57 @@ impl Vmm {
             .expect("one-shot channel closed");
     }
 
-    fn pause_vcpus(&mut self) -> VmmRequestOutcome {
-        if !self.is_instance_running() {
-            Err(StartMicrovmError::MicroVMIsNotRunning)?;
+    fn check_vcpus_active(&self) -> std::result::Result<(), StateError> {
+        if !self.is_instance_initialized() {
+            return Err(StateError::MicroVMIsNotRunning);
         }
+        for handle in self.vcpus_handles.iter() {
+            handle
+                .validate_active()
+                .map_err(|_| StateError::VcpusInvalidState)?;
+        }
+        Ok(())
+    }
 
-        for vcpu in self.vcpus_handles.iter() {
-            vcpu.event_sender
-                .send(VcpuEvent::Pause)
-                .expect("vCPU channel closed");
-            vcpu.thread
-                .kill(VCPU_RTSIG_OFFSET)
-                .expect("kill() failed on vCPU.");
+    fn pause_vcpus(&mut self) -> VmmRequestOutcome {
+        self.check_vcpus_active()
+            .map_err(PauseMicrovmError::MicroVMInvalidState)?;
+
+        for handle in self.vcpus_handles.iter() {
+            handle
+                .send_event(VcpuEvent::Pause)
+                .map_err(PauseMicrovmError::SignalVcpu)?;
+        }
+        for handle in self.vcpus_handles.iter() {
+            match handle
+                .response_receiver()
+                .recv_timeout(Duration::from_millis(400))
+            {
+                Ok(VcpuResponse::Paused) => (),
+                _ => Err(PauseMicrovmError::VcpuPause)?,
+            }
         }
 
         Ok(VmmData::Empty)
     }
 
     fn resume_vcpus(&mut self) -> VmmRequestOutcome {
-        if !self.is_instance_running() {
-            Err(StartMicrovmError::MicroVMIsNotRunning)?;
-        }
+        self.check_vcpus_active()
+            .map_err(ResumeMicrovmError::MicroVMInvalidState)?;
 
-        for vcpu in self.vcpus_handles.iter() {
-            vcpu.event_sender
-                .send(VcpuEvent::Resume)
-                .expect("vCPU channel closed");
-            vcpu.thread
-                .kill(VCPU_RTSIG_OFFSET)
-                .expect("kill() failed on vCPU.");
+        for handle in self.vcpus_handles.iter() {
+            handle
+                .send_event(VcpuEvent::Resume)
+                .map_err(ResumeMicrovmError::SignalVcpu)?;
+        }
+        for handle in self.vcpus_handles.iter() {
+            match handle
+                .response_receiver()
+                .recv_timeout(Duration::from_millis(400))
+            {
+                Ok(VcpuResponse::Resumed) => (),
+                _ => Err(ResumeMicrovmError::VcpuResume)?,
+            }
         }
         Ok(VmmData::Empty)
     }
@@ -3303,9 +3325,7 @@ mod tests {
             .setup_irqchip()
             .expect("Cannot create IRQCHIP or PIT");
 
-        assert!(vmm
-            .create_vcpus(GuestAddress(0x0), TimestampUs::default())
-            .is_ok());
+        assert!(vmm.create_vcpus(TimestampUs::default()).is_ok());
     }
 
     #[test]
@@ -3680,11 +3700,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cyclomatic_complexity)]
     fn test_start_microvm_error_conversion_mv() {
-        assert_eq!(
-            error_kind(StartMicrovmError::MicroVMAlreadyRunning),
-            ErrorKind::User
-        );
         assert_eq!(
             error_kind(StartMicrovmError::MissingKernelConfig),
             ErrorKind::User
@@ -3749,8 +3766,8 @@ mod tests {
             ErrorKind::User
         );
         assert_eq!(
-            error_kind(StartMicrovmError::VcpuSpawn(io::Error::from_raw_os_error(
-                0
+            error_kind(StartMicrovmError::VcpuSpawn(vstate::Error::VcpuSpawn(
+                io::Error::from_raw_os_error(0)
             ))),
             ErrorKind::Internal
         );

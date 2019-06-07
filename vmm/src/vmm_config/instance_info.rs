@@ -40,8 +40,73 @@ pub struct InstanceInfo {
     pub vmm_version: String,
 }
 
-/// Errors associated with starting the instance.
-// TODO: add error kind to these variants because not all these errors are user or internal.
+/// Errors associated with failed state validations.
+#[derive(Debug)]
+pub enum StateError {
+    /// The start/resume command was issued more than once.
+    MicroVMAlreadyRunning,
+    /// The microVM hasn't been started.
+    MicroVMIsNotRunning,
+    /// vCPUs are in an invalid state.
+    VcpusInvalidState,
+}
+
+impl Display for StateError {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        use self::StateError::*;
+        match *self {
+            MicroVMAlreadyRunning => write!(f, "Microvm is already running."),
+            MicroVMIsNotRunning => write!(f, "Microvm is not running."),
+            VcpusInvalidState => write!(f, "vCPUs are in an invalid state."),
+        }
+    }
+}
+
+/// Errors associated with pausing the microVM.
+#[derive(Debug)]
+pub enum PauseMicrovmError {
+    /// Sanity checks failed.
+    MicroVMInvalidState(StateError),
+    /// Failed to send event.
+    SignalVcpu(vstate::Error),
+    /// vCPU pause failed.
+    VcpuPause,
+}
+
+impl Display for PauseMicrovmError {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        use self::PauseMicrovmError::*;
+        match *self {
+            MicroVMInvalidState(ref e) => write!(f, "{}", e),
+            SignalVcpu(ref err) => write!(f, "Failed to signal vCPU: {:?}", err),
+            VcpuPause => write!(f, "vCPUs pause failed."),
+        }
+    }
+}
+
+/// Errors associated with resuming the microVM.
+#[derive(Debug)]
+pub enum ResumeMicrovmError {
+    /// Sanity checks failed.
+    MicroVMInvalidState(StateError),
+    /// Failed to send event.
+    SignalVcpu(vstate::Error),
+    /// vCPU resume failed.
+    VcpuResume,
+}
+
+impl Display for ResumeMicrovmError {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        use self::ResumeMicrovmError::*;
+        match *self {
+            MicroVMInvalidState(ref e) => write!(f, "{}", e),
+            SignalVcpu(ref err) => write!(f, "Failed to signal vCPU: {:?}", err),
+            VcpuResume => write!(f, "vCPUs resume failed."),
+        }
+    }
+}
+
+/// Errors associated with starting the microVM.
 #[derive(Debug)]
 pub enum StartMicrovmError {
     /// This error is thrown by the minimal boot loader implementation.
@@ -75,10 +140,8 @@ pub enum StartMicrovmError {
     LegacyIOBus(device_manager::legacy::Error),
     /// Cannot load command line string.
     LoadCommandline(kernel::cmdline::Error),
-    /// The start command was issued more than once.
-    MicroVMAlreadyRunning,
-    /// The microVM hasn't been started.
-    MicroVMIsNotRunning,
+    /// Sanity checks failed.
+    MicroVMInvalidState(StateError),
     /// Cannot start the VM because the kernel was not configured.
     MissingKernelConfig,
     /// The net device configuration is missing the tap device.
@@ -98,14 +161,24 @@ pub enum StartMicrovmError {
     RegisterVsockDevice(device_manager::mmio::Error),
     /// Cannot build seccomp filters.
     SeccompFilters(seccomp::Error),
+    /// Failed to signal vCPU.
+    SignalVcpu(vstate::Error),
     /// Cannot create a new vCPU file descriptor.
     Vcpu(vstate::Error),
     /// vCPU configuration failed.
     VcpuConfigure(vstate::Error),
+    /// vCPUs have already been created.
+    VcpusAlreadyPresent,
     /// vCPUs were not configured.
     VcpusNotConfigured,
     /// Cannot spawn a new vCPU thread.
-    VcpuSpawn(std::io::Error),
+    VcpuSpawn(vstate::Error),
+}
+
+impl std::convert::From<StateError> for StartMicrovmError {
+    fn from(e: StateError) -> Self {
+        StartMicrovmError::MicroVMInvalidState(e)
+    }
 }
 
 impl Display for StartMicrovmError {
@@ -174,8 +247,7 @@ impl Display for StartMicrovmError {
                 err_msg = err_msg.replace("\"", "");
                 write!(f, "Cannot load command line string. {}", err_msg)
             }
-            MicroVMAlreadyRunning => write!(f, "Microvm already running."),
-            MicroVMIsNotRunning => write!(f, "Microvm is not running."),
+            MicroVMInvalidState(ref e) => write!(f, "{}", e),
             MissingKernelConfig => write!(f, "Cannot start microvm without kernel configuration."),
             NetDeviceNotConfigured => {
                 write!(f, "The net device configuration is missing the tap device.")
@@ -229,6 +301,7 @@ impl Display for StartMicrovmError {
 
                 write!(f, "Cannot build seccomp filters. {}", err_msg)
             }
+            SignalVcpu(ref err) => write!(f, "Failed to signal vCPU: {:?}", err),
             Vcpu(ref err) => {
                 let mut err_msg = format!("{:?}", err);
                 err_msg = err_msg.replace("\"", "");
@@ -241,6 +314,7 @@ impl Display for StartMicrovmError {
 
                 write!(f, "vCPU configuration failed. {}", err_msg)
             }
+            VcpusAlreadyPresent => write!(f, "vCPUs have already been created."),
             VcpusNotConfigured => write!(f, "vCPUs were not configured."),
             VcpuSpawn(ref err) => {
                 let mut err_msg = format!("{:?}", err);

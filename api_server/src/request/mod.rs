@@ -256,9 +256,6 @@ mod tests {
         // ConfigureVm, Vcpu and VcpuConfigure cannot be tested because vstate is a private module
         // in the vmm crate.
         let vmm_resp =
-            VmmActionError::StartMicrovm(ErrorKind::User, StartMicrovmError::MicroVMAlreadyRunning);
-        check_error_response(vmm_resp, StatusCode::BadRequest);
-        let vmm_resp =
             VmmActionError::StartMicrovm(ErrorKind::User, StartMicrovmError::MissingKernelConfig);
         check_error_response(vmm_resp, StatusCode::BadRequest);
         let vmm_resp = VmmActionError::StartMicrovm(
@@ -312,11 +309,6 @@ mod tests {
         let vmm_resp = VmmActionError::StartMicrovm(
             ErrorKind::Internal,
             StartMicrovmError::VcpusNotConfigured,
-        );
-        check_error_response(vmm_resp, StatusCode::InternalServerError);
-        let vmm_resp = VmmActionError::StartMicrovm(
-            ErrorKind::Internal,
-            StartMicrovmError::VcpuSpawn(std::io::Error::from_raw_os_error(11)),
         );
         check_error_response(vmm_resp, StatusCode::InternalServerError);
         let vmm_resp = VmmActionError::StartMicrovm(
