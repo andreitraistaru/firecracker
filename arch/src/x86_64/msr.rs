@@ -5,7 +5,7 @@
 use std::{io, result};
 
 use arch_gen::x86::msr_index::*;
-use kvm::{KvmMsrs, VcpuFd};
+use kvm::{Kvm, KvmMsrs, MsrList, VcpuFd};
 use kvm_bindings::kvm_msr_entry;
 
 #[derive(Debug)]
@@ -214,7 +214,7 @@ fn create_boot_msr_entries() -> Vec<kvm_msr_entry> {
 /// # Arguments
 ///
 /// * `vcpu` - Structure for the VCPU that holds the VCPU's fd.
-pub fn setup_msrs(vcpu: &VcpuFd) -> Result<()> {
+pub fn setup_msrs_for_boot(vcpu: &VcpuFd) -> Result<()> {
     let entry_vec = create_boot_msr_entries();
 
     let kvm_msrs_wrapper = KvmMsrs::from_entries(&entry_vec);
@@ -222,6 +222,14 @@ pub fn setup_msrs(vcpu: &VcpuFd) -> Result<()> {
     vcpu.set_msrs(&kvm_msrs_wrapper)
         .map(|_| ())
         .map_err(Error::SetModelSpecificRegisters)
+}
+
+pub fn supported_guest_msrs(kvm_fd: &Kvm) -> io::Result<MsrList> {
+    let mut msr_list = kvm_fd.get_msr_index_list()?;
+
+    msr_list.retain(|msr_index| msr_should_serialize(*msr_index));
+
+    Ok(msr_list)
 }
 
 #[cfg(test)]
@@ -248,7 +256,7 @@ mod tests {
         let kvm = Kvm::new().unwrap();
         let vm = kvm.create_vm().unwrap();
         let vcpu = vm.create_vcpu(0).unwrap();
-        setup_msrs(&vcpu).unwrap();
+        setup_msrs_for_boot(&vcpu).unwrap();
 
         // This test will check against the last MSR entry configured (the tenth one).
         // See create_msr_entries() for details.

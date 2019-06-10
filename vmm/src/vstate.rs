@@ -22,7 +22,11 @@ use arch;
 use cpuid::{c3, filter_cpuid, t2};
 use default_syscalls;
 use kvm::*;
-use kvm_bindings::{kvm_pit_config, kvm_userspace_memory_region, KVM_PIT_SPEAKER_DUMMY};
+use kvm_bindings::{
+    kvm_clock_data, kvm_debugregs, kvm_irqchip, kvm_lapic_state, kvm_mp_state, kvm_pit_config,
+    kvm_pit_state2, kvm_regs, kvm_sregs, kvm_userspace_memory_region, kvm_vcpu_events, kvm_xcrs,
+    kvm_xsave, KVM_PIT_SPEAKER_DUMMY,
+};
 use logger::{LogOption, Metric, LOGGER, METRICS};
 use memory_model::{GuestAddress, GuestMemory, GuestMemoryError};
 use sys_util::{register_vcpu_signal_handler, EventFd, Killable};
@@ -48,24 +52,74 @@ pub enum Error {
     CpuId(cpuid::Error),
     /// Invalid guest memory configuration.
     GuestMemory(GuestMemoryError),
+    /// Retrieving supported guest MSRs fails.
+    GuestMSRs(std::io::Error),
     /// Hyperthreading flag is not initialized.
     HTNotInitialized,
     /// vCPU count is not initialized.
     VcpuCountNotInitialized,
-    /// Cannot open the VM file descriptor.
-    VmFd(io::Error),
     /// Cannot open the Vcpu file descriptor.
     VcpuFd(io::Error),
+    /// Failed to get KVM vcpu debug regs.
+    VcpuGetDebugRegs(io::Error),
+    /// Failed to get KVM vcpu lapic.
+    VcpuGetLapic(io::Error),
+    /// Failed to get KVM vcpu mp state.
+    VcpuGetMpState(io::Error),
+    /// Failed to get KVM vcpu msrs.
+    VcpuGetMsrs(io::Error),
+    /// Failed to get KVM vcpu regs.
+    VcpuGetRegs(io::Error),
+    /// Failed to get KVM vcpu sregs.
+    VcpuGetSregs(io::Error),
+    /// Failed to get KVM vcpu evenct.
+    VcpuGetVcpuEvents(io::Error),
+    /// Failed to get KVM vcpu xcrs.
+    VcpuGetXcrs(io::Error),
+    /// Failed to get KVM vcpu xsave.
+    VcpuGetXsave(io::Error),
     /// Vcpu is in an unexpected state.
     VcpuInvalidState,
     /// Vcpu response timed out.
     VcpuResponseTimeout,
+    /// Failed to set KVM vcpu cpuid.
+    VcpuSetCpuid(io::Error),
+    /// Failed to set KVM vcpu debug regs.
+    VcpuSetDebugRegs(io::Error),
+    /// Failed to set KVM vcpu lapic.
+    VcpuSetLapic(io::Error),
+    /// Failed to set KVM vcpu mp state.
+    VcpuSetMpState(io::Error),
+    /// Failed to set KVM vcpu msrs.
+    VcpuSetMsrs(io::Error),
+    /// Failed to set KVM vcpu regs.
+    VcpuSetRegs(io::Error),
+    /// Failed to set KVM vcpu sregs.
+    VcpuSetSregs(io::Error),
+    /// Failed to set KVM vcpu evenct.
+    VcpuSetVcpuEvents(io::Error),
+    /// Failed to set KVM vcpu xcrs.
+    VcpuSetXcrs(io::Error),
+    /// Failed to set KVM vcpu xsave.
+    VcpuSetXsave(io::Error),
     /// Cannot spawn a new vcpu thread.
-    VcpuSpawn(std::io::Error),
+    VcpuSpawn(io::Error),
+    /// Failed to get KVM vm pit state.
+    VmGetPit2(io::Error),
+    /// Failed to get KVM vm clock.
+    VmGetClock(io::Error),
+    /// Failed to get KVM vm irqchip.
+    VmGetIrqChip(io::Error),
+    /// Cannot open the VM file descriptor.
+    VmFd(io::Error),
+    /// Failed to set KVM vm pit state.
+    VmSetPit2(io::Error),
+    /// Failed to set KVM vm clock.
+    VmSetClock(io::Error),
+    /// Failed to set KVM vm irqchip.
+    VmSetIrqChip(io::Error),
     /// Cannot configure the microvm.
     VmSetup(io::Error),
-    /// The call to KVM_SET_CPUID2 failed.
-    SetSupportedCpusFailed(io::Error),
     /// The number of configured slots is bigger than the maximum reported by KVM.
     NotEnoughMemorySlots,
     /// Failed to signal Vcpu.
@@ -113,6 +167,8 @@ pub struct Vm {
     // X86 specific fields.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     supported_cpuid: CpuId,
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    supported_msrs: MsrList,
 
     // Arm specific fields.
     // On aarch64 we need to keep around the fd obtained by creating the VGIC device.
@@ -130,10 +186,17 @@ impl Vm {
         let supported_cpuid = kvm
             .get_supported_cpuid(MAX_KVM_CPUID_ENTRIES)
             .map_err(Error::VmFd)?;
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        let supported_msrs =
+            arch::x86_64::msr::supported_guest_msrs(kvm).map_err(Error::GuestMSRs)?;
+
         Ok(Vm {
             fd: vm_fd,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             supported_cpuid,
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            supported_msrs,
             guest_mem: None,
             #[cfg(target_arch = "aarch64")]
             irqchip_handle: None,
@@ -144,6 +207,12 @@ impl Vm {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub fn supported_cpuid(&self) -> &CpuId {
         &self.supported_cpuid
+    }
+
+    /// Returns a ref to the supported `MsrList` for this Vm.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub fn supported_msrs(&self) -> &MsrList {
+        &self.supported_msrs
     }
 
     /// Initializes the guest memory.
@@ -213,6 +282,70 @@ impl Vm {
     pub fn get_fd(&self) -> &VmFd {
         &self.fd
     }
+
+    pub fn save_state(&self) -> Result<VmState> {
+        let mut pitstate = kvm_pit_state2::default();
+        self.fd.get_pit2(&mut pitstate).map_err(Error::VmGetPit2)?;
+
+        let mut clock = kvm_clock_data::default();
+        self.fd.get_clock(&mut clock).map_err(Error::VmGetClock)?;
+        // This bit is not accepted in SET_CLOCK, clear it.
+        clock.flags &= !KVM_CLOCK_TSC_STABLE;
+
+        let mut pic_master = kvm_irqchip::default();
+        pic_master.chip_id = KVM_IRQCHIP_PIC_MASTER;
+        self.fd
+            .get_irqchip(&mut pic_master)
+            .map_err(Error::VmGetIrqChip)?;
+
+        let mut pic_slave = kvm_irqchip::default();
+        pic_slave.chip_id = KVM_IRQCHIP_PIC_SLAVE;
+        self.fd
+            .get_irqchip(&mut pic_slave)
+            .map_err(Error::VmGetIrqChip)?;
+
+        let mut ioapic = kvm_irqchip::default();
+        ioapic.chip_id = KVM_IRQCHIP_IOAPIC;
+        self.fd
+            .get_irqchip(&mut ioapic)
+            .map_err(Error::VmGetIrqChip)?;
+
+        Ok(VmState {
+            pitstate,
+            clock,
+            pic_master,
+            pic_slave,
+            ioapic,
+        })
+    }
+
+    pub fn restore_state(&self, state: &VmState) -> Result<()> {
+        self.fd
+            .set_pit2(&state.pitstate)
+            .map_err(Error::VmSetPit2)?;
+        self.fd.set_clock(&state.clock).map_err(Error::VmSetClock)?;
+        self.fd
+            .set_irqchip(&state.pic_master)
+            .map_err(Error::VmSetIrqChip)?;
+        self.fd
+            .set_irqchip(&state.pic_slave)
+            .map_err(Error::VmSetIrqChip)?;
+        self.fd
+            .set_irqchip(&state.ioapic)
+            .map_err(Error::VmSetIrqChip)?;
+        Ok(())
+    }
+}
+
+/// Structure holding VM kvm state.
+#[derive(Default)]
+#[repr(C)]
+pub struct VmState {
+    pitstate: kvm_pit_state2,
+    clock: kvm_clock_data,
+    pic_master: kvm_irqchip,
+    pic_slave: kvm_irqchip,
+    ioapic: kvm_irqchip,
 }
 
 /// List of events that the Vcpu can receive.
@@ -429,6 +562,7 @@ pub struct Vcpu {
     event_receiver: Receiver<VcpuEvent>,
     response_sender: Sender<VcpuResponse>,
     create_ts: TimestampUs,
+    msr_list: MsrList,
 }
 
 // Using this for easier explicit type-casting to help IDEs interpret the code.
@@ -530,6 +664,7 @@ impl Vcpu {
             event_receiver,
             response_sender,
             create_ts,
+            msr_list: vm.supported_msrs().clone(),
         })
     }
 
@@ -576,9 +711,9 @@ impl Vcpu {
 
         self.fd
             .set_cpuid2(&self.cpuid)
-            .map_err(Error::SetSupportedCpusFailed)?;
+            .map_err(Error::VcpuSetCpuid)?;
 
-        arch::x86_64::msr::setup_msrs(&self.fd).map_err(Error::MSRSConfiguration)?;
+        arch::x86_64::msr::setup_msrs_for_boot(&self.fd).map_err(Error::MSRSConfiguration)?;
         // Safe to unwrap because this method is called after the VM is configured
         let vm_memory = vm
             .get_memory()
@@ -766,8 +901,6 @@ impl Vcpu {
 
     // This is the main loop of the `Running` state.
     fn running(&mut self) -> StateStruct<Self> {
-        // TODO: remove `expect()`s and return errors.
-
         // This loop is here just for optimizing the emulation path.
         // No point in ticking the state machine if there are no external events.
         loop {
@@ -804,8 +937,6 @@ impl Vcpu {
 
     // This is the main loop of the `Paused` state.
     fn paused(&mut self) -> StateStruct<Self> {
-        // TODO: remove `expect()`s and return errors.
-
         match self.event_receiver.recv() {
             // Paused ---- Resume ----> Running
             Ok(VcpuEvent::Resume) => {
@@ -835,6 +966,95 @@ impl Vcpu {
         // State machine reached its end.
         StateStruct::finish(Self::exited)
     }
+
+    fn save_state(&self) -> Result<VcpuState> {
+        // Build the list of MSRs we want to save.
+        let num_msrs = self.msr_list.as_original_struct().len();
+        let mut msrs = KvmMsrs::new(num_msrs);
+        {
+            let indices = self.msr_list.as_entries_slice();
+            let msr_entries = msrs.as_mut_entries_slice();
+            assert_eq!(indices.len(), msr_entries.len());
+            for (pos, index) in indices.iter().enumerate() {
+                msr_entries[pos].index = *index;
+            }
+        }
+
+        let mut state = VcpuState {
+            cpuid: self.cpuid.clone(),
+            msrs,
+            debug_regs: Default::default(),
+            lapic: Default::default(),
+            mp_state: Default::default(),
+            regs: Default::default(),
+            sregs: Default::default(),
+            vcpu_events: Default::default(),
+            xcrs: Default::default(),
+            xsave: Default::default(),
+        };
+
+        self.fd
+            .get_mp_state(&mut state.mp_state)
+            .map_err(Error::VcpuGetMpState)?;
+
+        state.regs = self.fd.get_regs().map_err(Error::VcpuGetRegs)?;
+
+        state.sregs = self.fd.get_sregs().map_err(Error::VcpuGetSregs)?;
+
+        self.fd
+            .get_xsave(&mut state.xsave)
+            .map_err(Error::VcpuGetXsave)?;
+
+        self.fd
+            .get_xcrs(&mut state.xcrs)
+            .map_err(Error::VcpuGetXcrs)?;
+
+        self.fd
+            .get_debug_regs(&mut state.debug_regs)
+            .map_err(Error::VcpuGetDebugRegs)?;
+
+        state.lapic = self.fd.get_lapic().map_err(Error::VcpuGetLapic)?;
+
+        let nmsrs = self
+            .fd
+            .get_msrs(&mut state.msrs)
+            .map_err(Error::VcpuGetMsrs)?;
+        assert_eq!(nmsrs, num_msrs);
+
+        self.fd
+            .get_vcpu_events(&mut state.vcpu_events)
+            .map_err(Error::VcpuGetVcpuEvents)?;
+
+        Ok(state)
+    }
+
+    fn restore_state(&self, state: VcpuState) -> Result<()> {
+        self.fd
+            .set_cpuid2(&state.cpuid)
+            .map_err(Error::VcpuSetCpuid)?;
+        self.fd
+            .set_mp_state(state.mp_state)
+            .map_err(Error::VcpuSetMpState)?;
+        self.fd.set_regs(&state.regs).map_err(Error::VcpuSetRegs)?;
+        self.fd
+            .set_sregs(&state.sregs)
+            .map_err(Error::VcpuSetSregs)?;
+        self.fd
+            .set_xsave(&state.xsave)
+            .map_err(Error::VcpuSetXsave)?;
+        self.fd.set_xcrs(&state.xcrs).map_err(Error::VcpuSetXcrs)?;
+        self.fd
+            .set_debug_regs(&state.debug_regs)
+            .map_err(Error::VcpuSetDebugRegs)?;
+        self.fd
+            .set_lapic(&state.lapic)
+            .map_err(Error::VcpuSetLapic)?;
+        self.fd.set_msrs(&state.msrs).map_err(Error::VcpuSetMsrs)?;
+        self.fd
+            .set_vcpu_events(&state.vcpu_events)
+            .map_err(Error::VcpuSetVcpuEvents)?;
+        Ok(())
+    }
 }
 
 impl Drop for Vcpu {
@@ -843,8 +1063,23 @@ impl Drop for Vcpu {
     }
 }
 
+/// Structure holding VCPU kvm state.
+pub struct VcpuState {
+    cpuid: CpuId,
+    msrs: KvmMsrs,
+    debug_regs: kvm_debugregs,
+    lapic: kvm_lapic_state,
+    mp_state: kvm_mp_state,
+    regs: kvm_regs,
+    sregs: kvm_sregs,
+    vcpu_events: kvm_vcpu_events,
+    xcrs: kvm_xcrs,
+    xsave: kvm_xsave,
+}
+
 #[cfg(test)]
 mod tests {
+    use std::os::unix::io::AsRawFd;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -1308,5 +1543,43 @@ mod tests {
             .unwrap();
 
         assert!(vm.memory_init(gm, &kvm).is_err());
+    }
+
+    #[test]
+    fn test_vm_save_restore_state() {
+        let kvm_fd = Kvm::new().unwrap();
+        let vm = Vm::new(&kvm_fd).expect("new vm failed");
+        assert!(vm.save_state().is_err());
+
+        let (vm, _) = setup_vcpu();
+        let res = vm.save_state();
+        assert!(res.is_ok());
+
+        let state = res.unwrap();
+        let (vm, _) = setup_vcpu();
+        assert!(vm.restore_state(&state).is_ok());
+    }
+
+    #[test]
+    fn test_vcpu_save_restore_state() {
+        let (_vm, vcpu) = setup_vcpu();
+        let state = vcpu.save_state();
+        assert!(state.is_ok());
+        assert!(vcpu.restore_state(state.unwrap()).is_ok());
+
+        unsafe { libc::close(vcpu.fd.as_raw_fd()) };
+        let state = VcpuState {
+            cpuid: CpuId::new(1),
+            msrs: KvmMsrs::new(1),
+            debug_regs: Default::default(),
+            lapic: Default::default(),
+            mp_state: Default::default(),
+            regs: Default::default(),
+            sregs: Default::default(),
+            vcpu_events: Default::default(),
+            xcrs: Default::default(),
+            xsave: Default::default(),
+        };
+        assert!(vcpu.restore_state(state).is_err());
     }
 }
