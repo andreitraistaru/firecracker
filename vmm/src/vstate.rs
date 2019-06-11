@@ -374,15 +374,14 @@ pub enum VcpuEvent {
 
 /// List of responses that the Vcpu reports.
 pub enum VcpuResponse {
-    #[cfg(target_arch = "x86_64")]
     /// Vcpu is deserialized.
+    #[cfg(target_arch = "x86_64")]
     Deserialized,
     /// Vcpu is paused.
     Paused,
     /// Vcpu is paused to snapshot.
     #[cfg(target_arch = "x86_64")]
     PausedToSnapshot(Box<VcpuState>),
-    #[cfg(target_arch = "x86_64")]
     /// Vcpu is resumed.
     Resumed,
     /// Vcpu state could not be saved.
@@ -972,7 +971,7 @@ impl Vcpu {
                             .send(VcpuResponse::PausedToSnapshot(Box::new(vcpu_state)))
                             .expect("failed to send vcpu state");
 
-                        // Finish run in 'snapshotted' state.
+                        // Moved to `paused` state.
                         state = StateStruct::next(Self::paused);
                     })
                     .map_err(|e| self.response_sender.send(VcpuResponse::SaveStateFailed(e)))
