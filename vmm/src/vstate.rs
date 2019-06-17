@@ -1335,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vm_memory_init_success() {
+    fn test_vm_memory_init() {
         let kvm = KvmContext::new().unwrap();
         let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)]).unwrap();
         let mut vm = Vm::new(kvm.fd()).expect("Cannot create new vm");
@@ -1351,22 +1351,15 @@ mod tests {
             .read_obj_from_addr(obj_addr)
             .unwrap();
         assert_eq!(read_val, 67u8);
-    }
-
-    #[test]
-    fn test_vm_memory_init_failure() {
-        let kvm_fd = Kvm::new().unwrap();
-        let mut vm = Vm::new(&kvm_fd).expect("new vm failed");
 
         let kvm = KvmContext {
-            kvm: kvm_fd,
+            kvm: Kvm::new().unwrap(),
             max_memslots: 1,
         };
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
         let gm = GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
             .unwrap();
-
         assert!(vm.memory_init(gm, &kvm).is_err());
     }
 
@@ -1419,6 +1412,7 @@ mod tests {
         assert!(vm.setup_irqchip(vcpu_count).is_err());
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_setup_irqchip_failure() {
         let kvm = KvmContext::new().unwrap();
@@ -1439,12 +1433,8 @@ mod tests {
         )
         .unwrap();
 
-        #[cfg(target_arch = "x86_64")]
         // Trying to setup irqchip after KVM_VCPU_CREATE was called will result in error on x86_64.
         assert!(vm.setup_irqchip().is_err());
-        #[cfg(target_arch = "aarch64")]
-        // Trying to setup irqchip after KVM_VCPU_CREATE is actually the way to go on aarch64.
-        assert!(vm.setup_irqchip(1).is_ok());
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -1888,23 +1878,6 @@ mod tests {
         vcpu2_handle
             .join_vcpu_thread()
             .expect("failed to join thread");
-    }
-
-    #[test]
-    fn not_enough_mem_slots() {
-        let kvm_fd = Kvm::new().unwrap();
-        let mut vm = Vm::new(&kvm_fd).expect("new vm failed");
-
-        let kvm = KvmContext {
-            kvm: kvm_fd,
-            max_memslots: 1,
-        };
-        let start_addr1 = GuestAddress(0x0);
-        let start_addr2 = GuestAddress(0x1000);
-        let gm = GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
-            .unwrap();
-
-        assert!(vm.memory_init(gm, &kvm).is_err());
     }
 
     #[test]
