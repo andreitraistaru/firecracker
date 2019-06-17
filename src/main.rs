@@ -93,7 +93,7 @@ fn main() {
                         ",
                 )
                 .takes_value(true)
-                .default_value("2")
+                .default_value("0")
                 .possible_values(&["0", "1", "2"]),
         )
         .arg(
@@ -122,15 +122,17 @@ fn main() {
     // integration test from test_unittests.py, an invalid syscall is issued, and we crash
     // otherwise.
     #[cfg(test)]
-    let seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
+    let _seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
     #[cfg(not(test))]
     // It's safe to unwrap here because clap's been provided with a default value,
     // and allowed values are guaranteed to parse to u32.
-    let seccomp_level = cmd_arguments
+    let _seccomp_level = cmd_arguments
         .value_of("seccomp-level")
         .unwrap()
         .parse::<u32>()
         .unwrap();
+    // FIXME: temporarily disable seccomp until issue #65 is fixed and seccomp works properly.
+    let seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
 
     let start_time_us = cmd_arguments.value_of("start-time-us").map(|s| {
         s.parse::<u64>()
