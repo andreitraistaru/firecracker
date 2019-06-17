@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests that verify Pause/Resume functionality."""
 
+import time
+
+from subprocess import run, PIPE
+
 import host_tools.network as net_tools
 
 
 def test_pause_resume(test_microvm_with_ssh, network_config):
-    """Test a regular microvm API start sequence."""
+    """Test pausing and resuming of vcpus."""
     test_microvm = test_microvm_with_ssh
     test_microvm.spawn()
 
@@ -61,3 +65,42 @@ def test_pause_resume(test_microvm_with_ssh, network_config):
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
     response = test_microvm.actions.put(action_type='ResumeVCPUs')
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
+
+
+def test_snapshot_without_devices(test_microvm_with_api):
+    """Test snapshotting functionality."""
+    test_microvm = test_microvm_with_api
+    test_microvm.spawn()
+
+    # Set up the microVM with 2 vCPUs, 256 MiB of RAM and
+    # a root file system with the rw permission.
+    test_microvm.basic_config()
+
+    # Snapshotting the microVM before being started should not work.
+    response = test_microvm.actions.put(action_type='PauseToSnapshot')
+    assert test_microvm.api_session.is_status_bad_request(response.status_code)
+    assert "Microvm is not running." in response.text
+
+    # Start microVM.
+    test_microvm.start()
+    time.sleep(0.3)
+
+    # The APIs for snapshot related procedures does not get timed (yet?).
+    test_microvm.api_session.untime()
+
+    response = test_microvm.actions.put(action_type='PauseToSnapshot')
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+
+    test_microvm.jailer.cleanup(force=False)
+    test_microvm.spawn()
+
+    response = test_microvm.actions.put(action_type='ResumeFromSnapshot')
+    assert test_microvm.api_session.is_status_no_content(response.status_code)
+
+    # We are making sure that the firecracker process has started.
+    process = run("ps -u {} -o args | grep \"firecracker --id={}\"".format(
+        test_microvm.jailer.uid,
+        test_microvm.id
+    ), shell=True, check=True, stdout=PIPE)
+    assert "firecracker --id={}".format(test_microvm.id) \
+           in process.stdout.decode('utf-8')
