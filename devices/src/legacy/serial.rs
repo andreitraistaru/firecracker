@@ -77,8 +77,12 @@ impl Serial {
         len: Option<usize>,
     ) -> Serial {
         let data_len = len.unwrap_or(1);
+        let interrupt_enable = match out {
+            Some(_) => IER_RECV_BIT,
+            None => 0,
+        };
         Serial {
-            interrupt_enable: 0,
+            interrupt_enable,
             interrupt_identification: DEFAULT_INTERRUPT_IDENTIFICATION,
             interrupt_evt,
             line_control: DEFAULT_LINE_CONTROL,
