@@ -14,6 +14,7 @@ use std::ops::Deref;
 use std::result;
 use std::sync::atomic::{fence, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Barrier};
 use std::thread;
 
 use super::{KvmContext, TimestampUs};
@@ -350,19 +351,28 @@ pub struct VmState {
 
 /// List of events that the Vcpu can receive.
 pub enum VcpuEvent {
-    /// Event that should pause the Vcpu.
+    /// Kill the Vcpu.
+    Exit,
+    /// Pause the Vcpu.
     Pause,
+    /// Pause the Vcpu, then serialize it.
+    PauseToSnapshot(Arc<Barrier>),
     /// Event that should resume the Vcpu.
     Resume,
+    /// Deserialize Vcpu.
+    Deserialize(Box<VcpuState>),
 }
 
 /// List of responses that the Vcpu reports.
-#[derive(Debug, PartialEq)]
 pub enum VcpuResponse {
     /// Vcpu is paused.
     Paused,
+    /// Vcpu is paused to snapshot.
+    PausedToSnapshot(Box<VcpuState>),
     /// Vcpu is resumed.
     Resumed,
+    /// Vcpu is deserialized.
+    Deserialized,
 }
 
 // Rustacean implementation of a state machine.
@@ -539,7 +549,6 @@ impl VcpuHandle {
     }
 
     /// Will block until thread is joined, make sure the vcpu has exited.
-    #[allow(dead_code)]
     pub fn join_vcpu_thread(self) -> Result<()> {
         match self.state {
             // Use expect() to crash the other thread had panicked.
@@ -916,12 +925,30 @@ impl Vcpu {
 
         // Break this emulation loop on any transition request/external event.
         match self.event_receiver.try_recv() {
+            // Running ---- Exit ----> Exited
+            Ok(VcpuEvent::Exit) => {
+                // Move to 'exited' state.
+                StateStruct::next(Self::exited)
+            }
             // Running ---- Pause ----> Paused
             Ok(VcpuEvent::Pause) => {
                 // Nothing special to do.
                 self.response_sender
                     .send(VcpuResponse::Paused)
                     .expect("failed to send pause status");
+                // Move to 'paused' state.
+                StateStruct::next(Self::paused)
+            }
+            Ok(VcpuEvent::PauseToSnapshot(thread_barrier)) => {
+                // All other vcpus need to be out of KVM_RUN before trying serialization.
+                thread_barrier.wait();
+
+                // Save vcpu state.
+                let vcpu_state = self.save_state().expect("failed to get vcpu state");
+                self.response_sender
+                    .send(VcpuResponse::PausedToSnapshot(Box::new(vcpu_state)))
+                    .expect("failed to send vcpu state");
+
                 // Move to 'paused' state.
                 StateStruct::next(Self::paused)
             }
@@ -938,6 +965,11 @@ impl Vcpu {
     // This is the main loop of the `Paused` state.
     fn paused(&mut self) -> StateStruct<Self> {
         match self.event_receiver.recv() {
+            // Paused ---- Exit ----> Exited
+            Ok(VcpuEvent::Exit) => {
+                // Move to 'exited' state.
+                StateStruct::next(Self::exited)
+            }
             // Paused ---- Resume ----> Running
             Ok(VcpuEvent::Resume) => {
                 // Nothing special to do.
@@ -946,6 +978,15 @@ impl Vcpu {
                     .expect("failed to send resume status");
                 // Move to 'running' state.
                 StateStruct::next(Self::running)
+            }
+            // Paused ---- ResumeFromSnapshot ----> Running
+            Ok(VcpuEvent::Deserialize(vcpu_state)) => {
+                self.restore_state(*vcpu_state)
+                    .expect("restore state failed");
+                self.response_sender
+                    .send(VcpuResponse::Deserialized)
+                    .expect("failed to send resume status");
+                StateStruct::next(Self::paused)
             }
             // All other events have no effect on current 'paused' state.
             Ok(_) => StateStruct::next(Self::paused),
@@ -1065,20 +1106,21 @@ impl Drop for Vcpu {
 
 /// Structure holding VCPU kvm state.
 pub struct VcpuState {
-    cpuid: CpuId,
-    msrs: KvmMsrs,
-    debug_regs: kvm_debugregs,
-    lapic: kvm_lapic_state,
-    mp_state: kvm_mp_state,
-    regs: kvm_regs,
-    sregs: kvm_sregs,
-    vcpu_events: kvm_vcpu_events,
-    xcrs: kvm_xcrs,
-    xsave: kvm_xsave,
+    pub cpuid: CpuId,
+    pub msrs: KvmMsrs,
+    pub debug_regs: kvm_debugregs,
+    pub lapic: kvm_lapic_state,
+    pub mp_state: kvm_mp_state,
+    pub regs: kvm_regs,
+    pub sregs: kvm_sregs,
+    pub vcpu_events: kvm_vcpu_events,
+    pub xcrs: kvm_xcrs,
+    pub xsave: kvm_xsave,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fmt;
     use std::os::unix::io::AsRawFd;
     use std::sync::mpsc;
     use std::thread;
@@ -1096,6 +1138,35 @@ mod tests {
             let (_, r2) = channel();
             self.event_sender = s1;
             self.response_receiver = r2;
+        }
+    }
+
+    impl PartialEq for VcpuResponse {
+        fn eq(&self, other: &Self) -> bool {
+            use VcpuResponse::*;
+            // Guard match with no wildcard to make sure we catch new enum variants.
+            match self {
+                Paused | PausedToSnapshot(_) | Resumed | Deserialized => (),
+            };
+            match (self, other) {
+                (Paused, Paused) => true,
+                (PausedToSnapshot(_), PausedToSnapshot(_)) => true,
+                (Resumed, Resumed) => true,
+                (Deserialized, Deserialized) => true,
+                _ => false,
+            }
+        }
+    }
+
+    impl fmt::Debug for VcpuResponse {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            use VcpuResponse::*;
+            match self {
+                Paused => write!(f, "VcpuResponse::Paused"),
+                PausedToSnapshot(_) => write!(f, "VcpuResponse::PausedToSnapshot"),
+                Resumed => write!(f, "VcpuResponse::Resumed"),
+                Deserialized => write!(f, "VcpuResponse::Deserialized"),
+            }
         }
     }
 

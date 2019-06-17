@@ -41,6 +41,7 @@ pub mod default_syscalls;
 mod device_manager;
 /// Signal handling utilities.
 pub mod signal_handler;
+mod snapshot;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 mod vstate;
@@ -54,7 +55,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::result;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Barrier, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -80,16 +81,17 @@ use kernel::loader as kernel_loader;
 use kvm::*;
 use logger::error::LoggerError;
 use logger::{AppInfo, Level, LogOption, Metric, LOGGER, METRICS};
-use memory_model::{GuestAddress, GuestMemory};
+use memory_model::{FileMemoryDesc, GuestAddress, GuestMemory};
 use net_util::TapError;
 #[cfg(target_arch = "aarch64")]
 use serde_json::Value;
+use snapshot::*;
 use sys_util::{EventFd, Terminal};
 use vmm_config::boot_source::{BootSourceConfig, BootSourceConfigError};
 use vmm_config::drive::{BlockDeviceConfig, BlockDeviceConfigs, DriveError};
 use vmm_config::instance_info::{
-    InstanceInfo, InstanceState, PauseMicrovmError, ResumeMicrovmError, StartMicrovmError,
-    StateError,
+    InstanceInfo, InstanceState, KillVcpusError, PauseMicrovmError, ResumeMicrovmError,
+    StartMicrovmError, StateError,
 };
 use vmm_config::logger::{LoggerConfig, LoggerConfigError, LoggerLevel};
 use vmm_config::machine_config::{VmConfig, VmConfigError};
@@ -99,7 +101,7 @@ use vmm_config::net::{
 };
 #[cfg(feature = "vsock")]
 use vmm_config::vsock::{VsockDeviceConfig, VsockDeviceConfigs, VsockError};
-use vstate::{Vcpu, VcpuEvent, VcpuHandle, VcpuResponse, Vm};
+use vstate::{Vcpu, VcpuEvent, VcpuHandle, VcpuResponse, VcpuState, Vm};
 
 /// Default guest kernel command line:
 /// - `reboot=k` shut down the guest on reboot, instead of well... rebooting;
@@ -317,7 +319,9 @@ impl std::convert::From<PauseMicrovmError> for VmmActionError {
                 MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
                 VcpusInvalidState => ErrorKind::Internal,
             },
-            SignalVcpu(_) | VcpuPause => ErrorKind::Internal,
+            OpenSnapshotFile(_) => ErrorKind::User,
+            InvalidSnapshot | SaveVmState(_) | SaveVcpuState | SerializeVcpu(_) | StopVcpus(_)
+            | SyncHeader(_) | SyncMemory(_) | SignalVcpu(_) | VcpuPause => ErrorKind::Internal,
         };
         VmmActionError::PauseMicrovm(kind, e)
     }
@@ -333,7 +337,9 @@ impl std::convert::From<ResumeMicrovmError> for VmmActionError {
                 MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
                 VcpusInvalidState => ErrorKind::Internal,
             },
-            SignalVcpu(_) | VcpuResume => ErrorKind::Internal,
+            OpenSnapshotFile(_) => ErrorKind::User,
+            DeserializeVcpu(_) | RestoreVmState(_) | RestoreVcpuState | SignalVcpu(_)
+            | StartMicroVm(_) | VcpuResume => ErrorKind::Internal,
         };
         VmmActionError::ResumeMicrovm(kind, e)
     }
@@ -371,6 +377,7 @@ impl std::convert::From<StartMicrovmError> for VmmActionError {
             | StartMicrovmError::RegisterNetDevice(_)
             | StartMicrovmError::SeccompFilters(_)
             | StartMicrovmError::SignalVcpu(_)
+            | StartMicrovmError::SnapshotBackingFile(_)
             | StartMicrovmError::Vcpu(_)
             | StartMicrovmError::VcpuConfigure(_)
             | StartMicrovmError::VcpusAlreadyPresent
@@ -460,12 +467,16 @@ pub enum VmmAction {
     /// `VsockDeviceConfig` as input. This action can only be called before the microVM has
     /// booted. The response is sent using the `OutcomeSender`.
     InsertVsockDevice(VsockDeviceConfig, OutcomeSender),
+    /// Pause the microVM, save its state to the snapshot file and end this Firecracker process.
+    PauseToSnapshot(OutcomeSender),
     /// Pause the microVM VCPUs, effectively pausing the guest.
     PauseVCPUs(OutcomeSender),
     /// Update the size of an existing block device specified by an ID. The ID is the first data
     /// associated with this enum variant. This action can only be called after the microVM is
     /// started. The response is sent using the `OutcomeSender`.
     RescanBlockDevice(String, OutcomeSender),
+    /// Load the microVM state from the snapshot file and resume its operation.
+    ResumeFromSnapshot(OutcomeSender),
     /// Resume the microVM VCPUs, thus resuming a paused guest.
     ResumeVCPUs(OutcomeSender),
     /// Set the microVM configuration (memory & vcpu) using `VmConfig` as input. This
@@ -551,6 +562,14 @@ impl KvmContext {
         #[cfg(target_arch = "x86_64")]
         check_cap(&kvm, Cap::SetTssAddr)?;
         check_cap(&kvm, Cap::UserMemory)?;
+        check_cap(&kvm, Cap::MsrFeatures)?;
+        check_cap(&kvm, Cap::VcpuEvents)?;
+        #[cfg(target_arch = "x86_64")]
+        check_cap(&kvm, Cap::Debugregs)?;
+        #[cfg(target_arch = "x86_64")]
+        check_cap(&kvm, Cap::Xsave)?;
+        #[cfg(target_arch = "x86_64")]
+        check_cap(&kvm, Cap::Xcrs)?;
 
         #[cfg(target_arch = "aarch64")]
         check_cap(&kvm, Cap::ArmPsci02)?;
@@ -803,6 +822,8 @@ struct Vmm {
 
     // The level of seccomp filtering used. Seccomp filters are loaded before executing guest code.
     seccomp_level: u32,
+
+    snapshot_image: Option<SnapshotImage>,
 }
 
 impl Vmm {
@@ -850,6 +871,8 @@ impl Vmm {
             from_api,
             write_metrics_event,
             seccomp_level,
+
+            snapshot_image: None,
         })
     }
 
@@ -1112,11 +1135,32 @@ impl Vmm {
                 memory_model::GuestMemoryError::MemoryNotInitialized,
             ))?
             << 20;
-
-        self.guest_memory = Some(
-            GuestMemory::new_anon_from_tuples(&arch::arch_memory_regions(mem_size))
-                .map_err(StartMicrovmError::GuestMemory)?,
-        );
+        let arch_mem_regions = arch::arch_memory_regions(mem_size);
+        let guest_memory = match self.snapshot_image.as_ref() {
+            Some(image) => {
+                let mut ranges = Vec::<FileMemoryDesc>::with_capacity(arch_mem_regions.len());
+                let snapshot_fd = image.as_raw_fd();
+                let mut region_offset = image.memory_offset();
+                let shared_mapping = image.is_shared_mapping();
+                for (gpa, size) in arch_mem_regions {
+                    ranges.push(FileMemoryDesc {
+                        gpa,
+                        size,
+                        fd: snapshot_fd,
+                        offset: region_offset,
+                        shared: shared_mapping,
+                    });
+                    region_offset += size;
+                }
+                GuestMemory::new_file_backed(&ranges).map_err(StartMicrovmError::GuestMemory)?
+            }
+            None => {
+                warn!("No snapshot file found, defaulting to using anonymous memory.");
+                GuestMemory::new_anon_from_tuples(&arch_mem_regions)
+                    .map_err(StartMicrovmError::GuestMemory)?
+            }
+        };
+        self.guest_memory = Some(guest_memory);
         self.vm
             .memory_init(
                 self.guest_memory
@@ -1315,7 +1359,9 @@ impl Vmm {
             handle
                 .start_vcpu(
                     self.seccomp_level,
-                    self.mmio_device_manager.as_ref().map(|devmgr| devmgr.bus.clone()),
+                    self.mmio_device_manager
+                        .as_ref()
+                        .map(|devmgr| devmgr.bus.clone()),
                 )
                 .map_err(StartMicrovmError::VcpuSpawn)?
         }
@@ -1416,6 +1462,25 @@ impl Vmm {
         Ok(())
     }
 
+    fn snapshot_filename(&self) -> String {
+        format!("foo_{}.image", self.shared_info.read().unwrap().id)
+    }
+
+    // Creates the snapshot file that will later be populated.
+    fn create_snapshot_file(&mut self) -> std::result::Result<(), StartMicrovmError> {
+        let nmsrs = self.vm.supported_msrs().as_original_struct().nmsrs;
+        let ncpuids = self.vm.supported_cpuid().as_original_struct().nent;
+        let image: SnapshotImage = SnapshotImage::create_new(
+            self.snapshot_filename(),
+            self.vm_config.clone(),
+            nmsrs,
+            ncpuids,
+        )
+        .map_err(StartMicrovmError::SnapshotBackingFile)?;
+        self.snapshot_image = Some(image);
+        Ok(())
+    }
+
     fn start_microvm(&mut self) -> VmmRequestOutcome {
         info!("VMM received instance start command");
         if self.is_instance_initialized() {
@@ -1432,6 +1497,9 @@ impl Vmm {
             .write()
             .expect("Failed to start microVM because shared info couldn't be written due to poisoned lock")
             .state = InstanceState::Starting;
+
+        #[cfg(target_arch = "x86_64")]
+        self.create_snapshot_file()?;
 
         self.init_guest_memory()?;
 
@@ -1988,7 +2056,7 @@ impl Vmm {
             .expect("one-shot channel closed");
     }
 
-    fn check_vcpus_active(&self) -> std::result::Result<(), StateError> {
+    fn validate_vcpus_are_active(&self) -> std::result::Result<(), StateError> {
         if !self.is_instance_initialized() {
             return Err(StateError::MicroVMIsNotRunning);
         }
@@ -2001,7 +2069,7 @@ impl Vmm {
     }
 
     fn pause_vcpus(&mut self) -> VmmRequestOutcome {
-        self.check_vcpus_active()
+        self.validate_vcpus_are_active()
             .map_err(PauseMicrovmError::MicroVMInvalidState)?;
 
         for handle in self.vcpus_handles.iter() {
@@ -2023,7 +2091,7 @@ impl Vmm {
     }
 
     fn resume_vcpus(&mut self) -> VmmRequestOutcome {
-        self.check_vcpus_active()
+        self.validate_vcpus_are_active()
             .map_err(ResumeMicrovmError::MicroVMInvalidState)?;
 
         for handle in self.vcpus_handles.iter() {
@@ -2040,6 +2108,196 @@ impl Vmm {
                 _ => Err(ResumeMicrovmError::VcpuResume)?,
             }
         }
+        Ok(VmmData::Empty)
+    }
+
+    fn kill_vcpus(&mut self) -> std::result::Result<(), KillVcpusError> {
+        self.validate_vcpus_are_active()
+            .map_err(KillVcpusError::MicroVMInvalidState)?;
+
+        for handle in self.vcpus_handles.iter() {
+            handle
+                .send_event(VcpuEvent::Exit)
+                .map_err(KillVcpusError::SignalVcpu)?;
+        }
+        for mut handle in self.vcpus_handles.drain(..) {
+            handle.join_vcpu_thread().expect("Unreachable.");
+        }
+
+        Ok(())
+    }
+
+    fn pause_to_snapshot(&mut self) -> VmmRequestOutcome {
+        let request_ts = TimestampUs {
+            time_us: get_time_us(),
+            cputime_us: now_cputime_us(),
+        };
+
+        self.validate_vcpus_are_active()
+            .map_err(PauseMicrovmError::MicroVMInvalidState)?;
+
+        // Signal vcpus to pause to snapshot.
+        let vcpus_thread_barrier = Arc::new(Barrier::new(self.vcpus_handles.len() + 1));
+        for handle in self.vcpus_handles.iter() {
+            handle
+                .send_event(VcpuEvent::PauseToSnapshot(vcpus_thread_barrier.clone()))
+                .map_err(PauseMicrovmError::SignalVcpu)?;
+        }
+        // All vcpus need to be out of KVM_RUN before trying serialization.
+        vcpus_thread_barrier.wait();
+
+        // Serialize kvm VM state.
+        self.snapshot_image.as_mut().unwrap().set_kvm_vm_state(
+            self.vm
+                .save_state()
+                .map_err(PauseMicrovmError::SaveVmState)?,
+        );
+
+        // Retrieve the vcpus states and serialize them.
+        for (idx, mut handle) in self.vcpus_handles.iter().enumerate() {
+            match handle
+                .response_receiver()
+                .recv_timeout(Duration::from_millis(400))
+            {
+                Ok(VcpuResponse::PausedToSnapshot(vcpu_state)) => {
+                    self.snapshot_image
+                        .as_mut()
+                        .unwrap()
+                        .serialize_vcpu(idx, *vcpu_state)
+                        .map_err(PauseMicrovmError::SerializeVcpu)?;
+                }
+                _ => Err(PauseMicrovmError::SaveVcpuState)?,
+            }
+        }
+
+        self.snapshot_image
+            .as_mut()
+            .unwrap()
+            .sync_header()
+            .map_err(PauseMicrovmError::SyncHeader)?;
+        self.guest_memory
+            .as_ref()
+            .unwrap()
+            .sync()
+            .map_err(PauseMicrovmError::SyncMemory)?;
+
+        // This will also notify the VMM (current) thread and will lead to firecracker exit.
+        self.kill_vcpus().map_err(PauseMicrovmError::StopVcpus)?;
+
+        // Relinquish ownership of the snapshot image.
+        self.snapshot_image = None;
+
+        Self::log_boot_time(&request_ts);
+
+        Ok(VmmData::Empty)
+    }
+
+    fn resume_from_snapshot(&mut self) -> VmmRequestOutcome {
+        let request_ts = TimestampUs {
+            time_us: get_time_us(),
+            cputime_us: now_cputime_us(),
+        };
+
+        if self.is_instance_initialized() {
+            Err(ResumeMicrovmError::MicroVMInvalidState(
+                StateError::MicroVMAlreadyRunning,
+            ))?;
+        }
+
+        let snapshot_image: SnapshotImage = SnapshotImage::open_existing(
+            self.snapshot_filename(),
+            self.vm.supported_msrs().as_original_struct().nmsrs,
+            self.vm.supported_cpuid().as_original_struct().nent,
+        )
+        .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
+
+        snapshot_image
+            .can_deserialize()
+            .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
+
+        // Use expect() to crash if the other thread poisoned this lock.
+        self.shared_info
+            .write()
+            .expect("Failed to start microVM because shared info couldn't be written due to poisoned lock")
+            .state = InstanceState::Resuming;
+
+        self.vm_config.vcpu_count = Some(snapshot_image.vcpu_count());
+        self.vm_config.mem_size_mib = Some(snapshot_image.mem_size_mib());
+
+        self.snapshot_image = Some(snapshot_image);
+
+        self.init_guest_memory()?;
+
+        self.setup_interrupt_controller()?;
+
+        self.vm
+            .restore_state(
+                self.snapshot_image
+                    .as_mut()
+                    .unwrap()
+                    .kvm_vm_state()
+                    .as_ref()
+                    .unwrap(),
+            )
+            .map_err(ResumeMicrovmError::RestoreVmState)?;
+
+        self.attach_legacy_devices()?;
+
+        {
+            // Instantiate the MMIO device manager.
+            // 'mmio_base' address has to be an address which is protected by the kernel.
+            self.mmio_device_manager = Some(MMIODeviceManager::new(
+                self.guest_memory
+                    .clone()
+                    .ok_or(StartMicrovmError::GuestMemory(
+                        memory_model::GuestMemoryError::MemoryNotInitialized,
+                    ))?,
+                &mut (arch::get_reserved_mem_addr() as u64),
+                (arch::IRQ_BASE, arch::IRQ_MAX),
+            ));
+        }
+        self.register_events()?;
+
+        self.create_vcpus(request_ts.clone())?;
+
+        self.start_vcpus()?;
+
+        {
+            let image = self.snapshot_image.as_mut().unwrap();
+            assert_eq!(self.vcpus_handles.len(), image.vcpu_count() as usize);
+            for (idx, handle) in self.vcpus_handles.iter_mut().enumerate() {
+                let state: VcpuState = image
+                    .deser_vcpu(idx)
+                    .map_err(ResumeMicrovmError::DeserializeVcpu)?;
+                handle
+                    .send_event(VcpuEvent::Deserialize(Box::new(state)))
+                    .map_err(ResumeMicrovmError::SignalVcpu)?;
+            }
+        }
+
+        for handle in self.vcpus_handles.iter() {
+            match handle
+                .response_receiver()
+                .recv_timeout(Duration::from_millis(400))
+            {
+                Ok(VcpuResponse::Deserialized) => (),
+                _ => {
+                    Err(ResumeMicrovmError::RestoreVcpuState)?;
+                }
+            }
+        }
+
+        // Send the 'resume' command so that vcpus actually start running.
+        self.resume_vcpus()?;
+
+        Self::log_boot_time(&request_ts);
+
+        // Use expect() to crash if the other thread poisoned this lock.
+        self.shared_info
+            .write()
+            .expect("Failed to start microVM because shared info couldn't be written due to poisoned lock")
+            .state = InstanceState::Running;
+
         Ok(VmmData::Empty)
     }
 
@@ -2086,11 +2344,17 @@ impl Vmm {
             VmmAction::InsertVsockDevice(vsock_cfg, sender) => {
                 Vmm::send_response(self.insert_vsock_device(vsock_cfg), sender);
             }
+            VmmAction::PauseToSnapshot(sender) => {
+                Vmm::send_response(self.pause_to_snapshot(), sender);
+            }
             VmmAction::PauseVCPUs(sender) => {
                 Vmm::send_response(self.pause_vcpus(), sender);
             }
             VmmAction::RescanBlockDevice(drive_id, sender) => {
                 Vmm::send_response(self.rescan_block_device(&drive_id), sender);
+            }
+            VmmAction::ResumeFromSnapshot(sender) => {
+                Vmm::send_response(self.resume_from_snapshot(), sender);
             }
             VmmAction::ResumeVCPUs(sender) => {
                 Vmm::send_response(self.resume_vcpus(), sender);
@@ -2154,11 +2418,13 @@ impl PartialEq for VmmAction {
                 &VmmAction::InsertNetworkDevice(ref net_dev, _),
                 &VmmAction::InsertNetworkDevice(ref other_net_dev, _),
             ) => net_dev == other_net_dev,
+            (&VmmAction::PauseToSnapshot(_), &VmmAction::PauseToSnapshot(_)) => true,
             (&VmmAction::PauseVCPUs(_), &VmmAction::PauseVCPUs(_)) => true,
             (
                 &VmmAction::RescanBlockDevice(ref req, _),
                 &VmmAction::RescanBlockDevice(ref other_req, _),
             ) => req == other_req,
+            (&VmmAction::ResumeFromSnapshot(_), &VmmAction::ResumeFromSnapshot(_)) => true,
             (&VmmAction::ResumeVCPUs(_), &VmmAction::ResumeVCPUs(_)) => true,
             (
                 &VmmAction::SetVmConfiguration(ref vm_config, _),
@@ -2860,25 +3126,14 @@ mod tests {
         let res = vmm.start_microvm();
         let stdin_handle = io::stdin();
         stdin_handle.lock().set_canon_mode().unwrap();
+        // Kill vcpus and join spawned threads.
+        vmm.kill_vcpus().expect("failed to kill vcpus");
+        std::fs::remove_file(vmm.snapshot_filename()).expect("failed to delete snapshot");
         assert!(res.is_ok());
     }
 
     #[test]
-    fn microvm_start() {
-        let mut vmm = create_vmm_object(InstanceState::Uninitialized);
-
-        vmm.default_kernel_config(Some(good_kernel_file()));
-        // The kernel provided contains  "return 0" which will make the
-        // advanced seccomp filter return bad syscall so we disable it.
-        vmm.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
-        let res = vmm.start_microvm();
-        let stdin_handle = io::stdin();
-        stdin_handle.lock().set_canon_mode().unwrap();
-        assert!(res.is_ok());
-    }
-
-    #[test]
-    fn instance_state() {
+    fn test_instance_state() {
         let vmm = create_vmm_object(InstanceState::Uninitialized);
         assert!(!vmm.is_instance_initialized());
         assert!(!vmm.is_instance_running());
@@ -3769,6 +4024,127 @@ mod tests {
             error_kind(StartMicrovmError::VcpuSpawn(vstate::Error::VcpuSpawn(
                 io::Error::from_raw_os_error(0)
             ))),
+            ErrorKind::Internal
+        );
+        // Test `PauseMicrovmError` conversion.
+        assert_eq!(
+            error_kind(PauseMicrovmError::MicroVMInvalidState(
+                StateError::MicroVMAlreadyRunning
+            )),
+            ErrorKind::User
+        );
+        assert_eq!(
+            error_kind(PauseMicrovmError::MicroVMInvalidState(
+                StateError::MicroVMIsNotRunning
+            )),
+            ErrorKind::User
+        );
+        assert_eq!(
+            error_kind(PauseMicrovmError::MicroVMInvalidState(
+                StateError::VcpusInvalidState
+            )),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(PauseMicrovmError::SaveVcpuState),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(PauseMicrovmError::SaveVmState(vstate::Error::VmGetIrqChip(
+                io::Error::from_raw_os_error(0)
+            ))),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(PauseMicrovmError::SerializeVcpu(
+                snapshot::Error::InvalidFileType
+            )),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(PauseMicrovmError::SignalVcpu(vstate::Error::SignalVcpu(
+                io::Error::from_raw_os_error(0)
+            ))),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(PauseMicrovmError::StopVcpus(
+                KillVcpusError::MicroVMInvalidState(StateError::MicroVMAlreadyRunning)
+            )),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(PauseMicrovmError::SyncHeader(
+                snapshot::Error::InvalidFileType
+            )),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(PauseMicrovmError::SyncMemory(
+                memory_model::GuestMemoryError::MemoryNotInitialized
+            )),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(PauseMicrovmError::VcpuPause),
+            ErrorKind::Internal
+        );
+
+        // Test `ResumeMicrovmError` conversion.
+        assert_eq!(
+            error_kind(ResumeMicrovmError::DeserializeVcpu(
+                snapshot::Error::InvalidFileType
+            )),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(ResumeMicrovmError::MicroVMInvalidState(
+                StateError::MicroVMAlreadyRunning
+            )),
+            ErrorKind::User
+        );
+        assert_eq!(
+            error_kind(ResumeMicrovmError::MicroVMInvalidState(
+                StateError::MicroVMIsNotRunning
+            )),
+            ErrorKind::User
+        );
+        assert_eq!(
+            error_kind(ResumeMicrovmError::MicroVMInvalidState(
+                StateError::VcpusInvalidState
+            )),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(ResumeMicrovmError::OpenSnapshotFile(
+                snapshot::Error::InvalidFileType
+            )),
+            ErrorKind::User
+        );
+        assert_eq!(
+            error_kind(ResumeMicrovmError::RestoreVmState(
+                vstate::Error::VmSetIrqChip(io::Error::from_raw_os_error(0))
+            )),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(ResumeMicrovmError::RestoreVcpuState),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(ResumeMicrovmError::SignalVcpu(vstate::Error::SignalVcpu(
+                io::Error::from_raw_os_error(0)
+            ))),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(ResumeMicrovmError::StartMicroVm(
+                StartMicrovmError::DeviceManager
+            )),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            error_kind(ResumeMicrovmError::VcpuResume),
             ErrorKind::Internal
         );
     }

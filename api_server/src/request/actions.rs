@@ -18,7 +18,9 @@ enum ActionType {
     BlockDeviceRescan,
     FlushMetrics,
     InstanceStart,
+    PauseToSnapshot,
     PauseVCPUs,
+    ResumeFromSnapshot,
     ResumeVCPUs,
     SendCtrlAltDel,
 }
@@ -54,7 +56,9 @@ fn validate_payload(action_body: &ActionBody) -> Result<(), String> {
         | ActionType::InstanceStart
         | ActionType::SendCtrlAltDel
         | ActionType::PauseVCPUs
-        | ActionType::ResumeVCPUs => {
+        | ActionType::ResumeVCPUs
+        | ActionType::PauseToSnapshot
+        | ActionType::ResumeFromSnapshot => {
             // These actions don't have a payload.
             if action_body.payload.is_some() {
                 return Err(format!(
@@ -98,10 +102,24 @@ impl IntoParsedRequest for ActionBody {
                     sync_receiver,
                 ))
             }
+            ActionType::PauseToSnapshot => {
+                let (sync_sender, sync_receiver) = oneshot::channel();
+                Ok(ParsedRequest::Sync(
+                    VmmAction::PauseToSnapshot(sync_sender),
+                    sync_receiver,
+                ))
+            }
             ActionType::PauseVCPUs => {
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
                     VmmAction::PauseVCPUs(sync_sender),
+                    sync_receiver,
+                ))
+            }
+            ActionType::ResumeFromSnapshot => {
+                let (sync_sender, sync_receiver) = oneshot::channel();
+                Ok(ParsedRequest::Sync(
+                    VmmAction::ResumeFromSnapshot(sync_sender),
                     sync_receiver,
                 ))
             }
@@ -169,10 +187,20 @@ mod tests {
         // Error case: InstanceStart with payload.
         assert!(validate_payload(&action_body_dummy_payload(InstanceStart)).is_err());
 
+        // Test PauseToSnapshot.
+        assert!(validate_payload(&action_body_no_payload(PauseToSnapshot)).is_ok());
+        // Error case: PauseToSnapshot with payload.
+        assert!(validate_payload(&action_body_dummy_payload(PauseToSnapshot)).is_err());
+
         // Test PauseVCPUs.
         assert!(validate_payload(&action_body_no_payload(PauseVCPUs)).is_ok());
         // Error case: PauseVCPUs with payload.
         assert!(validate_payload(&action_body_dummy_payload(PauseVCPUs)).is_err());
+
+        // Test ResumeFromSnapshot.
+        assert!(validate_payload(&action_body_no_payload(ResumeFromSnapshot)).is_ok());
+        // Error case: ResumeFromSnapshot with payload.
+        assert!(validate_payload(&action_body_dummy_payload(ResumeFromSnapshot)).is_err());
 
         // Test ResumeVCPUs.
         assert!(validate_payload(&action_body_no_payload(ResumeVCPUs)).is_ok());
@@ -252,6 +280,24 @@ mod tests {
                 .eq(&req));
         }
 
+        // Test PauseToSnapshot.
+        {
+            let json = r#"{
+                "action_type": "PauseToSnapshot"
+            }"#;
+
+            let (sender, receiver) = oneshot::channel();
+            let req: ParsedRequest =
+                ParsedRequest::Sync(VmmAction::PauseToSnapshot(sender), receiver);
+            let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
+            assert!(result.is_ok());
+            assert!(result
+                .unwrap()
+                .into_parsed_request(None, Method::Put)
+                .unwrap()
+                .eq(&req));
+        }
+
         // Test PauseVCPUs.
         {
             let json = r#"{
@@ -260,6 +306,24 @@ mod tests {
 
             let (sender, receiver) = oneshot::channel();
             let req: ParsedRequest = ParsedRequest::Sync(VmmAction::PauseVCPUs(sender), receiver);
+            let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
+            assert!(result.is_ok());
+            assert!(result
+                .unwrap()
+                .into_parsed_request(None, Method::Put)
+                .unwrap()
+                .eq(&req));
+        }
+
+        // Test ResumeFromSnapshot.
+        {
+            let json = r#"{
+                "action_type": "ResumeFromSnapshot"
+            }"#;
+
+            let (sender, receiver) = oneshot::channel();
+            let req: ParsedRequest =
+                ParsedRequest::Sync(VmmAction::ResumeFromSnapshot(sender), receiver);
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
             assert!(result

@@ -9,6 +9,7 @@ use devices;
 use kernel::loader as kernel_loader;
 use memory_model::GuestMemoryError;
 use seccomp;
+use snapshot;
 use vstate;
 
 /// The microvm state. When Firecracker starts, the instance state is Uninitialized.
@@ -21,6 +22,8 @@ pub enum InstanceState {
     Uninitialized,
     /// Microvm is starting.
     Starting,
+    /// Microvm is resuming.
+    Resuming,
     /// Microvm is running.
     Running,
     /// Microvm received a halt instruction.
@@ -62,13 +65,48 @@ impl Display for StateError {
     }
 }
 
+/// Errors associated with stopping the microVM threads.
+#[derive(Debug)]
+pub enum KillVcpusError {
+    /// Sanity checks failed.
+    MicroVMInvalidState(StateError),
+    /// Failed to signal vcpu.
+    SignalVcpu(vstate::Error),
+}
+
+impl Display for KillVcpusError {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        use self::KillVcpusError::*;
+        match *self {
+            MicroVMInvalidState(ref e) => write!(f, "{}", e),
+            SignalVcpu(ref err) => write!(f, "Failed to signal vCPU: {:?}", err),
+        }
+    }
+}
+
 /// Errors associated with pausing the microVM.
 #[derive(Debug)]
 pub enum PauseMicrovmError {
+    /// Invalid snapshot file.
+    InvalidSnapshot,
     /// Sanity checks failed.
     MicroVMInvalidState(StateError),
+    /// Cannot open the snapshot image file.
+    OpenSnapshotFile(snapshot::Error),
+    /// Failed to save vCPU state.
+    SaveVcpuState,
+    /// Failed to save VM state.
+    SaveVmState(vstate::Error),
+    /// Failed to serialize vCPU state.
+    SerializeVcpu(snapshot::Error),
     /// Failed to send event.
     SignalVcpu(vstate::Error),
+    /// Failed to stop vcpus.
+    StopVcpus(KillVcpusError),
+    /// Failed to sync snapshot.
+    SyncHeader(snapshot::Error),
+    /// Failed to sync memory to snapshot.
+    SyncMemory(GuestMemoryError),
     /// vCPU pause failed.
     VcpuPause,
 }
@@ -77,9 +115,17 @@ impl Display for PauseMicrovmError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::PauseMicrovmError::*;
         match *self {
+            InvalidSnapshot => write!(f, "Invalid snapshot file"),
             MicroVMInvalidState(ref e) => write!(f, "{}", e),
-            SignalVcpu(ref err) => write!(f, "Failed to signal vCPU: {:?}", err),
-            VcpuPause => write!(f, "vCPUs pause failed."),
+            OpenSnapshotFile(ref e) => write!(f, "Cannot open the snapshot image file. {:?}", e),
+            SaveVcpuState => write!(f, "Failed to save vCPU state"),
+            SaveVmState(ref e) => write!(f, "Failed to save VM state: {:?}", e),
+            SerializeVcpu(ref e) => write!(f, "Failed to serialize vCPU state: {:?}", e),
+            SignalVcpu(ref e) => write!(f, "Failed to signal vCPU: {:?}", e),
+            StopVcpus(ref e) => write!(f, "Failed to stop vcpus: {}", e),
+            SyncHeader(ref e) => write!(f, "Failed to sync snapshot: {:?}", e),
+            SyncMemory(ref e) => write!(f, "Failed to sync memory to snapshot: {:?}", e),
+            VcpuPause => write!(f, "vCPUs pause failed"),
         }
     }
 }
@@ -87,10 +133,20 @@ impl Display for PauseMicrovmError {
 /// Errors associated with resuming the microVM.
 #[derive(Debug)]
 pub enum ResumeMicrovmError {
+    /// Failed to deserialize vCPU state.
+    DeserializeVcpu(snapshot::Error),
     /// Sanity checks failed.
     MicroVMInvalidState(StateError),
+    /// Cannot open the snapshot image file.
+    OpenSnapshotFile(snapshot::Error),
+    /// Failed to restore vCPU state.
+    RestoreVcpuState,
+    /// Failed to restore VM state.
+    RestoreVmState(vstate::Error),
     /// Failed to send event.
     SignalVcpu(vstate::Error),
+    /// Setting up microVM for resume failed.
+    StartMicroVm(StartMicrovmError),
     /// vCPU resume failed.
     VcpuResume,
 }
@@ -99,8 +155,15 @@ impl Display for ResumeMicrovmError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::ResumeMicrovmError::*;
         match *self {
+            DeserializeVcpu(ref e) => write!(f, "Failed to deserialize vCPU state: {:?}", e),
             MicroVMInvalidState(ref e) => write!(f, "{}", e),
+            OpenSnapshotFile(ref err) => {
+                write!(f, "Cannot open the snapshot image file: {:?}", err)
+            }
+            RestoreVcpuState => write!(f, "Failed to restore vCPU state."),
+            RestoreVmState(ref e) => write!(f, "Failed to restore VM state: {:?}", e),
             SignalVcpu(ref err) => write!(f, "Failed to signal vCPU: {:?}", err),
+            StartMicroVm(ref err) => write!(f, "Failed resume microVM: {}", err),
             VcpuResume => write!(f, "vCPUs resume failed."),
         }
     }
@@ -163,6 +226,8 @@ pub enum StartMicrovmError {
     SeccompFilters(seccomp::Error),
     /// Failed to signal vCPU.
     SignalVcpu(vstate::Error),
+    /// Cannot create snapshot backing file
+    SnapshotBackingFile(snapshot::Error),
     /// Cannot create a new vCPU file descriptor.
     Vcpu(vstate::Error),
     /// vCPU configuration failed.
@@ -302,6 +367,9 @@ impl Display for StartMicrovmError {
                 write!(f, "Cannot build seccomp filters. {}", err_msg)
             }
             SignalVcpu(ref err) => write!(f, "Failed to signal vCPU: {:?}", err),
+            SnapshotBackingFile(ref err) => {
+                write!(f, "Cannot create snapshot backing file: {:?}", err)
+            }
             Vcpu(ref err) => {
                 let mut err_msg = format!("{:?}", err);
                 err_msg = err_msg.replace("\"", "");
