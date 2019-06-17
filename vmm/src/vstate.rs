@@ -1142,13 +1142,18 @@ pub struct VcpuState {
 #[cfg(test)]
 mod tests {
     use std::fmt;
+    use std::fs::File;
     use std::os::unix::io::AsRawFd;
+    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
     use super::super::devices;
     use super::*;
+
+    use kernel::cmdline as kernel_cmdline;
+    use kernel::loader as kernel_loader;
 
     use libc::EBADF;
 
@@ -1159,6 +1164,14 @@ mod tests {
             let (_, r2) = channel();
             self.event_sender = s1;
             self.response_receiver = r2;
+        }
+
+        fn kick_vcpu(&self) {
+            let thread = match self.state {
+                VcpuHandleState::Active(ref thread) => thread,
+                _ => panic!("cannot kick inactive vcpu"),
+            };
+            thread.kill(VCPU_RTSIG_OFFSET).expect("failed kicking vcpu");
         }
     }
 
@@ -1189,6 +1202,41 @@ mod tests {
                 Deserialized => write!(f, "VcpuResponse::Deserialized"),
             }
         }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn load_good_kernel(vm: &Vm) -> GuestAddress {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let parent = path.parent().unwrap();
+
+        let kernel_path: PathBuf = [parent.to_str().unwrap(), "kernel/src/loader/test_elf.bin"]
+            .iter()
+            .collect();
+
+        let vm_memory = vm.get_memory().expect("vm memory not initialized");
+
+        let mut kernel_file = File::open(kernel_path).expect("Cannot open kernel file");
+        let mut cmdline = kernel_cmdline::Cmdline::new(arch::CMDLINE_MAX_SIZE);
+        assert!(cmdline
+            .insert_str(super::super::DEFAULT_KERNEL_CMDLINE)
+            .is_ok());
+        let cmdline_addr = GuestAddress(arch::x86_64::layout::CMDLINE_START);
+
+        let entry_addr = kernel_loader::load_kernel(
+            vm_memory,
+            &mut kernel_file,
+            arch::x86_64::layout::HIMEM_START,
+        )
+        .expect("failed to load kernel");
+
+        kernel_loader::load_cmdline(
+            vm_memory,
+            cmdline_addr,
+            &cmdline.as_cstring().expect("failed to convert to cstring"),
+        )
+        .expect("failed to load cmdline");
+
+        entry_addr
     }
 
     // Auxiliary function being used throughout the tests.
@@ -1222,7 +1270,8 @@ mod tests {
     // Auxiliary function being used throughout the tests.
     fn setup_vcpu_handler() -> (Vm, VcpuHandle, EventFd) {
         let kvm = KvmContext::new().unwrap();
-        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem_size = 64 << 20;
+        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), mem_size)]).unwrap();
         let mut vm = Vm::new(kvm.fd()).expect("Cannot create new vm");
         assert!(vm.memory_init(gm, &kvm).is_ok());
 
@@ -1569,17 +1618,140 @@ mod tests {
         );
     }
 
+    #[test]
+    fn vcpu_handler() {
+        Vcpu::register_vcpu_kick_signal_handler();
+
+        let (vm, mut vcpu_handle, vcpu_exit_evt) = setup_vcpu_handler();
+        let vm_config = VmConfig::default();
+
+        // Validate not active.
+        assert!(vcpu_handle.validate_active().is_err());
+
+        // Validate sending events fails for inactive vcpus.
+        assert!(vcpu_handle.send_event(VcpuEvent::Pause).is_err());
+
+        // Validate configure success.
+        vcpu_handle
+            .configure_vcpu(&vm_config, GuestAddress(0), &vm)
+            .expect("failed to configure vcpu");
+
+        let seccomp_level = 0;
+        vcpu_handle
+            .start_vcpu(seccomp_level, Some(devices::Bus::new()))
+            .expect("failed to start vcpu");
+
+        // Validate vcpu is active.
+        assert!(vcpu_handle.validate_active().is_ok());
+
+        // Validate configure doesn't work on active vcpu.
+        assert!(vcpu_handle
+            .configure_vcpu(&vm_config, GuestAddress(0), &vm)
+            .is_err());
+        // Validate start doesn't work on active vcpu.
+        assert!(vcpu_handle
+            .start_vcpu(seccomp_level, Some(devices::Bus::new()))
+            .is_err());
+
+        // Validate sending events works for active vcpus. Also stop it by sending exit.
+        assert!(vcpu_handle.send_event(VcpuEvent::Exit).is_ok());
+
+        // Wait a bit to make sure the vcpu processes its event and exits.
+        thread::sleep(Duration::from_millis(100));
+
+        // Validate that the vcpu exited.
+        assert_eq!(vcpu_exit_evt.read().unwrap(), 1);
+
+        // Join the vcpu thread.
+        vcpu_handle
+            .join_vcpu_thread()
+            .expect("failed to join vcpu thread");
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
-    fn vcpu_states() {
+    fn vcpu_handler_join_err() {
+        let (_vm, vcpu_handle, _) = setup_vcpu_handler();
+        // Cannot join an inactive vcpu.
+        assert!(vcpu_handle.join_vcpu_thread().is_err());
+    }
+
+    #[test]
+    fn vcpu_channel_error_in_paused() {
         Vcpu::register_vcpu_kick_signal_handler();
 
         let (vm, mut vcpu_handle, vcpu_exit_evt) = setup_vcpu_handler();
 
         let vm_config = VmConfig::default();
-        assert!(vcpu_handle
+        vcpu_handle
             .configure_vcpu(&vm_config, GuestAddress(0), &vm)
-            .is_ok());
+            .expect("failed to configure vcpu");
+
+        let seccomp_level = 0;
+        vcpu_handle
+            .start_vcpu(seccomp_level, Some(devices::Bus::new()))
+            .expect("failed to start vcpu");
+
+        // Close the Sender end of the channel so that the vcpu waiting on it will error.
+        vcpu_handle.close_vcpu_channel();
+        // Wait a bit to make sure the channel closes and vcpu errors.
+        thread::sleep(Duration::from_millis(100));
+
+        // Validate that the vCPU exited because of the error.
+        assert_eq!(vcpu_exit_evt.read().unwrap(), 1);
+        // Join the vcpu thread.
+        vcpu_handle
+            .join_vcpu_thread()
+            .expect("failed to join vcpu thread");
+    }
+
+    #[test]
+    fn vcpu_channel_error_in_running() {
+        Vcpu::register_vcpu_kick_signal_handler();
+
+        let (vm, mut vcpu_handle, vcpu_exit_evt) = setup_vcpu_handler();
+        // Needs a kernel since we'll actually run this vcpu.
+        let entry_addr = load_good_kernel(&vm);
+
+        let vm_config = VmConfig::default();
+        vcpu_handle
+            .configure_vcpu(&vm_config, entry_addr, &vm)
+            .expect("failed to configure vcpu");
+
+        let seccomp_level = 0;
+        vcpu_handle
+            .start_vcpu(seccomp_level, Some(devices::Bus::new()))
+            .expect("failed to start vcpu");
+
+        // Queue a Resume event, expect a response.
+        queue_event_expect_response(&vcpu_handle, VcpuEvent::Resume, VcpuResponse::Resumed);
+
+        // Close the Sender end of the channel so that the vcpu waiting on it will error.
+        vcpu_handle.close_vcpu_channel();
+        vcpu_handle.kick_vcpu();
+        // Wait a bit to make sure the channel closes and vcpu errors.
+        thread::sleep(Duration::from_millis(100));
+
+        // Validate that the vCPU exited because of the error.
+        assert_eq!(vcpu_exit_evt.read().unwrap(), 1);
+        // Join the vcpu thread.
+        vcpu_handle
+            .join_vcpu_thread()
+            .expect("failed to join vcpu thread");
+    }
+
+    #[test]
+    fn vcpu_pause_resume() {
+        Vcpu::register_vcpu_kick_signal_handler();
+
+        let (vm, mut vcpu_handle, vcpu_exit_evt) = setup_vcpu_handler();
+        // Needs a kernel since we'll actually run this vcpu.
+        let entry_addr = load_good_kernel(&vm);
+
+        let vm_config = VmConfig::default();
+        vcpu_handle
+            .configure_vcpu(&vm_config, entry_addr, &vm)
+            .expect("failed to configure vcpu");
 
         let seccomp_level = 0;
         vcpu_handle
@@ -1607,15 +1779,113 @@ mod tests {
         // Queue another Pause event, expect a response.
         queue_event_expect_response(&vcpu_handle, VcpuEvent::Pause, VcpuResponse::Paused);
 
-        // Close the Sender end of the channel so that the vcpu waiting on it will error.
-        vcpu_handle.close_vcpu_channel();
-        // Wait a bit to make sure the channel closes and vcpu errors.
+        // Queue a Resume event, expect a response.
+        queue_event_expect_response(&vcpu_handle, VcpuEvent::Resume, VcpuResponse::Resumed);
+
+        // Stop it by sending exit.
+        assert!(vcpu_handle.send_event(VcpuEvent::Exit).is_ok());
+        // Wait a bit to make sure the vcpu processes its event and exits.
         thread::sleep(Duration::from_millis(100));
 
-        // Validate that the vCPU exited because of the error.
+        // Validate that the vCPU exited.
         assert_eq!(vcpu_exit_evt.read().unwrap(), 1);
         // Validate vCPU thread ends execution.
         vcpu_handle
+            .join_vcpu_thread()
+            .expect("failed to join thread");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn vcpu_pause_to_snapshot_recreate_deser_and_resume() {
+        Vcpu::register_vcpu_kick_signal_handler();
+
+        // Create first vcpu.
+        let (vm, mut vcpu1_handle, vcpu1_exit_evt) = setup_vcpu_handler();
+        // Create second vcpu.
+        let vcpu2_exit_evt = EventFd::new().unwrap();
+        let mut vcpu2_handle = VcpuHandle::new(
+            2,
+            &vm,
+            devices::Bus::new(),
+            vcpu2_exit_evt.try_clone().unwrap(),
+            super::super::TimestampUs::default(),
+        )
+        .expect("Cannot create Vcpu");
+
+        // Needs a kernel since we'll actually run this vcpu.
+        let entry_addr = load_good_kernel(&vm);
+
+        let vm_config = VmConfig::default();
+        vcpu1_handle
+            .configure_vcpu(&vm_config, entry_addr, &vm)
+            .expect("failed to configure vcpu");
+
+        let seccomp_level = 0;
+        vcpu1_handle
+            .start_vcpu(seccomp_level, Some(devices::Bus::new()))
+            .expect("failed to start vcpu1");
+        vcpu2_handle
+            .start_vcpu(seccomp_level, Some(devices::Bus::new()))
+            .expect("failed to start vcpu2");
+
+        // Queue a Resume event, expect a response.
+        queue_event_expect_response(&vcpu1_handle, VcpuEvent::Resume, VcpuResponse::Resumed);
+
+        let thread_barrier = Arc::new(Barrier::new(2));
+        // Queue a PauseToSnapshot event.
+        vcpu1_handle
+            .send_event(VcpuEvent::PauseToSnapshot(thread_barrier.clone()))
+            .expect("failed to send event to vcpu");
+        // No response until thread_barrier is done.
+        assert_eq!(
+            vcpu1_handle
+                .response_receiver()
+                .recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        // Complete the thread barrier.
+        thread_barrier.wait();
+        // Response should now arrive.
+        let vcpu_state = match vcpu1_handle
+            .response_receiver()
+            .recv_timeout(Duration::from_millis(100))
+            .expect("did not receive event response from vcpu")
+        {
+            VcpuResponse::PausedToSnapshot(vcpu_state) => vcpu_state,
+            _ => panic!("expected vcpu state, got something else"),
+        };
+
+        // Stop it by sending exit.
+        assert!(vcpu1_handle.send_event(VcpuEvent::Exit).is_ok());
+        // Wait a bit to make sure the vcpu processes its event and exits.
+        thread::sleep(Duration::from_millis(100));
+
+        // Validate that the vCPU exited.
+        assert_eq!(vcpu1_exit_evt.read().unwrap(), 1);
+        // Validate vCPU thread ends execution.
+        vcpu1_handle
+            .join_vcpu_thread()
+            .expect("failed to join thread");
+
+        // Restore on second vcpu.
+
+        // Queue a Deserialize event.
+        queue_event_expect_response(
+            &vcpu2_handle,
+            VcpuEvent::Deserialize(vcpu_state),
+            VcpuResponse::Deserialized,
+        );
+
+        // Stop it by sending exit.
+        assert!(vcpu2_handle.send_event(VcpuEvent::Exit).is_ok());
+        // Wait a bit to make sure the vcpu processes its event and exits.
+        thread::sleep(Duration::from_millis(100));
+
+        // Validate that the vCPU exited.
+        assert_eq!(vcpu2_exit_evt.read().unwrap(), 1);
+        // Validate vCPU thread ends execution.
+        vcpu2_handle
             .join_vcpu_thread()
             .expect("failed to join thread");
     }

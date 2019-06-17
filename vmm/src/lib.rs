@@ -3149,6 +3149,7 @@ mod tests {
     #[test]
     fn test_microvm_start() {
         let mut vmm = create_vmm_object(InstanceState::Uninitialized);
+        vmm.shared_info.write().unwrap().id = String::from("microvm_start_test");
 
         vmm.default_kernel_config(Some(good_kernel_file()));
         // The kernel provided contains  "return 0" which will make the
@@ -3782,6 +3783,47 @@ mod tests {
             .get_device_info()
             .get(&(DeviceType::Serial, "uart".to_string()))
             .is_some());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn microvm_pause_and_resume_from_snapshot() {
+        let microvm_id = String::from("pause_resume_test");
+        let mut vmm1_wrap = Some(create_vmm_object(InstanceState::Uninitialized));
+        let mut vmm2 = create_vmm_object(InstanceState::Uninitialized);
+        // Create microVM and snapshot it.
+        let snapshot_filename = {
+            // Take it out of the wrapper so it goes out of scope at the end of this block.
+            let mut vmm1 = vmm1_wrap.take().unwrap();
+            vmm1.shared_info.write().unwrap().id = microvm_id.clone();
+
+            vmm1.default_kernel_config(Some(good_kernel_file()));
+            // The kernel provided contains  "return 0" which will make the
+            // advanced seccomp filter return bad syscall so we disable it.
+            vmm1.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
+            vmm1.start_microvm().expect("failed to start microvm");
+            let stdin_handle = io::stdin();
+            stdin_handle.lock().set_canon_mode().unwrap();
+
+            assert!(vmm1.pause_to_snapshot().is_ok());
+
+            vmm1.snapshot_filename()
+        };
+
+        // Wait a bit to make sure all the kvm resources associated with this thread are released.
+        thread::sleep(Duration::from_millis(100));
+        // Resume second microVM from snapshot.
+        {
+            vmm2.shared_info.write().unwrap().id = microvm_id.clone();
+            vmm2.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
+            vmm2.resume_from_snapshot()
+                .expect("failed to resume from snapshot");
+            let stdin_handle = io::stdin();
+            stdin_handle.lock().set_canon_mode().unwrap();
+            // Kill vcpus and join spawned threads.
+            vmm2.kill_vcpus().expect("failed to kill vcpus");
+        }
+        std::fs::remove_file(snapshot_filename).expect("failed to delete snapshot");
     }
 
     // Helper function to get ErrorKind of error.

@@ -294,6 +294,7 @@ impl Into<u64> for NoDatamatch {
 /// threads as raw pointers do not implement `Send` and `Sync`.
 pub struct KvmRunWrapper {
     kvm_run_ptr: *mut u8,
+    size: usize,
 }
 
 // Send and Sync aren't automatically inherited for the raw address pointer.
@@ -328,6 +329,7 @@ impl KvmRunWrapper {
 
         Ok(KvmRunWrapper {
             kvm_run_ptr: addr as *mut u8,
+            size,
         })
     }
 
@@ -341,6 +343,14 @@ impl KvmRunWrapper {
         unsafe {
             &mut *(self.kvm_run_ptr as *mut kvm_run)
         }
+    }
+}
+
+impl Drop for KvmRunWrapper {
+    fn drop(&mut self) {
+        // This is safe because we mmap the area at addr ourselves, and nobody
+        // else is holding a reference to it.
+        let _ = unsafe { libc::munmap(self.kvm_run_ptr as *mut libc::c_void, self.size) };
     }
 }
 
@@ -1667,6 +1677,7 @@ mod tests {
         fn new(size: usize) -> Self {
             KvmRunWrapper {
                 kvm_run_ptr: mmap_anonymous(size),
+                size,
             }
         }
     }
