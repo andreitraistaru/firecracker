@@ -119,11 +119,11 @@ impl Display for PauseMicrovmError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::PauseMicrovmError::*;
         match *self {
-            InvalidSnapshot => write!(f, "Invalid snapshot file"),
+            InvalidSnapshot => write!(f, "Invalid snapshot file."),
             MicroVMInvalidState(ref e) => write!(f, "{}", e),
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(ref e) => write!(f, "Cannot open the snapshot image file. {:?}", e),
-            SaveVcpuState => write!(f, "Failed to save vCPU state"),
+            SaveVcpuState => write!(f, "Failed to save vCPU state."),
             SaveVmState(ref e) => write!(f, "Failed to save VM state: {:?}", e),
             #[cfg(target_arch = "x86_64")]
             SerializeVcpu(ref e) => write!(f, "Failed to serialize vCPU state: {:?}", e),
@@ -132,7 +132,7 @@ impl Display for PauseMicrovmError {
             #[cfg(target_arch = "x86_64")]
             SyncHeader(ref e) => write!(f, "Failed to sync snapshot: {:?}", e),
             SyncMemory(ref e) => write!(f, "Failed to sync memory to snapshot: {:?}", e),
-            VcpuPause => write!(f, "vCPUs pause failed"),
+            VcpuPause => write!(f, "vCPUs pause failed."),
         }
     }
 }
@@ -408,6 +408,148 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_kill_vcpus_error_messages() {
+        use self::KillVcpusError::*;
+        assert_eq!(
+            format!("{}", MicroVMInvalidState(StateError::MicroVMIsNotRunning)),
+            format!("{}", StateError::MicroVMIsNotRunning)
+        );
+        assert_eq!(
+            format!("{}", SignalVcpu(vstate::Error::NotEnoughMemorySlots)),
+            format!(
+                "Failed to signal vCPU: {:?}",
+                vstate::Error::NotEnoughMemorySlots
+            )
+        );
+    }
+
+    #[test]
+    fn test_pause_microvm_error_messages() {
+        use self::PauseMicrovmError::*;
+        assert_eq!(
+            format!("{}", InvalidSnapshot),
+            "Invalid snapshot file.".to_string()
+        );
+        assert_eq!(
+            format!("{}", MicroVMInvalidState(StateError::VcpusInvalidState)),
+            format!("{}", StateError::VcpusInvalidState)
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            format!("{}", OpenSnapshotFile(snapshot::Error::InvalidFileType)),
+            format!(
+                "Cannot open the snapshot image file. {:?}",
+                snapshot::Error::InvalidFileType
+            )
+        );
+        assert_eq!(
+            format!("{}", SaveVcpuState),
+            "Failed to save vCPU state.".to_string()
+        );
+        assert_eq!(
+            format!("{}", SaveVmState(vstate::Error::NotEnoughMemorySlots)),
+            format!(
+                "Failed to save VM state: {:?}",
+                vstate::Error::NotEnoughMemorySlots
+            )
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            format!("{}", SerializeVcpu(snapshot::Error::InvalidFileType)),
+            format!(
+                "Failed to serialize vCPU state: {:?}",
+                snapshot::Error::InvalidFileType
+            )
+        );
+        assert_eq!(
+            format!("{}", SignalVcpu(vstate::Error::NotEnoughMemorySlots)),
+            format!(
+                "Failed to signal vCPU: {:?}",
+                vstate::Error::NotEnoughMemorySlots
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                StopVcpus(KillVcpusError::MicroVMInvalidState(
+                    StateError::VcpusInvalidState
+                ))
+            ),
+            format!(
+                "Failed to stop vcpus: {}",
+                KillVcpusError::MicroVMInvalidState(StateError::VcpusInvalidState)
+            )
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            format!("{}", SyncHeader(snapshot::Error::InvalidFileType)),
+            format!(
+                "Failed to sync snapshot: {:?}",
+                snapshot::Error::InvalidFileType
+            )
+        );
+        assert_eq!(
+            format!("{}", SyncMemory(GuestMemoryError::MemoryRegionOverlap)),
+            format!(
+                "Failed to sync memory to snapshot: {:?}",
+                GuestMemoryError::MemoryRegionOverlap
+            )
+        );
+        assert_eq!(format!("{}", VcpuPause), "vCPUs pause failed.".to_string());
+    }
+
+    #[test]
+    fn test_resume_microvm_error_messages() {
+        use self::ResumeMicrovmError::*;
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            format!("{}", DeserializeVcpu(snapshot::Error::InvalidFileType)),
+            format!(
+                "Failed to deserialize vCPU state: {:?}",
+                snapshot::Error::InvalidFileType
+            )
+        );
+        assert_eq!(
+            format!("{}", MicroVMInvalidState(StateError::MicroVMAlreadyRunning)),
+            format!("{}", StateError::MicroVMAlreadyRunning)
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            format!("{}", OpenSnapshotFile(snapshot::Error::InvalidFileType)),
+            format!(
+                "Cannot open the snapshot image file: {:?}",
+                snapshot::Error::InvalidFileType
+            )
+        );
+        assert_eq!(
+            format!("{}", RestoreVcpuState),
+            "Failed to restore vCPU state.".to_string()
+        );
+        assert_eq!(
+            format!("{}", RestoreVmState(vstate::Error::NotEnoughMemorySlots)),
+            format!(
+                "Failed to restore VM state: {:?}",
+                vstate::Error::NotEnoughMemorySlots
+            )
+        );
+        assert_eq!(
+            format!("{}", SignalVcpu(vstate::Error::NotEnoughMemorySlots)),
+            format!(
+                "Failed to signal vCPU: {:?}",
+                vstate::Error::NotEnoughMemorySlots
+            )
+        );
+        assert_eq!(
+            format!("{}", StartMicroVm(StartMicrovmError::EventFd)),
+            format!("Failed resume microVM: {}", StartMicrovmError::EventFd)
+        );
+        assert_eq!(
+            format!("{}", VcpuResume),
+            "vCPUs resume failed.".to_string()
+        );
+    }
+
+    #[test]
     fn test_start_microvm_error_messages() {
         use self::StartMicrovmError::*;
         assert_eq!(
@@ -429,15 +571,15 @@ mod tests {
         );
         assert_eq!(
             format!("{}", DeviceManager),
-            format!("The device manager was not configured.")
+            "The device manager was not configured.".to_string()
         );
         assert_eq!(
             format!("{}", EventFd),
-            format!("Cannot read from an Event file descriptor.")
+            "Cannot read from an Event file descriptor.".to_string()
         );
         assert_eq!(
             format!("{}", KernelCmdline(".".to_string())),
-            format!("Invalid kernel command line. .")
+            "Invalid kernel command line. .".to_string()
         );
         assert_eq!(
             format!(
@@ -456,11 +598,11 @@ mod tests {
         );
         assert_eq!(
             format!("{}", MissingKernelConfig),
-            format!("Cannot start microvm without kernel configuration.")
+            "Cannot start microvm without kernel configuration.".to_string()
         );
         assert_eq!(
             format!("{}", NetDeviceNotConfigured),
-            format!("The net device configuration is missing the tap device.")
+            "The net device configuration is missing the tap device.".to_string()
         );
         assert_eq!(
             format!("{}", OpenBlockDevice(std::io::Error::from_raw_os_error(0))),
@@ -481,7 +623,7 @@ mod tests {
         );
         assert_eq!(
             format!("{}", RegisterEvent),
-            format!("Cannot add event to Epoll.")
+            "Cannot add event to Epoll.".to_string()
         );
         assert_eq!(
             format!(
@@ -523,11 +665,11 @@ mod tests {
         );
         assert_eq!(
             format!("{}", VcpusAlreadyPresent),
-            format!("vCPUs have already been created.")
+            "vCPUs have already been created.".to_string()
         );
         assert_eq!(
             format!("{}", VcpusNotConfigured),
-            format!("vCPUs were not configured.")
+            "vCPUs were not configured.".to_string()
         );
         assert_eq!(
             format!("{}", VcpuSpawn(vstate::Error::NotEnoughMemorySlots)),
