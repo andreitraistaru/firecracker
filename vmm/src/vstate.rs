@@ -14,6 +14,7 @@ use std::ops::Deref;
 use std::result;
 use std::sync::atomic::{fence, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+#[cfg(target_arch = "x86_64")]
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -23,10 +24,12 @@ use arch;
 use cpuid::{c3, filter_cpuid, t2};
 use default_syscalls;
 use kvm::*;
+use kvm_bindings::kvm_userspace_memory_region;
+#[cfg(target_arch = "x86_64")]
 use kvm_bindings::{
     kvm_clock_data, kvm_debugregs, kvm_irqchip, kvm_lapic_state, kvm_mp_state, kvm_pit_config,
-    kvm_pit_state2, kvm_regs, kvm_sregs, kvm_userspace_memory_region, kvm_vcpu_events, kvm_xcrs,
-    kvm_xsave, KVM_PIT_SPEAKER_DUMMY,
+    kvm_pit_state2, kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave,
+    KVM_PIT_SPEAKER_DUMMY,
 };
 use logger::{LogOption, Metric, LOGGER, METRICS};
 use memory_model::{GuestAddress, GuestMemory, GuestMemoryError};
@@ -284,6 +287,7 @@ impl Vm {
         &self.fd
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn save_state(&self) -> Result<VmState> {
         let mut pitstate = kvm_pit_state2::default();
         self.fd.get_pit2(&mut pitstate).map_err(Error::VmGetPit2)?;
@@ -320,6 +324,7 @@ impl Vm {
         })
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn restore_state(&self, state: &VmState) -> Result<()> {
         self.fd
             .set_pit2(&state.pitstate)
@@ -339,6 +344,7 @@ impl Vm {
 }
 
 /// Structure holding VM kvm state.
+#[cfg(target_arch = "x86_64")]
 #[derive(Default)]
 #[repr(C)]
 pub struct VmState {
@@ -352,14 +358,17 @@ pub struct VmState {
 /// List of events that the Vcpu can receive.
 pub enum VcpuEvent {
     /// Kill the Vcpu.
+    #[cfg(target_arch = "x86_64")]
     Exit,
     /// Pause the Vcpu.
     Pause,
     /// Pause the Vcpu, then serialize it.
+    #[cfg(target_arch = "x86_64")]
     PauseToSnapshot(Arc<Barrier>),
     /// Event that should resume the Vcpu.
     Resume,
     /// Deserialize Vcpu.
+    #[cfg(target_arch = "x86_64")]
     Deserialize(Box<VcpuState>),
 }
 
@@ -368,10 +377,12 @@ pub enum VcpuResponse {
     /// Vcpu is paused.
     Paused,
     /// Vcpu is paused to snapshot.
+    #[cfg(target_arch = "x86_64")]
     PausedToSnapshot(Box<VcpuState>),
     /// Vcpu is resumed.
     Resumed,
     /// Vcpu is deserialized.
+    #[cfg(target_arch = "x86_64")]
     Deserialized,
 }
 
@@ -549,6 +560,7 @@ impl VcpuHandle {
     }
 
     /// Will block until thread is joined, make sure the vcpu has exited.
+    #[cfg(target_arch = "x86_64")]
     pub fn join_vcpu_thread(self) -> Result<()> {
         match self.state {
             // Use expect() to crash the other thread had panicked.
@@ -571,6 +583,7 @@ pub struct Vcpu {
     event_receiver: Receiver<VcpuEvent>,
     response_sender: Sender<VcpuResponse>,
     create_ts: TimestampUs,
+    #[cfg(target_arch = "x86_64")]
     msr_list: MsrList,
 }
 
@@ -673,6 +686,7 @@ impl Vcpu {
             event_receiver,
             response_sender,
             create_ts,
+            #[cfg(target_arch = "x86_64")]
             msr_list: vm.supported_msrs().clone(),
         })
     }
@@ -926,6 +940,7 @@ impl Vcpu {
         // Break this emulation loop on any transition request/external event.
         match self.event_receiver.try_recv() {
             // Running ---- Exit ----> Exited
+            #[cfg(target_arch = "x86_64")]
             Ok(VcpuEvent::Exit) => {
                 // Move to 'exited' state.
                 StateStruct::next(Self::exited)
@@ -939,6 +954,7 @@ impl Vcpu {
                 // Move to 'paused' state.
                 StateStruct::next(Self::paused)
             }
+            #[cfg(target_arch = "x86_64")]
             Ok(VcpuEvent::PauseToSnapshot(thread_barrier)) => {
                 // All other vcpus need to be out of KVM_RUN before trying serialization.
                 thread_barrier.wait();
@@ -966,6 +982,7 @@ impl Vcpu {
     fn paused(&mut self) -> StateStruct<Self> {
         match self.event_receiver.recv() {
             // Paused ---- Exit ----> Exited
+            #[cfg(target_arch = "x86_64")]
             Ok(VcpuEvent::Exit) => {
                 // Move to 'exited' state.
                 StateStruct::next(Self::exited)
@@ -980,6 +997,7 @@ impl Vcpu {
                 StateStruct::next(Self::running)
             }
             // Paused ---- ResumeFromSnapshot ----> Running
+            #[cfg(target_arch = "x86_64")]
             Ok(VcpuEvent::Deserialize(vcpu_state)) => {
                 self.restore_state(*vcpu_state)
                     .expect("restore state failed");
@@ -1008,6 +1026,7 @@ impl Vcpu {
         StateStruct::finish(Self::exited)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn save_state(&self) -> Result<VcpuState> {
         // Build the list of MSRs we want to save.
         let num_msrs = self.msr_list.as_original_struct().len();
@@ -1069,6 +1088,7 @@ impl Vcpu {
         Ok(state)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn restore_state(&self, state: VcpuState) -> Result<()> {
         self.fd
             .set_cpuid2(&state.cpuid)
@@ -1105,6 +1125,7 @@ impl Drop for Vcpu {
 }
 
 /// Structure holding VCPU kvm state.
+#[cfg(target_arch = "x86_64")]
 pub struct VcpuState {
     pub cpuid: CpuId,
     pub msrs: KvmMsrs,

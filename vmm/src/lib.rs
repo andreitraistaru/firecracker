@@ -85,6 +85,7 @@ use memory_model::{FileMemoryDesc, GuestAddress, GuestMemory};
 use net_util::TapError;
 #[cfg(target_arch = "aarch64")]
 use serde_json::Value;
+#[cfg(target_arch = "x86_64")]
 use snapshot::*;
 use sys_util::{EventFd, Terminal};
 use vmm_config::boot_source::{BootSourceConfig, BootSourceConfigError};
@@ -101,7 +102,9 @@ use vmm_config::net::{
 };
 #[cfg(feature = "vsock")]
 use vmm_config::vsock::{VsockDeviceConfig, VsockDeviceConfigs, VsockError};
-use vstate::{Vcpu, VcpuEvent, VcpuHandle, VcpuResponse, VcpuState, Vm};
+#[cfg(target_arch = "x86_64")]
+use vstate::VcpuState;
+use vstate::{Vcpu, VcpuEvent, VcpuHandle, VcpuResponse, Vm};
 
 /// Default guest kernel command line:
 /// - `reboot=k` shut down the guest on reboot, instead of well... rebooting;
@@ -319,9 +322,12 @@ impl std::convert::From<PauseMicrovmError> for VmmActionError {
                 MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
                 VcpusInvalidState => ErrorKind::Internal,
             },
+            #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(_) => ErrorKind::User,
-            InvalidSnapshot | SaveVmState(_) | SaveVcpuState | SerializeVcpu(_) | StopVcpus(_)
-            | SyncHeader(_) | SyncMemory(_) | SignalVcpu(_) | VcpuPause => ErrorKind::Internal,
+            InvalidSnapshot | SaveVmState(_) | SaveVcpuState | StopVcpus(_) | SyncMemory(_)
+            | SignalVcpu(_) | VcpuPause => ErrorKind::Internal,
+            #[cfg(target_arch = "x86_64")]
+            SerializeVcpu(_) | SyncHeader(_) => ErrorKind::Internal,
         };
         VmmActionError::PauseMicrovm(kind, e)
     }
@@ -337,9 +343,13 @@ impl std::convert::From<ResumeMicrovmError> for VmmActionError {
                 MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
                 VcpusInvalidState => ErrorKind::Internal,
             },
+            #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(_) => ErrorKind::User,
-            DeserializeVcpu(_) | RestoreVmState(_) | RestoreVcpuState | SignalVcpu(_)
-            | StartMicroVm(_) | VcpuResume => ErrorKind::Internal,
+            #[cfg(target_arch = "x86_64")]
+            DeserializeVcpu(_) => ErrorKind::Internal,
+            RestoreVmState(_) | RestoreVcpuState | SignalVcpu(_) | StartMicroVm(_) | VcpuResume => {
+                ErrorKind::Internal
+            }
         };
         VmmActionError::ResumeMicrovm(kind, e)
     }
@@ -364,6 +374,8 @@ impl std::convert::From<StartMicrovmError> for VmmActionError {
             // Internal errors.
             #[cfg(feature = "vsock")]
             StartMicrovmError::RegisterVsockDevice(_) => ErrorKind::Internal,
+            #[cfg(target_arch = "x86_64")]
+            StartMicrovmError::SnapshotBackingFile(_) => ErrorKind::Internal,
             StartMicrovmError::ConfigureSystem(_)
             | StartMicrovmError::ConfigureVm(_)
             | StartMicrovmError::CreateRateLimiter(_)
@@ -377,7 +389,6 @@ impl std::convert::From<StartMicrovmError> for VmmActionError {
             | StartMicrovmError::RegisterNetDevice(_)
             | StartMicrovmError::SeccompFilters(_)
             | StartMicrovmError::SignalVcpu(_)
-            | StartMicrovmError::SnapshotBackingFile(_)
             | StartMicrovmError::Vcpu(_)
             | StartMicrovmError::VcpuConfigure(_)
             | StartMicrovmError::VcpusAlreadyPresent
@@ -468,6 +479,7 @@ pub enum VmmAction {
     /// booted. The response is sent using the `OutcomeSender`.
     InsertVsockDevice(VsockDeviceConfig, OutcomeSender),
     /// Pause the microVM, save its state to the snapshot file and end this Firecracker process.
+    #[cfg(target_arch = "x86_64")]
     PauseToSnapshot(OutcomeSender),
     /// Pause the microVM VCPUs, effectively pausing the guest.
     PauseVCPUs(OutcomeSender),
@@ -476,6 +488,7 @@ pub enum VmmAction {
     /// started. The response is sent using the `OutcomeSender`.
     RescanBlockDevice(String, OutcomeSender),
     /// Load the microVM state from the snapshot file and resume its operation.
+    #[cfg(target_arch = "x86_64")]
     ResumeFromSnapshot(OutcomeSender),
     /// Resume the microVM VCPUs, thus resuming a paused guest.
     ResumeVCPUs(OutcomeSender),
@@ -563,6 +576,7 @@ impl KvmContext {
         check_cap(&kvm, Cap::SetTssAddr)?;
         check_cap(&kvm, Cap::UserMemory)?;
         check_cap(&kvm, Cap::MsrFeatures)?;
+        #[cfg(target_arch = "x86_64")]
         check_cap(&kvm, Cap::VcpuEvents)?;
         #[cfg(target_arch = "x86_64")]
         check_cap(&kvm, Cap::Debugregs)?;
@@ -823,6 +837,7 @@ struct Vmm {
     // The level of seccomp filtering used. Seccomp filters are loaded before executing guest code.
     seccomp_level: u32,
 
+    #[cfg(target_arch = "x86_64")]
     snapshot_image: Option<SnapshotImage>,
 }
 
@@ -872,6 +887,7 @@ impl Vmm {
             write_metrics_event,
             seccomp_level,
 
+            #[cfg(target_arch = "x86_64")]
             snapshot_image: None,
         })
     }
@@ -1136,6 +1152,11 @@ impl Vmm {
             ))?
             << 20;
         let arch_mem_regions = arch::arch_memory_regions(mem_size);
+
+        #[cfg(target_arch = "aarch64")]
+        let guest_memory = GuestMemory::new_anon_from_tuples(&arch_mem_regions)
+            .map_err(StartMicrovmError::GuestMemory)?;
+        #[cfg(target_arch = "x86_64")]
         let guest_memory = match self.snapshot_image.as_ref() {
             Some(image) => {
                 let mut ranges = Vec::<FileMemoryDesc>::with_capacity(arch_mem_regions.len());
@@ -1160,6 +1181,7 @@ impl Vmm {
                     .map_err(StartMicrovmError::GuestMemory)?
             }
         };
+
         self.guest_memory = Some(guest_memory);
         self.vm
             .memory_init(
@@ -1462,11 +1484,13 @@ impl Vmm {
         Ok(())
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn snapshot_filename(&self) -> String {
         format!("foo_{}.image", self.shared_info.read().unwrap().id)
     }
 
     // Creates the snapshot file that will later be populated.
+    #[cfg(target_arch = "x86_64")]
     fn create_snapshot_file(&mut self) -> std::result::Result<(), StartMicrovmError> {
         let nmsrs = self.vm.supported_msrs().as_original_struct().nmsrs;
         let ncpuids = self.vm.supported_cpuid().as_original_struct().nent;
@@ -2111,6 +2135,7 @@ impl Vmm {
         Ok(VmmData::Empty)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn kill_vcpus(&mut self) -> std::result::Result<(), KillVcpusError> {
         self.validate_vcpus_are_active()
             .map_err(KillVcpusError::MicroVMInvalidState)?;
@@ -2127,6 +2152,7 @@ impl Vmm {
         Ok(())
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn pause_to_snapshot(&mut self) -> VmmRequestOutcome {
         let request_ts = TimestampUs {
             time_us: get_time_us(),
@@ -2192,6 +2218,7 @@ impl Vmm {
         Ok(VmmData::Empty)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn resume_from_snapshot(&mut self) -> VmmRequestOutcome {
         let request_ts = TimestampUs {
             time_us: get_time_us(),
@@ -2344,6 +2371,7 @@ impl Vmm {
             VmmAction::InsertVsockDevice(vsock_cfg, sender) => {
                 Vmm::send_response(self.insert_vsock_device(vsock_cfg), sender);
             }
+            #[cfg(target_arch = "x86_64")]
             VmmAction::PauseToSnapshot(sender) => {
                 Vmm::send_response(self.pause_to_snapshot(), sender);
             }
@@ -2353,6 +2381,7 @@ impl Vmm {
             VmmAction::RescanBlockDevice(drive_id, sender) => {
                 Vmm::send_response(self.rescan_block_device(&drive_id), sender);
             }
+            #[cfg(target_arch = "x86_64")]
             VmmAction::ResumeFromSnapshot(sender) => {
                 Vmm::send_response(self.resume_from_snapshot(), sender);
             }
@@ -2418,12 +2447,14 @@ impl PartialEq for VmmAction {
                 &VmmAction::InsertNetworkDevice(ref net_dev, _),
                 &VmmAction::InsertNetworkDevice(ref other_net_dev, _),
             ) => net_dev == other_net_dev,
+            #[cfg(target_arch = "x86_64")]
             (&VmmAction::PauseToSnapshot(_), &VmmAction::PauseToSnapshot(_)) => true,
             (&VmmAction::PauseVCPUs(_), &VmmAction::PauseVCPUs(_)) => true,
             (
                 &VmmAction::RescanBlockDevice(ref req, _),
                 &VmmAction::RescanBlockDevice(ref other_req, _),
             ) => req == other_req,
+            #[cfg(target_arch = "x86_64")]
             (&VmmAction::ResumeFromSnapshot(_), &VmmAction::ResumeFromSnapshot(_)) => true,
             (&VmmAction::ResumeVCPUs(_), &VmmAction::ResumeVCPUs(_)) => true,
             (

@@ -1,6 +1,9 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// Currently only supports X86_64.
+#![cfg(target_arch = "x86_64")]
+
 // Do not allow warnings. If any of our structures become FFI-unsafe we want to error.
 #![deny(warnings)]
 

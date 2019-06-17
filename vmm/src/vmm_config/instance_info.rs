@@ -9,6 +9,7 @@ use devices;
 use kernel::loader as kernel_loader;
 use memory_model::GuestMemoryError;
 use seccomp;
+#[cfg(target_arch = "x86_64")]
 use snapshot;
 use vstate;
 
@@ -92,18 +93,21 @@ pub enum PauseMicrovmError {
     /// Sanity checks failed.
     MicroVMInvalidState(StateError),
     /// Cannot open the snapshot image file.
+    #[cfg(target_arch = "x86_64")]
     OpenSnapshotFile(snapshot::Error),
     /// Failed to save vCPU state.
     SaveVcpuState,
     /// Failed to save VM state.
     SaveVmState(vstate::Error),
     /// Failed to serialize vCPU state.
+    #[cfg(target_arch = "x86_64")]
     SerializeVcpu(snapshot::Error),
     /// Failed to send event.
     SignalVcpu(vstate::Error),
     /// Failed to stop vcpus.
     StopVcpus(KillVcpusError),
     /// Failed to sync snapshot.
+    #[cfg(target_arch = "x86_64")]
     SyncHeader(snapshot::Error),
     /// Failed to sync memory to snapshot.
     SyncMemory(GuestMemoryError),
@@ -117,12 +121,15 @@ impl Display for PauseMicrovmError {
         match *self {
             InvalidSnapshot => write!(f, "Invalid snapshot file"),
             MicroVMInvalidState(ref e) => write!(f, "{}", e),
+            #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(ref e) => write!(f, "Cannot open the snapshot image file. {:?}", e),
             SaveVcpuState => write!(f, "Failed to save vCPU state"),
             SaveVmState(ref e) => write!(f, "Failed to save VM state: {:?}", e),
+            #[cfg(target_arch = "x86_64")]
             SerializeVcpu(ref e) => write!(f, "Failed to serialize vCPU state: {:?}", e),
             SignalVcpu(ref e) => write!(f, "Failed to signal vCPU: {:?}", e),
             StopVcpus(ref e) => write!(f, "Failed to stop vcpus: {}", e),
+            #[cfg(target_arch = "x86_64")]
             SyncHeader(ref e) => write!(f, "Failed to sync snapshot: {:?}", e),
             SyncMemory(ref e) => write!(f, "Failed to sync memory to snapshot: {:?}", e),
             VcpuPause => write!(f, "vCPUs pause failed"),
@@ -134,10 +141,12 @@ impl Display for PauseMicrovmError {
 #[derive(Debug)]
 pub enum ResumeMicrovmError {
     /// Failed to deserialize vCPU state.
+    #[cfg(target_arch = "x86_64")]
     DeserializeVcpu(snapshot::Error),
     /// Sanity checks failed.
     MicroVMInvalidState(StateError),
     /// Cannot open the snapshot image file.
+    #[cfg(target_arch = "x86_64")]
     OpenSnapshotFile(snapshot::Error),
     /// Failed to restore vCPU state.
     RestoreVcpuState,
@@ -155,8 +164,10 @@ impl Display for ResumeMicrovmError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::ResumeMicrovmError::*;
         match *self {
+            #[cfg(target_arch = "x86_64")]
             DeserializeVcpu(ref e) => write!(f, "Failed to deserialize vCPU state: {:?}", e),
             MicroVMInvalidState(ref e) => write!(f, "{}", e),
+            #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(ref err) => {
                 write!(f, "Cannot open the snapshot image file: {:?}", err)
             }
@@ -227,6 +238,7 @@ pub enum StartMicrovmError {
     /// Failed to signal vCPU.
     SignalVcpu(vstate::Error),
     /// Cannot create snapshot backing file
+    #[cfg(target_arch = "x86_64")]
     SnapshotBackingFile(snapshot::Error),
     /// Cannot create a new vCPU file descriptor.
     Vcpu(vstate::Error),
@@ -367,6 +379,7 @@ impl Display for StartMicrovmError {
                 write!(f, "Cannot build seccomp filters. {}", err_msg)
             }
             SignalVcpu(ref err) => write!(f, "Failed to signal vCPU: {:?}", err),
+            #[cfg(target_arch = "x86_64")]
             SnapshotBackingFile(ref err) => {
                 write!(f, "Cannot create snapshot backing file: {:?}", err)
             }

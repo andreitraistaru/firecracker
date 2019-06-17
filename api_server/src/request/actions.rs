@@ -18,8 +18,10 @@ enum ActionType {
     BlockDeviceRescan,
     FlushMetrics,
     InstanceStart,
+    #[cfg(target_arch = "x86_64")]
     PauseToSnapshot,
     PauseVCPUs,
+    #[cfg(target_arch = "x86_64")]
     ResumeFromSnapshot,
     ResumeVCPUs,
     SendCtrlAltDel,
@@ -56,9 +58,18 @@ fn validate_payload(action_body: &ActionBody) -> Result<(), String> {
         | ActionType::InstanceStart
         | ActionType::SendCtrlAltDel
         | ActionType::PauseVCPUs
-        | ActionType::ResumeVCPUs
-        | ActionType::PauseToSnapshot
-        | ActionType::ResumeFromSnapshot => {
+        | ActionType::ResumeVCPUs => {
+            // These actions don't have a payload.
+            if action_body.payload.is_some() {
+                return Err(format!(
+                    "{:?} does not support a payload.",
+                    action_body.action_type
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(target_arch = "x86_64")]
+        ActionType::PauseToSnapshot | ActionType::ResumeFromSnapshot => {
             // These actions don't have a payload.
             if action_body.payload.is_some() {
                 return Err(format!(
@@ -102,6 +113,7 @@ impl IntoParsedRequest for ActionBody {
                     sync_receiver,
                 ))
             }
+            #[cfg(target_arch = "x86_64")]
             ActionType::PauseToSnapshot => {
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
@@ -116,6 +128,7 @@ impl IntoParsedRequest for ActionBody {
                     sync_receiver,
                 ))
             }
+            #[cfg(target_arch = "x86_64")]
             ActionType::ResumeFromSnapshot => {
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
@@ -188,8 +201,10 @@ mod tests {
         assert!(validate_payload(&action_body_dummy_payload(InstanceStart)).is_err());
 
         // Test PauseToSnapshot.
+        #[cfg(target_arch = "x86_64")]
         assert!(validate_payload(&action_body_no_payload(PauseToSnapshot)).is_ok());
         // Error case: PauseToSnapshot with payload.
+        #[cfg(target_arch = "x86_64")]
         assert!(validate_payload(&action_body_dummy_payload(PauseToSnapshot)).is_err());
 
         // Test PauseVCPUs.
