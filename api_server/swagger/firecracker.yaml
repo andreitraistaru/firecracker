@@ -424,7 +424,9 @@ definitions:
         - BlockDeviceRescan
         - FlushMetrics
         - InstanceStart
+        - PauseToSnapshot
         - PauseVCPUs
+        - ResumeFromSnapshot
         - ResumeVCPUs
         - SendCtrlAltDel
       payload:
