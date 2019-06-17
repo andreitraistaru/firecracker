@@ -2428,6 +2428,27 @@ impl Vmm {
 // because it is used in tests outside of the vmm crate (api_server).
 impl PartialEq for VmmAction {
     fn eq(&self, other: &VmmAction) -> bool {
+        // Guard match to catch new enums.
+        match self {
+            VmmAction::ConfigureBootSource(_, _)
+            | VmmAction::ConfigureLogger(_, _)
+            | VmmAction::GetVmConfiguration(_)
+            | VmmAction::FlushMetrics(_)
+            | VmmAction::InsertBlockDevice(_, _)
+            | VmmAction::InsertNetworkDevice(_, _)
+            | VmmAction::PauseVCPUs(_)
+            | VmmAction::RescanBlockDevice(_, _)
+            | VmmAction::ResumeVCPUs(_)
+            | VmmAction::SetVmConfiguration(_, _)
+            | VmmAction::StartMicroVm(_)
+            | VmmAction::SendCtrlAltDel(_)
+            | VmmAction::UpdateBlockDevicePath(_, _, _)
+            | VmmAction::UpdateNetworkInterface(_, _) => (),
+            #[cfg(feature = "vsock")]
+            VmmAction::InsertVsockDevice(_, _) => (),
+            #[cfg(target_arch = "x86_64")]
+            VmmAction::PauseToSnapshot(_) | VmmAction::ResumeFromSnapshot(_) => (),
+        };
         match (self, other) {
             (
                 &VmmAction::ConfigureBootSource(ref boot_source, _),

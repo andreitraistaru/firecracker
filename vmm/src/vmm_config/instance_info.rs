@@ -277,10 +277,10 @@ impl Display for StartMicrovmError {
             CreateBlockDevice(ref err) => write!(
                 f,
                 "Unable to seek the block device backing file due to invalid permissions or \
-                 the file was deleted/corrupted. Error number: {}",
+                 the file was deleted/corrupted. Error number. {}",
                 err
             ),
-            CreateRateLimiter(ref err) => write!(f, "Cannot create RateLimiter: {}", err),
+            CreateRateLimiter(ref err) => write!(f, "Cannot create RateLimiter. {}", err),
             #[cfg(feature = "vsock")]
             CreateVsockDevice(ref err) => {
                 let mut err_msg = format!("{:?}", err);
@@ -302,7 +302,7 @@ impl Display for StartMicrovmError {
                 err_msg = err_msg.replace("\"", "");
                 write!(f, "Invalid Memory Configuration: {}", err_msg)
             }
-            KernelCmdline(ref err) => write!(f, "Invalid kernel command line: {}", err),
+            KernelCmdline(ref err) => write!(f, "Invalid kernel command line. {}", err),
             KernelLoader(ref err) => {
                 let mut err_msg = format!("{}", err);
                 err_msg = err_msg.replace("\"", "");
@@ -330,20 +330,16 @@ impl Display for StartMicrovmError {
                 write!(f, "The net device configuration is missing the tap device.")
             }
             OpenBlockDevice(ref err) => {
-                let mut err_msg = format!("{:?}", err);
+                let mut err_msg = format!("{}", err);
                 err_msg = err_msg.replace("\"", "");
 
                 write!(f, "Cannot open the block device backing file. {}", err_msg)
             }
-            RegisterBlockDevice(ref err) => {
-                let mut err_msg = format!("{}", err);
-                err_msg = err_msg.replace("\"", "");
-                write!(
-                    f,
-                    "Cannot initialize a MMIO Block Device or add a device to the MMIO Bus. {}",
-                    err_msg
-                )
-            }
+            RegisterBlockDevice(ref err) => write!(
+                f,
+                "Cannot initialize a MMIO Block Device or add a device to the MMIO Bus. {}",
+                err
+            ),
             RegisterEvent => write!(f, "Cannot add event to Epoll."),
             RegisterMMIODevice(ref err) => {
                 let mut err_msg = format!("{}", err);
@@ -378,10 +374,10 @@ impl Display for StartMicrovmError {
 
                 write!(f, "Cannot build seccomp filters. {}", err_msg)
             }
-            SignalVcpu(ref err) => write!(f, "Failed to signal vCPU: {:?}", err),
+            SignalVcpu(ref err) => write!(f, "Failed to signal vCPU. {:?}", err),
             #[cfg(target_arch = "x86_64")]
             SnapshotBackingFile(ref err) => {
-                write!(f, "Cannot create snapshot backing file: {:?}", err)
+                write!(f, "Cannot create snapshot backing file. {:?}", err)
             }
             Vcpu(ref err) => {
                 let mut err_msg = format!("{:?}", err);
@@ -404,5 +400,154 @@ impl Display for StartMicrovmError {
                 write!(f, "Cannot spawn vCPU thread. {}", err_msg)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_start_microvm_error_messages() {
+        use self::StartMicrovmError::*;
+        assert_eq!(
+            format!("{}", ConfigureVm(vstate::Error::NotEnoughMemorySlots)),
+            format!(
+                "Cannot configure virtual machine. {:?}",
+                vstate::Error::NotEnoughMemorySlots
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                CreateRateLimiter(std::io::Error::from_raw_os_error(0))
+            ),
+            format!(
+                "Cannot create RateLimiter. {}",
+                std::io::Error::from_raw_os_error(0)
+            )
+        );
+        assert_eq!(
+            format!("{}", DeviceManager),
+            format!("The device manager was not configured.")
+        );
+        assert_eq!(
+            format!("{}", EventFd),
+            format!("Cannot read from an Event file descriptor.")
+        );
+        assert_eq!(
+            format!("{}", KernelCmdline(".".to_string())),
+            format!("Invalid kernel command line. .")
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                KernelLoader(kernel_loader::Error::BigEndianElfOnLittle)
+            ),
+            format!(
+                "Cannot load kernel due to invalid memory configuration or invalid kernel \
+                 image. {}",
+                kernel_loader::Error::BigEndianElfOnLittle
+            )
+        );
+        assert_eq!(
+            format!("{}", MicroVMInvalidState(StateError::MicroVMAlreadyRunning)),
+            format!("{}", StateError::MicroVMAlreadyRunning)
+        );
+        assert_eq!(
+            format!("{}", MissingKernelConfig),
+            format!("Cannot start microvm without kernel configuration.")
+        );
+        assert_eq!(
+            format!("{}", NetDeviceNotConfigured),
+            format!("The net device configuration is missing the tap device.")
+        );
+        assert_eq!(
+            format!("{}", OpenBlockDevice(std::io::Error::from_raw_os_error(0))),
+            format!(
+                "Cannot open the block device backing file. {}",
+                std::io::Error::from_raw_os_error(0)
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                RegisterBlockDevice(device_manager::mmio::Error::IrqsExhausted)
+            ),
+            format!(
+                "Cannot initialize a MMIO Block Device or add a device to the MMIO Bus. {}",
+                device_manager::mmio::Error::IrqsExhausted
+            )
+        );
+        assert_eq!(
+            format!("{}", RegisterEvent),
+            format!("Cannot add event to Epoll.")
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                RegisterNetDevice(device_manager::mmio::Error::IrqsExhausted)
+            ),
+            format!(
+                "Cannot initialize a MMIO Network Device or add a device to the MMIO Bus. {}",
+                device_manager::mmio::Error::IrqsExhausted
+            )
+        );
+        assert_eq!(
+            format!("{}", SeccompFilters(seccomp::Error::IntoBpf)),
+            format!(
+                "Cannot build seccomp filters. {:?}",
+                seccomp::Error::IntoBpf
+            )
+        );
+        assert_eq!(
+            format!("{}", SignalVcpu(vstate::Error::NotEnoughMemorySlots)),
+            format!(
+                "Failed to signal vCPU. {:?}",
+                vstate::Error::NotEnoughMemorySlots
+            )
+        );
+        assert_eq!(
+            format!("{}", Vcpu(vstate::Error::NotEnoughMemorySlots)),
+            format!(
+                "Cannot create a new vCPU. {:?}",
+                vstate::Error::NotEnoughMemorySlots
+            )
+        );
+        assert_eq!(
+            format!("{}", VcpuConfigure(vstate::Error::NotEnoughMemorySlots)),
+            format!(
+                "vCPU configuration failed. {:?}",
+                vstate::Error::NotEnoughMemorySlots
+            )
+        );
+        assert_eq!(
+            format!("{}", VcpusAlreadyPresent),
+            format!("vCPUs have already been created.")
+        );
+        assert_eq!(
+            format!("{}", VcpusNotConfigured),
+            format!("vCPUs were not configured.")
+        );
+        assert_eq!(
+            format!("{}", VcpuSpawn(vstate::Error::NotEnoughMemorySlots)),
+            format!(
+                "Cannot spawn vCPU thread. {:?}",
+                vstate::Error::NotEnoughMemorySlots
+            )
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            format!(
+                "{}",
+                SnapshotBackingFile(snapshot::Error::Truncate(
+                    std::io::Error::from_raw_os_error(0)
+                ))
+            ),
+            format!(
+                "Cannot create snapshot backing file. {:?}",
+                snapshot::Error::Truncate(std::io::Error::from_raw_os_error(0))
+            )
+        );
     }
 }
