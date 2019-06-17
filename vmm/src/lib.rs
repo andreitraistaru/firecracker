@@ -324,8 +324,9 @@ impl std::convert::From<PauseMicrovmError> for VmmActionError {
             },
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(_) => ErrorKind::User,
+            VcpuPause => ErrorKind::User,
             InvalidSnapshot | SaveVmState(_) | SaveVcpuState | StopVcpus(_) | SyncMemory(_)
-            | SignalVcpu(_) | VcpuPause => ErrorKind::Internal,
+            | SignalVcpu(_) => ErrorKind::Internal,
             #[cfg(target_arch = "x86_64")]
             SerializeVcpu(_) | SyncHeader(_) => ErrorKind::Internal,
         };
@@ -345,9 +346,10 @@ impl std::convert::From<ResumeMicrovmError> for VmmActionError {
             },
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(_) => ErrorKind::User,
+            VcpuResume => ErrorKind::User,
             #[cfg(target_arch = "x86_64")]
             DeserializeVcpu(_) => ErrorKind::Internal,
-            RestoreVmState(_) | RestoreVcpuState | SignalVcpu(_) | StartMicroVm(_) | VcpuResume => {
+            RestoreVmState(_) | RestoreVcpuState | SignalVcpu(_) | StartMicroVm(_) => {
                 ErrorKind::Internal
             }
         };
@@ -2104,7 +2106,7 @@ impl Vmm {
         for handle in self.vcpus_handles.iter() {
             match handle
                 .response_receiver()
-                .recv_timeout(Duration::from_millis(400))
+                .recv_timeout(Duration::from_millis(100))
             {
                 Ok(VcpuResponse::Paused) => (),
                 _ => Err(PauseMicrovmError::VcpuPause)?,
@@ -2126,7 +2128,7 @@ impl Vmm {
         for handle in self.vcpus_handles.iter() {
             match handle
                 .response_receiver()
-                .recv_timeout(Duration::from_millis(400))
+                .recv_timeout(Duration::from_millis(100))
             {
                 Ok(VcpuResponse::Resumed) => (),
                 _ => Err(ResumeMicrovmError::VcpuResume)?,
@@ -2183,7 +2185,7 @@ impl Vmm {
         for (idx, mut handle) in self.vcpus_handles.iter().enumerate() {
             match handle
                 .response_receiver()
-                .recv_timeout(Duration::from_millis(400))
+                .recv_timeout(Duration::from_millis(100))
             {
                 Ok(VcpuResponse::PausedToSnapshot(vcpu_state)) => {
                     self.snapshot_image
@@ -2305,7 +2307,7 @@ impl Vmm {
         for handle in self.vcpus_handles.iter() {
             match handle
                 .response_receiver()
-                .recv_timeout(Duration::from_millis(400))
+                .recv_timeout(Duration::from_millis(100))
             {
                 Ok(VcpuResponse::Deserialized) => (),
                 _ => {
@@ -4179,10 +4181,7 @@ mod tests {
             )),
             ErrorKind::Internal
         );
-        assert_eq!(
-            error_kind(PauseMicrovmError::VcpuPause),
-            ErrorKind::Internal
-        );
+        assert_eq!(error_kind(PauseMicrovmError::VcpuPause), ErrorKind::User);
 
         // Test `ResumeMicrovmError` conversion.
         assert_eq!(
@@ -4237,10 +4236,7 @@ mod tests {
             )),
             ErrorKind::Internal
         );
-        assert_eq!(
-            error_kind(ResumeMicrovmError::VcpuResume),
-            ErrorKind::Internal
-        );
+        assert_eq!(error_kind(ResumeMicrovmError::VcpuResume), ErrorKind::User);
     }
 
     #[test]
