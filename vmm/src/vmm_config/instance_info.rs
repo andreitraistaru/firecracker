@@ -6,6 +6,7 @@ use std::fmt::{Display, Formatter, Result};
 
 use device_manager;
 use devices;
+use devices::virtio::MmioDeviceStateError;
 use kernel::loader as kernel_loader;
 use memory_model::GuestMemoryError;
 use seccomp;
@@ -95,6 +96,8 @@ pub enum PauseMicrovmError {
     /// Cannot open the snapshot image file.
     #[cfg(target_arch = "x86_64")]
     OpenSnapshotFile(snapshot::Error),
+    /// Failed to save MMIO device state.
+    SaveMmioDeviceState(MmioDeviceStateError),
     /// Failed to save vCPU state.
     SaveVcpuState(Option<vstate::Error>),
     /// Failed to save VM state.
@@ -123,6 +126,7 @@ impl Display for PauseMicrovmError {
             MicroVMInvalidState(ref e) => write!(f, "{}", e),
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(ref e) => write!(f, "Cannot open the snapshot image file. {:?}", e),
+            SaveMmioDeviceState(ref e) => write!(f, "Cannot save a mmio device. {:?}", e),
             SaveVcpuState(ref e) => match e {
                 None => write!(f, "Failed to save vCPU state."),
                 Some(err) => write!(f, "Failed to save vCPU state: {:?}", err),

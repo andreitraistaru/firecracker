@@ -242,7 +242,6 @@ impl MMIODeviceManager {
         Ok(())
     }
 
-    #[cfg(target_arch = "aarch64")]
     /// Gets the information of the devices registered up to some point in time.
     pub fn get_device_info(&self) -> &HashMap<(DeviceType, String), MMIODeviceInfo> {
         &self.id_to_dev_info
@@ -285,9 +284,19 @@ impl MMIODeviceManager {
 /// Private structure for storing information about the MMIO device registered at some address on the bus.
 #[derive(Clone, Debug)]
 pub struct MMIODeviceInfo {
-    addr: u64,
-    irq: u32,
+    pub addr: u64,
+    pub irq: u32,
     len: u64,
+}
+
+impl MMIODeviceInfo {
+    pub fn addr(&self) -> u64 {
+        self.addr
+    }
+
+    pub fn irq(&self) -> u32 {
+        self.irq
+    }
 }
 
 #[cfg(target_arch = "aarch64")]

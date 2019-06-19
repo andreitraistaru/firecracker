@@ -62,7 +62,6 @@ use std::time::Duration;
 
 use timerfd::{ClockId, SetTimeFlags, TimerFd, TimerState};
 
-#[cfg(target_arch = "aarch64")]
 use arch::DeviceType;
 use device_manager::legacy::LegacyDeviceManager;
 #[cfg(target_arch = "aarch64")]
@@ -72,7 +71,7 @@ use devices::legacy::I8042DeviceError;
 use devices::virtio;
 #[cfg(feature = "vsock")]
 use devices::virtio::vhost::{handle::VHOST_EVENTS_COUNT, TYPE_VSOCK};
-use devices::virtio::EpollConfigConstructor;
+use devices::virtio::{EpollConfigConstructor, MmioDevice, MmioDeviceState, MmioDeviceStateError};
 use devices::virtio::{BLOCK_EVENTS_COUNT, TYPE_BLOCK};
 use devices::virtio::{NET_EVENTS_COUNT, TYPE_NET};
 use devices::{DeviceEventT, EpollHandler};
@@ -316,7 +315,6 @@ impl std::convert::From<NetworkInterfaceError> for VmmActionError {
     }
 }
 
-// It's convenient to turn PauseMicrovmError into VmmActionErrors directly.
 impl std::convert::From<PauseMicrovmError> for VmmActionError {
     fn from(e: PauseMicrovmError) -> Self {
         use self::PauseMicrovmError::*;
@@ -329,7 +327,12 @@ impl std::convert::From<PauseMicrovmError> for VmmActionError {
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(_) => ErrorKind::User,
             VcpuPause => ErrorKind::User,
-            InvalidSnapshot | SaveVmState(_) | SaveVcpuState(_) | StopVcpus(_) | SyncMemory(_)
+            InvalidSnapshot
+            | SaveMmioDeviceState(_)
+            | SaveVmState(_)
+            | SaveVcpuState(_)
+            | StopVcpus(_)
+            | SyncMemory(_)
             | SignalVcpu(_) => ErrorKind::Internal,
             #[cfg(target_arch = "x86_64")]
             SerializeVcpu(_) | SyncHeader(_) => ErrorKind::Internal,
@@ -2223,6 +2226,76 @@ impl Vmm {
         Ok(VmmData::Empty)
     }
 
+    fn mmio_device_states(
+        &mut self,
+    ) -> std::result::Result<Vec<MmioDeviceState>, MmioDeviceStateError> {
+        let mut states: Vec<MmioDeviceState> = Vec::new();
+
+        // Safe to unwrap() because mmio_device_manager is initialized in init_devices(), which is
+        // called before the guest boots, and this function is called after boot.
+        let device_manager: &MMIODeviceManager = self.mmio_device_manager.as_ref().unwrap();
+
+        for ((device_type, device_id), device_info) in device_manager.get_device_info().iter() {
+            let DeviceType::Virtio(type_id) = device_type;
+
+            // We lack support for saving VSOCK devices state for the moment
+            #[cfg(feature = "vsock")]
+            {
+                if *type_id == TYPE_VSOCK {
+                    continue;
+                }
+            }
+
+            // Get the virtio device starting from the BusDevice.
+            // The device is listed by the MMIODeviceManager so it should be present on the bus.
+            let bus_device_mutex = device_manager
+                .get_device(device_type.clone(), device_id)
+                .unwrap();
+            let bus_device = &mut *bus_device_mutex
+                .lock()
+                .expect("Failed to save virtio device due to poisoned lock");
+            // Any device listed by the MMIODeviceManager should be a MmioDevice
+            let mmio_device = bus_device
+                .as_mut_any()
+                .downcast_mut::<MmioDevice>()
+                .unwrap();
+            let virtio_device = mmio_device.device_mut();
+
+            // Get the EpollHandler associated with the virtio device
+            let maybe_epoll_handler = self
+                .epoll_context
+                .get_generic_device_handler_by_device_id(*type_id, device_id);
+            // If the EpollHandler doesn't exist, the device hasn't been activated yet, so we'll skip it
+            if maybe_epoll_handler.is_err() {
+                continue;
+            }
+            let epoll_handler = maybe_epoll_handler.unwrap();
+
+            let device_state = MmioDeviceState::new(
+                device_info.addr(),
+                device_info.irq(),
+                *type_id,
+                device_id,
+                virtio_device,
+                epoll_handler,
+            )?;
+            states.push(device_state);
+        }
+
+        // Sort the devices by addr since they will have to be added back in the same order
+        states.sort_by(|a, b| a.addr().partial_cmp(&b.addr()).unwrap());
+
+        Ok(states)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn save_mmio_devices(&mut self) -> std::result::Result<(), MmioDeviceStateError> {
+        // TODO: save devices to file
+        self.mmio_device_states()?;
+
+        Ok(())
+    }
+
     #[cfg(target_arch = "x86_64")]
     fn pause_to_snapshot(&mut self) -> VmmRequestOutcome {
         let request_ts = TimestampUs {
@@ -2246,6 +2319,9 @@ impl Vmm {
                 .expect("Failed to resume vCPUs after an unsuccessful microVM pause");
             e
         })?;
+
+        self.save_mmio_devices()
+            .map_err(PauseMicrovmError::SaveMmioDeviceState)?;
 
         // Relinquish ownership of the snapshot image.
         self.snapshot_image = None;
