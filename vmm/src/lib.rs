@@ -777,16 +777,25 @@ impl EpollContext {
         }
     }
 
-    fn get_device_handler_by_device_id<T: EpollHandler + 'static>(
+    fn get_generic_device_handler_by_device_id(
         &mut self,
         type_id: u32,
         device_id: &str,
-    ) -> Result<&mut T> {
+    ) -> Result<&mut dyn EpollHandler> {
         let handler_id = *self
             .device_id_to_handler_id
             .get(&(type_id, device_id.to_string()))
             .ok_or(Error::DeviceEventHandlerNotFound)?;
         let device_handler = self.get_device_handler_by_handler_id(handler_id)?;
+        Ok(&mut *device_handler)
+    }
+
+    fn get_device_handler_by_device_id<T: EpollHandler + 'static>(
+        &mut self,
+        type_id: u32,
+        device_id: &str,
+    ) -> Result<&mut T> {
+        let device_handler = self.get_generic_device_handler_by_device_id(type_id, device_id)?;
         match device_handler.as_mut_any().downcast_mut::<T>() {
             Some(res) => Ok(res),
             None => Err(Error::DeviceEventHandlerInvalidDowncast),
@@ -2801,8 +2810,20 @@ mod tests {
         assert_eq!(base, 1);
 
         let handler = DummyEpollHandler { evt: None };
+        let handler_id = 0;
         assert!(sender.send(Box::new(handler)).is_ok());
-        assert!(ep.get_device_handler_by_handler_id(0).is_ok());
+        assert!(ep.get_device_handler_by_handler_id(handler_id).is_ok());
+
+        let device_type = 0;
+        let device_id = "0";
+        ep.device_id_to_handler_id
+            .insert((device_type, device_id.to_string()), 0);
+        assert!(ep
+            .get_generic_device_handler_by_device_id(device_type, device_id)
+            .is_ok());
+        assert!(ep
+            .get_device_handler_by_device_id::<DummyEpollHandler>(device_type, device_id)
+            .is_ok());
     }
 
     #[test]
