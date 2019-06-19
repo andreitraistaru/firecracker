@@ -29,7 +29,7 @@ use net_gen;
 use net_util::{MacAddr, Tap, TapError, MAC_ADDR_LEN};
 use rate_limiter::{RateLimiter, TokenBucket, TokenType};
 use sys_util::EventFd;
-use virtio::EpollConfigConstructor;
+use virtio::{EpollConfigConstructor, SpecificVirtioDeviceStateError};
 use virtio_gen::virtio_net::*;
 use {DeviceEventT, EpollHandler};
 
@@ -952,6 +952,17 @@ impl VirtioDevice for Net {
 
     fn config_space(&self) -> Vec<u8> {
         unimplemented!()
+    }
+}
+
+pub struct NetState {}
+
+impl NetState {
+    pub fn new(
+        device: &VirtioDevice,
+        handler: &EpollHandler,
+    ) -> result::Result<NetState, SpecificVirtioDeviceStateError> {
+        Ok(NetState {})
     }
 }
 

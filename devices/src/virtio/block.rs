@@ -25,7 +25,7 @@ use logger::{Metric, METRICS};
 use memory_model::{GuestAddress, GuestMemory, GuestMemoryError};
 use rate_limiter::{RateLimiter, TokenType};
 use sys_util::EventFd;
-use virtio::EpollConfigConstructor;
+use virtio::{EpollConfigConstructor, SpecificVirtioDeviceStateError};
 use virtio_gen::virtio_blk::*;
 use {DeviceEventT, EpollHandler};
 
@@ -667,6 +667,17 @@ impl VirtioDevice for Block {
 
     fn config_space(&self) -> Vec<u8> {
         unimplemented!()
+    }
+}
+
+pub struct BlockState {}
+
+impl BlockState {
+    pub fn new(
+        device: &VirtioDevice,
+        handler: &EpollHandler,
+    ) -> Result<BlockState, SpecificVirtioDeviceStateError> {
+        Ok(BlockState {})
     }
 }
 

@@ -486,6 +486,43 @@ impl Default for RateLimiter {
     }
 }
 
+/// Rate Limiter State
+#[derive(Clone)]
+pub struct RateLimiterState {
+    bandwidth: Option<TokenBucket>,
+    ops: Option<TokenBucket>,
+    timer_active: bool,
+}
+
+impl RateLimiterState {
+    /// Saves the state of a RateLimiter
+    pub fn new(rate_limiter: &RateLimiter) -> RateLimiterState {
+        RateLimiterState {
+            bandwidth: rate_limiter.bandwidth.clone(),
+            ops: rate_limiter.ops.clone(),
+            timer_active: rate_limiter.timer_active,
+        }
+    }
+
+    /// Create a new RateLimiter starting from this state
+    pub fn restore(&self) -> io::Result<RateLimiter> {
+        let mut rate_limiter = RateLimiter {
+            bandwidth: self.bandwidth.clone(),
+            ops: self.ops.clone(),
+            timer_fd: TimerFd::new_custom(ClockId::Monotonic, true, true)?,
+            timer_active: self.timer_active,
+        };
+
+        if rate_limiter.timer_active {
+            rate_limiter
+                .timer_fd
+                .set_state(TIMER_REFILL_STATE, SetTimeFlags::Default);
+        }
+
+        Ok(rate_limiter)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,5 +820,47 @@ mod tests {
                 l.ops()
             ),
         );
+    }
+
+    #[test]
+    fn test_rate_limiter_state() {
+        let refill_time = 100_000;
+        let mut rate_limiter =
+            RateLimiter::new(100, None, refill_time, 10, None, refill_time).unwrap();
+
+        // check that RateLimiter restores correctly if untouched
+        let retored_rate_limiter = RateLimiterState::new(&rate_limiter)
+            .restore()
+            .expect("Unable to restore rate limiter");
+        assert_eq!(retored_rate_limiter, rate_limiter);
+        assert_eq!(
+            retored_rate_limiter.timer_fd.get_state(),
+            TimerState::Disarmed
+        );
+
+        // check that RateLimiter restores correctly after partially consuming tokens
+        rate_limiter.consume(10, TokenType::Bytes);
+        rate_limiter.consume(10, TokenType::Ops);
+        let retored_rate_limiter = RateLimiterState::new(&rate_limiter)
+            .restore()
+            .expect("Unable to restore rate limiter");
+        assert_eq!(retored_rate_limiter, rate_limiter);
+        assert_eq!(
+            retored_rate_limiter.timer_fd.get_state(),
+            TimerState::Disarmed
+        );
+
+        // check that RateLimiter restores correctly after totally consuming tokens
+        rate_limiter.consume(1000, TokenType::Bytes);
+        let retored_rate_limiter = RateLimiterState::new(&rate_limiter)
+            .restore()
+            .expect("Unable to restore rate limiter");
+        assert_eq!(retored_rate_limiter, rate_limiter);
+        match retored_rate_limiter.timer_fd.get_state() {
+            TimerState::Oneshot(countdown) => {
+                assert!(countdown < Duration::from_millis(refill_time));
+            }
+            _ => panic!("The rate limiter was incorrectly restored"),
+        }
     }
 }
