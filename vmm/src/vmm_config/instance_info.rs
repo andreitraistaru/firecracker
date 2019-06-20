@@ -6,7 +6,7 @@ use std::fmt::{Display, Formatter, Result};
 
 use device_manager;
 use devices;
-use devices::virtio::MmioDeviceStateError;
+use devices::virtio::{MmioDeviceStateError, SpecificVirtioDeviceStateError};
 use kernel::loader as kernel_loader;
 use memory_model::GuestMemoryError;
 use seccomp;
@@ -155,6 +155,10 @@ pub enum ResumeMicrovmError {
     /// Cannot open the snapshot image file.
     #[cfg(target_arch = "x86_64")]
     OpenSnapshotFile(snapshot::Error),
+    /// Failed to restore virtio device state.
+    RestoreVirtioDeviceState(SpecificVirtioDeviceStateError),
+    /// Failed to reregister MMIO device.
+    ReregisterMmioDevice(device_manager::mmio::Error),
     /// Failed to restore vCPU state.
     RestoreVcpuState,
     /// Failed to restore VM state.
@@ -177,6 +181,12 @@ impl Display for ResumeMicrovmError {
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(ref err) => {
                 write!(f, "Cannot open the snapshot image file: {:?}", err)
+            }
+            RestoreVirtioDeviceState(ref err) => {
+                write!(f, "Failed to restore MMIO device state: {:?}", err)
+            }
+            ReregisterMmioDevice(ref err) => {
+                write!(f, "Failed to reregister MMIO device: {:?}", err)
             }
             RestoreVcpuState => write!(f, "Failed to restore vCPU state."),
             RestoreVmState(ref e) => write!(f, "Failed to restore VM state: {:?}", e),

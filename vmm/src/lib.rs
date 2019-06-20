@@ -71,7 +71,10 @@ use devices::legacy::I8042DeviceError;
 use devices::virtio;
 #[cfg(feature = "vsock")]
 use devices::virtio::vhost::{handle::VHOST_EVENTS_COUNT, TYPE_VSOCK};
-use devices::virtio::{EpollConfigConstructor, MmioDevice, MmioDeviceState, MmioDeviceStateError};
+use devices::virtio::{
+    EpollConfigConstructor, MmioDevice, MmioDeviceState, MmioDeviceStateError,
+    SpecificVirtioDeviceState, SpecificVirtioDeviceStateError,
+};
 use devices::virtio::{BLOCK_EVENTS_COUNT, TYPE_BLOCK};
 use devices::virtio::{NET_EVENTS_COUNT, TYPE_NET};
 use devices::{DeviceEventT, EpollHandler};
@@ -356,9 +359,12 @@ impl std::convert::From<ResumeMicrovmError> for VmmActionError {
             VcpuResume => ErrorKind::User,
             #[cfg(target_arch = "x86_64")]
             DeserializeVcpu(_) => ErrorKind::Internal,
-            RestoreVmState(_) | RestoreVcpuState | SignalVcpu(_) | StartMicroVm(_) => {
-                ErrorKind::Internal
-            }
+            RestoreVirtioDeviceState(_)
+            | ReregisterMmioDevice(_)
+            | RestoreVmState(_)
+            | RestoreVcpuState
+            | SignalVcpu(_)
+            | StartMicroVm(_) => ErrorKind::Internal,
         };
         VmmActionError::ResumeMicrovm(kind, e)
     }
@@ -2290,6 +2296,55 @@ impl Vmm {
     }
 
     #[cfg(target_arch = "x86_64")]
+    fn restore_virtio_device(
+        &mut self,
+        device_state: &MmioDeviceState,
+    ) -> std::result::Result<Box<devices::virtio::VirtioDevice>, SpecificVirtioDeviceStateError>
+    {
+        let type_id = device_state.generic_virtio_device_state().device_type();
+        let device_id = device_state.generic_virtio_device_state().device_id();
+        let epoll_context = &mut self.epoll_context;
+
+        match device_state.specific_virtio_device_state() {
+            SpecificVirtioDeviceState::Block(block_state) => {
+                let epoll_config =
+                    epoll_context.allocate_virtio_tokens(type_id, device_id, BLOCK_EVENTS_COUNT);
+                Ok(block_state
+                    .restore(device_state.generic_virtio_device_state(), epoll_config)
+                    .map_err(SpecificVirtioDeviceStateError::RestoreBlockDevice)?)
+            }
+            SpecificVirtioDeviceState::Net(net_state) => {
+                let epoll_config =
+                    epoll_context.allocate_virtio_tokens(type_id, device_id, NET_EVENTS_COUNT);
+                Ok(net_state
+                    .restore(device_state.generic_virtio_device_state(), epoll_config)
+                    .map_err(SpecificVirtioDeviceStateError::RestoreNetDevice)?)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn restore_mmio_devices(
+        &mut self,
+        mmio_device_states: &[MmioDeviceState],
+    ) -> std::result::Result<(), ResumeMicrovmError> {
+        for device_state in mmio_device_states.iter() {
+            let virtio_device = self
+                .restore_virtio_device(device_state)
+                .map_err(ResumeMicrovmError::RestoreVirtioDeviceState)?;
+
+            // Safe to unwrap() because mmio_device_manager is initialized
+            // inside `resume_from_snapshot` before calling `restore_mmio_devices`
+            let device_manager = self.mmio_device_manager.as_mut().unwrap();
+            device_manager
+                .reregister_virtio_device(self.vm.get_fd(), virtio_device, device_state)
+                .map_err(ResumeMicrovmError::ReregisterMmioDevice)?;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
     fn pause_to_snapshot(&mut self) -> VmmRequestOutcome {
         let request_ts = TimestampUs {
             time_us: get_time_us(),
@@ -2389,6 +2444,9 @@ impl Vmm {
             ));
         }
         self.register_events()?;
+
+        // TODO: deserialize devices from snapshot.rs here
+        self.restore_mmio_devices(&Vec::new())?;
 
         self.create_vcpus(request_ts.clone())?;
 
@@ -2673,7 +2731,7 @@ mod tests {
 
     use self::tempfile::NamedTempFile;
     use arch::DeviceType;
-    use devices::virtio::{ActivateResult, MmioDevice, Queue};
+    use devices::virtio::{ActivateResult, BlockEpollHandler, MmioDevice, NetEpollHandler, Queue};
     use net_util::MacAddr;
     use std::path::Path;
     use vmm_config::machine_config::CpuFeaturesTemplate;
@@ -2885,7 +2943,10 @@ mod tests {
         let mut queues = Vec::new();
         let mut queue_evts = Vec::new();
         for _ in 0..num_queues {
-            queues.push(Queue::new(0));
+            let mut queue = Queue::new(1);
+            queue.size = 1;
+            queue.ready = true;
+            queues.push(queue);
             queue_evts.push(EventFd::new().unwrap());
         }
 
@@ -4777,57 +4838,90 @@ mod tests {
     }
 
     #[test]
-    fn test_mmio_device_states() {
-        let mut vmm = create_vmm_object(InstanceState::Uninitialized);
-        vmm.init_guest_memory().unwrap();
-        vmm.setup_interrupt_controller().unwrap();
-        vmm.default_kernel_config(None);
-        vmm.init_mmio_device_manager().unwrap();
-
+    fn test_save_restore_devices() {
         let block_file = NamedTempFile::new().unwrap();
         let block_id = "block";
-        vmm.insert_block_device(BlockDeviceConfig {
-            drive_id: block_id.to_string(),
-            path_on_host: block_file.path().to_path_buf(),
-            is_root_device: true,
-            partuuid: None,
-            is_read_only: true,
-            rate_limiter: None,
-        })
-        .unwrap();
-        vmm.attach_block_devices().unwrap();
-        activate_device(&vmm, TYPE_BLOCK, block_id, 1);
-
         let net_id = "net";
-        vmm.insert_net_device(NetworkInterfaceConfig {
-            iface_id: net_id.to_string(),
-            host_dev_name: String::from("hostname"),
-            guest_mac: None,
-            rx_rate_limiter: None,
-            tx_rate_limiter: None,
-            allow_mmds_requests: false,
-            tap: None,
-        })
-        .unwrap();
-        vmm.attach_net_devices().unwrap();
-        activate_device(&vmm, TYPE_NET, net_id, 2);
 
-        let states = vmm.mmio_device_states().unwrap();
-        assert_eq!(states.len(), 2);
-        // check that the block device state has been saved
-        assert_eq!(
-            states[0].generic_virtio_device_state().device_type(),
-            TYPE_BLOCK
-        );
-        assert_eq!(
-            states[0].generic_virtio_device_state().device_id(),
-            block_id
-        );
-        // check that the net device state has been saved
-        assert_eq!(
-            states[1].generic_virtio_device_state().device_type(),
-            TYPE_NET
-        );
-        assert_eq!(states[1].generic_virtio_device_state().device_id(), net_id);
+        let states = {
+            let mut vmm = create_vmm_object(InstanceState::Uninitialized);
+            vmm.init_guest_memory().unwrap();
+            vmm.setup_interrupt_controller().unwrap();
+            vmm.default_kernel_config(None);
+            vmm.init_mmio_device_manager().unwrap();
+
+            vmm.insert_block_device(BlockDeviceConfig {
+                drive_id: block_id.to_string(),
+                path_on_host: block_file.path().to_path_buf(),
+                is_root_device: true,
+                partuuid: None,
+                is_read_only: true,
+                rate_limiter: None,
+            })
+            .unwrap();
+            vmm.attach_block_devices().unwrap();
+            activate_device(&vmm, TYPE_BLOCK, block_id, 1);
+
+            vmm.insert_net_device(NetworkInterfaceConfig {
+                iface_id: net_id.to_string(),
+                host_dev_name: String::from("hostname"),
+                guest_mac: None,
+                rx_rate_limiter: None,
+                tx_rate_limiter: None,
+                allow_mmds_requests: false,
+                tap: None,
+            })
+            .unwrap();
+            vmm.attach_net_devices().unwrap();
+            activate_device(&vmm, TYPE_NET, net_id, 2);
+
+            let states = vmm.mmio_device_states().unwrap();
+            assert_eq!(states.len(), 2);
+            // check that the block device state has been saved
+            assert_eq!(
+                states[0].generic_virtio_device_state().device_type(),
+                TYPE_BLOCK
+            );
+            assert_eq!(
+                states[0].generic_virtio_device_state().device_id(),
+                block_id
+            );
+            // check that the net device state has been saved
+            assert_eq!(
+                states[1].generic_virtio_device_state().device_type(),
+                TYPE_NET
+            );
+            assert_eq!(states[1].generic_virtio_device_state().device_id(), net_id);
+
+            states
+        };
+
+        {
+            let mut vmm = create_vmm_object(InstanceState::Uninitialized);
+            vmm.init_guest_memory().unwrap();
+            vmm.setup_interrupt_controller().unwrap();
+            vmm.default_kernel_config(None);
+            vmm.init_mmio_device_manager().unwrap();
+
+            assert!(vmm.restore_mmio_devices(&states).is_ok());
+
+            let device_manager = vmm.mmio_device_manager.as_ref().unwrap();
+            // validate block device
+            assert!(device_manager
+                .get_device(DeviceType::Virtio(TYPE_BLOCK), block_id)
+                .is_some());
+            assert!(vmm
+                .epoll_context
+                .get_device_handler_by_device_id::<BlockEpollHandler>(TYPE_BLOCK, block_id)
+                .is_ok());
+            // validate net device
+            assert!(device_manager
+                .get_device(DeviceType::Virtio(TYPE_NET), net_id)
+                .is_some());
+            assert!(vmm
+                .epoll_context
+                .get_device_handler_by_device_id::<NetEpollHandler>(TYPE_NET, net_id)
+                .is_ok());
+        }
     }
 }

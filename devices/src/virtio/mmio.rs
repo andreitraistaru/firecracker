@@ -137,6 +137,8 @@ impl GenericVirtioDeviceState {
 pub enum SpecificVirtioDeviceStateError {
     InvalidDeviceType,
     InvalidDowncast,
+    RestoreBlockDevice(BlockError),
+    RestoreNetDevice(net::Error),
 }
 
 pub enum SpecificVirtioDeviceState {
@@ -200,6 +202,34 @@ impl MmioDevice {
             queue_evts,
             mem: Some(mem),
         })
+    }
+
+    pub fn activate(&mut self) -> bool {
+        // Skip activation if it's not needed
+        if self.device_activated {
+            return false;
+        }
+
+        // If the driver incorrectly sets up the queues, the following
+        // check will fail and take the device into an unusable state.
+        if !self.device_activated && self.are_queues_valid() {
+            if let Some(ref interrupt_evt) = self.interrupt_evt {
+                if let Some(mem) = self.mem.take() {
+                    self.device
+                        .activate(
+                            mem,
+                            interrupt_evt.try_clone().expect("Failed to clone eventfd"),
+                            self.interrupt_status.clone(),
+                            self.queues.clone(),
+                            self.queue_evts.split_off(0),
+                        )
+                        .expect("Failed to activate device");
+                    self.device_activated = true;
+                }
+            }
+        }
+
+        self.device_activated
     }
 
     // Gets the encapsulated VirtioDevice
@@ -304,24 +334,7 @@ impl MmioDevice {
                     == (DEVICE_ACKNOWLEDGE | DEVICE_DRIVER | DEVICE_FEATURES_OK) =>
             {
                 self.driver_status = v;
-                // If the driver incorrectly sets up the queues, the following
-                // check will fail and take the device into an unusable state.
-                if !self.device_activated && self.are_queues_valid() {
-                    if let Some(ref interrupt_evt) = self.interrupt_evt {
-                        if let Some(mem) = self.mem.take() {
-                            self.device
-                                .activate(
-                                    mem,
-                                    interrupt_evt.try_clone().expect("Failed to clone eventfd"),
-                                    self.interrupt_status.clone(),
-                                    self.queues.clone(),
-                                    self.queue_evts.split_off(0),
-                                )
-                                .expect("Failed to activate device");
-                            self.device_activated = true;
-                        }
-                    }
-                }
+                self.activate();
             }
             _ if (v & DEVICE_FAILED) != 0 => {
                 // TODO: notify backend driver to stop the device
