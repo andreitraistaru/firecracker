@@ -4798,12 +4798,36 @@ mod tests {
         vmm.attach_block_devices().unwrap();
         activate_device(&vmm, TYPE_BLOCK, block_id, 1);
 
+        let net_id = "net";
+        vmm.insert_net_device(NetworkInterfaceConfig {
+            iface_id: net_id.to_string(),
+            host_dev_name: String::from("hostname"),
+            guest_mac: None,
+            rx_rate_limiter: None,
+            tx_rate_limiter: None,
+            allow_mmds_requests: false,
+            tap: None,
+        })
+        .unwrap();
+        vmm.attach_net_devices().unwrap();
+        activate_device(&vmm, TYPE_NET, net_id, 2);
+
         let states = vmm.mmio_device_states().unwrap();
-        assert_eq!(states.len(), 1);
+        assert_eq!(states.len(), 2);
         // check that the block device state has been saved
         assert_eq!(
             states[0].generic_virtio_device_state().device_type(),
             TYPE_BLOCK
         );
+        assert_eq!(
+            states[0].generic_virtio_device_state().device_id(),
+            block_id
+        );
+        // check that the net device state has been saved
+        assert_eq!(
+            states[1].generic_virtio_device_state().device_type(),
+            TYPE_NET
+        );
+        assert_eq!(states[1].generic_virtio_device_state().device_id(), net_id);
     }
 }

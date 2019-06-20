@@ -27,9 +27,9 @@ use logger::{Metric, METRICS};
 use memory_model::{GuestAddress, GuestMemory};
 use net_gen;
 use net_util::{MacAddr, Tap, TapError, MAC_ADDR_LEN};
-use rate_limiter::{RateLimiter, TokenBucket, TokenType};
+use rate_limiter::{RateLimiter, RateLimiterState, TokenBucket, TokenType};
 use sys_util::EventFd;
-use virtio::{EpollConfigConstructor, SpecificVirtioDeviceStateError};
+use virtio::{EpollConfigConstructor, GenericVirtioDeviceState, SpecificVirtioDeviceStateError};
 use virtio_gen::virtio_net::*;
 use {DeviceEventT, EpollHandler};
 
@@ -68,6 +68,8 @@ pub enum Error {
     TapSetVnetHdrSize(TapError),
     /// Enabling tap interface failed.
     TapEnable(TapError),
+    /// Restoring the RateLimiter failed
+    RestoreRateLimiter(io::Error),
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -609,11 +611,11 @@ impl EpollHandler for NetEpollHandler {
     }
 
     fn interrupt_status(&self) -> usize {
-        unimplemented!()
+        self.interrupt_status.load(Ordering::Relaxed)
     }
 
     fn queues(&self) -> Vec<Queue> {
-        unimplemented!()
+        vec![self.rx.queue.clone(), self.tx.queue.clone()]
     }
 }
 
@@ -943,32 +945,83 @@ impl VirtioDevice for Net {
     }
 
     fn avail_features(&self) -> u64 {
-        unimplemented!()
+        self.avail_features
     }
 
     fn acked_features(&self) -> u64 {
-        unimplemented!()
+        self.acked_features
     }
 
     fn config_space(&self) -> Vec<u8> {
-        unimplemented!()
+        self.config_space.to_vec()
     }
 }
 
-pub struct NetState {}
+pub struct NetState {
+    tap_if_name: String,
+    rx_rate_limiter: RateLimiterState,
+    tx_rate_limiter: RateLimiterState,
+    allow_mmds_requests: bool,
+}
 
 impl NetState {
     pub fn new(
         device: &VirtioDevice,
         handler: &EpollHandler,
     ) -> result::Result<NetState, SpecificVirtioDeviceStateError> {
-        Ok(NetState {})
+        let net_device = device
+            .as_any()
+            .downcast_ref::<Net>()
+            .ok_or(SpecificVirtioDeviceStateError::InvalidDowncast)?;
+        let net_handler = handler
+            .as_any()
+            .downcast_ref::<NetEpollHandler>()
+            .ok_or(SpecificVirtioDeviceStateError::InvalidDowncast)?;
+
+        Ok(NetState {
+            tap_if_name: net_handler.tap.if_name().to_string(),
+            rx_rate_limiter: RateLimiterState::new(&net_handler.rx.rate_limiter),
+            tx_rate_limiter: RateLimiterState::new(&net_handler.tx.rate_limiter),
+            allow_mmds_requests: net_device.allow_mmds_requests,
+        })
+    }
+
+    pub fn restore(
+        &self,
+        generic_virtio_device_state: &GenericVirtioDeviceState,
+        epoll_config: EpollConfig,
+    ) -> Result<Box<VirtioDevice>> {
+        // Create Net device.
+        let tap = Tap::open_named(self.tap_if_name.as_str()).map_err(Error::TapOpen)?;
+        let mut net = Net::new_with_tap(
+            tap,
+            None,
+            epoll_config,
+            Some(
+                self.rx_rate_limiter
+                    .restore()
+                    .map_err(Error::RestoreRateLimiter)?,
+            ),
+            Some(
+                self.tx_rate_limiter
+                    .restore()
+                    .map_err(Error::RestoreRateLimiter)?,
+            ),
+            self.allow_mmds_requests,
+        )?;
+
+        // Restore Net device properties.
+        net.avail_features = generic_virtio_device_state.avail_features();
+        net.acked_features = generic_virtio_device_state.acked_features();
+        net.config_space = generic_virtio_device_state.config_space().to_vec();
+
+        Ok(Box::new(net))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::Receiver;
+    use std::sync::mpsc::{channel, Receiver};
     use std::thread;
     use std::time::Duration;
     use std::u32;
@@ -1966,5 +2019,60 @@ mod tests {
         compare_buckets(h.get_rx_rate_limiter().ops().unwrap(), &rx_ops);
         compare_buckets(h.get_tx_rate_limiter().bandwidth().unwrap(), &tx_bytes);
         compare_buckets(h.get_tx_rate_limiter().ops().unwrap(), &tx_ops);
+    }
+
+    #[test]
+    fn test_net_state() {
+        let (sender, _receiver) = channel();
+        let epoll_config = EpollConfig::new(0, 0, sender);
+        let net = Net {
+            tap: Some(Tap::new().unwrap()),
+            avail_features: 0,
+            acked_features: 0,
+            config_space: vec![],
+            epoll_config,
+            rx_rate_limiter: Some(RateLimiter::default()),
+            tx_rate_limiter: Some(RateLimiter::default()),
+            allow_mmds_requests: false,
+        };
+
+        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+
+        let net_state = {
+            let (handler, _, _) = default_test_netepollhandler(&m, TestMutators::default());
+            let net_state =
+                NetState::new(&net, &handler).expect("Error creating BlockState instance");
+            assert_eq!(net_state.allow_mmds_requests, net.allow_mmds_requests);
+            assert_eq!(net_state.tap_if_name, handler.tap.if_name());
+            assert_eq!(
+                net_state.rx_rate_limiter,
+                RateLimiterState::new(&handler.rx.rate_limiter)
+            );
+            assert_eq!(
+                net_state.tx_rate_limiter,
+                RateLimiterState::new(&handler.tx.rate_limiter)
+            );
+            net_state
+        };
+
+        let generic_virtio_device_state =
+            GenericVirtioDeviceState::new(TYPE_NET, "net", 21, 2, vec![1, 2, 3, 4, 5], 3, vec![]);
+        let (sender, _receiver) = channel();
+        let epoll_config = EpollConfig::new(0, 0, sender);
+        let restored_net = net_state
+            .restore(&generic_virtio_device_state, epoll_config)
+            .expect("Unable to restore Block device from BlockState");
+        assert_eq!(
+            restored_net.avail_features(),
+            generic_virtio_device_state.avail_features()
+        );
+        assert_eq!(
+            restored_net.acked_features(),
+            generic_virtio_device_state.acked_features()
+        );
+        assert_eq!(
+            restored_net.config_space(),
+            generic_virtio_device_state.config_space().to_vec()
+        );
     }
 }
