@@ -269,11 +269,6 @@ mod tests {
         );
         check_error_response(vmm_resp, StatusCode::InternalServerError);
         let vmm_resp = VmmActionError::StartMicrovm(
-            ErrorKind::Internal,
-            StartMicrovmError::CreateBlockDevice(io::Error::from_raw_os_error(22)),
-        );
-        check_error_response(vmm_resp, StatusCode::InternalServerError);
-        let vmm_resp = VmmActionError::StartMicrovm(
             ErrorKind::User,
             StartMicrovmError::OpenBlockDevice(io::Error::from_raw_os_error(22)),
         );

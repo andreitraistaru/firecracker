@@ -7,7 +7,7 @@
 
 use epoll;
 use std::cmp;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::linux::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -24,6 +24,7 @@ use super::{
 use logger::{Metric, METRICS};
 use memory_model::{GuestAddress, GuestMemory, GuestMemoryError};
 use rate_limiter::{RateLimiter, TokenType};
+use std::path::PathBuf;
 use sys_util::EventFd;
 use virtio::{EpollConfigConstructor, SpecificVirtioDeviceStateError};
 use virtio_gen::virtio_blk::*;
@@ -61,6 +62,15 @@ enum Error {
     GetFileMetadata,
     /// The requested operation would cause a seek beyond disk end.
     InvalidOffset,
+}
+
+/// Errors associated with using Block devices
+#[derive(Debug)]
+pub enum BlockError {
+    /// Failed to open the backing file for the Block device
+    OpenFile(io::Error),
+    /// Failed to seek the backing file of the Block device
+    Seek(io::Error),
 }
 
 #[derive(Debug)]
@@ -457,7 +467,9 @@ impl EpollConfigConstructor for EpollConfig {
 
 /// Virtio device for exposing block level read/write operations on a host file.
 pub struct Block {
+    disk_image_path: PathBuf,
     disk_image: Option<File>,
+    is_disk_read_only: bool,
     disk_nsectors: u64,
     avail_features: u64,
     acked_features: u64,
@@ -483,12 +495,20 @@ impl Block {
     ///
     /// The given file must be seekable and sizable.
     pub fn new(
-        mut disk_image: File,
+        disk_image_path: &PathBuf,
         is_disk_read_only: bool,
         epoll_config: EpollConfig,
         rate_limiter: Option<RateLimiter>,
-    ) -> io::Result<Block> {
-        let disk_size = disk_image.seek(SeekFrom::End(0))? as u64;
+    ) -> Result<Block, BlockError> {
+        let mut disk_image = OpenOptions::new()
+            .read(true)
+            .write(!is_disk_read_only)
+            .open(disk_image_path)
+            .map_err(BlockError::OpenFile)?;
+
+        let disk_size = disk_image
+            .seek(SeekFrom::End(0))
+            .map_err(BlockError::Seek)? as u64;
         if disk_size % SECTOR_SIZE != 0 {
             warn!(
                 "Disk size {} is not a multiple of sector size {}; \
@@ -504,7 +524,9 @@ impl Block {
         };
 
         Ok(Block {
+            disk_image_path: disk_image_path.clone(),
             disk_image: Some(disk_image),
+            is_disk_read_only,
             disk_nsectors: disk_size / SECTOR_SIZE,
             avail_features,
             acked_features: 0u64,
@@ -685,7 +707,7 @@ impl BlockState {
 mod tests {
     extern crate tempfile;
 
-    use self::tempfile::{tempfile, NamedTempFile};
+    use self::tempfile::NamedTempFile;
     use super::*;
 
     use libc;
@@ -733,13 +755,19 @@ mod tests {
 
             let epoll_config = EpollConfig::new(0, epoll_raw_fd, sender);
 
-            let f: File = tempfile().unwrap();
-            f.set_len(0x1000).unwrap();
+            let file = NamedTempFile::new().unwrap();
+            file.as_file().set_len(0x1000).unwrap();
 
             // Rate limiting is enabled but with a high operation rate (10 million ops/s).
             let rate_limiter = RateLimiter::new(0, None, 0, 100_000, None, 10).unwrap();
             DummyBlock {
-                block: Block::new(f, is_disk_read_only, epoll_config, Some(rate_limiter)).unwrap(),
+                block: Block::new(
+                    &file.path().to_path_buf(),
+                    is_disk_read_only,
+                    epoll_config,
+                    Some(rate_limiter),
+                )
+                .unwrap(),
                 epoll_raw_fd,
                 _receiver,
             }

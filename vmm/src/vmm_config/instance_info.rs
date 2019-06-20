@@ -197,7 +197,7 @@ pub enum StartMicrovmError {
     ConfigureVm(vstate::Error),
     /// Unable to seek the block device backing file due to invalid permissions or
     /// the file was deleted/corrupted.
-    CreateBlockDevice(std::io::Error),
+    CreateBlockDevice(devices::virtio::block::BlockError),
     /// Split this at some point.
     /// Internal errors are due to resource exhaustion.
     /// Users errors are due to invalid permissions.
@@ -281,12 +281,7 @@ impl Display for StartMicrovmError {
 
                 write!(f, "Cannot configure virtual machine. {}", err_msg)
             }
-            CreateBlockDevice(ref err) => write!(
-                f,
-                "Unable to seek the block device backing file due to invalid permissions or \
-                 the file was deleted/corrupted. Error number. {}",
-                err
-            ),
+            CreateBlockDevice(ref err) => write!(f, "Unable to Create block device. {:?}", err),
             CreateRateLimiter(ref err) => write!(f, "Cannot create RateLimiter. {}", err),
             #[cfg(feature = "vsock")]
             CreateVsockDevice(ref err) => {

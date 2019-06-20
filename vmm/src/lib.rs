@@ -964,13 +964,6 @@ impl Vmm {
         let device_manager = self.mmio_device_manager.as_mut().unwrap();
 
         for drive_config in self.block_device_configs.config_list.iter_mut() {
-            // Add the block device from file.
-            let block_file = OpenOptions::new()
-                .read(true)
-                .write(!drive_config.is_read_only)
-                .open(&drive_config.path_on_host)
-                .map_err(StartMicrovmError::OpenBlockDevice)?;
-
             if drive_config.is_root_device && drive_config.get_partuuid().is_some() {
                 kernel_config
                     .cmdline
@@ -1009,7 +1002,7 @@ impl Vmm {
 
             let block_box = Box::new(
                 devices::virtio::Block::new(
-                    block_file,
+                    &drive_config.path_on_host,
                     drive_config.is_read_only,
                     epoll_config,
                     rate_limiter,
@@ -4176,12 +4169,6 @@ mod tests {
                 vstate::Error::NotEnoughMemorySlots
             )),
             ErrorKind::Internal
-        );
-        assert_eq!(
-            error_kind(StartMicrovmError::CreateBlockDevice(
-                io::Error::from_raw_os_error(0)
-            )),
-            ErrorKind::User
         );
         assert_eq!(
             error_kind(StartMicrovmError::CreateNetDevice(
