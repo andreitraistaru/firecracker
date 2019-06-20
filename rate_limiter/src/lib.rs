@@ -487,7 +487,7 @@ impl Default for RateLimiter {
 }
 
 /// Rate Limiter State
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RateLimiterState {
     bandwidth: Option<TokenBucket>,
     ops: Option<TokenBucket>,

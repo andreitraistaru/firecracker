@@ -2871,6 +2871,36 @@ mod tests {
         tmp_path.to_str().unwrap().to_string()
     }
 
+    fn activate_device(vmm: &Vmm, device_type: u32, device_id: &str, num_queues: usize) {
+        let device_manager = vmm.mmio_device_manager.as_ref().unwrap();
+        let bus_device_mutex = device_manager
+            .get_device(DeviceType::Virtio(device_type), device_id)
+            .unwrap();
+        let bus_device = &mut *bus_device_mutex.lock().unwrap();
+        let mmio_device: &mut MmioDevice = bus_device
+            .as_mut_any()
+            .downcast_mut::<MmioDevice>()
+            .unwrap();
+
+        let mut queues = Vec::new();
+        let mut queue_evts = Vec::new();
+        for _ in 0..num_queues {
+            queues.push(Queue::new(0));
+            queue_evts.push(EventFd::new().unwrap());
+        }
+
+        assert!(mmio_device
+            .device_mut()
+            .activate(
+                vmm.guest_memory.as_ref().unwrap().clone(),
+                EventFd::new().unwrap(),
+                Arc::new(AtomicUsize::new(0)),
+                queues,
+                queue_evts,
+            )
+            .is_ok());
+    }
+
     #[test]
     fn test_device_handler() {
         let mut ep = EpollContext::new().unwrap();
@@ -3107,28 +3137,7 @@ mod tests {
             .is_err());
 
         // Activate the device
-        {
-            let device_manager = vmm.mmio_device_manager.as_ref().unwrap();
-            let bus_device_mutex = device_manager
-                .get_device(DeviceType::Virtio(TYPE_NET), "1")
-                .unwrap();
-            let bus_device = &mut *bus_device_mutex.lock().unwrap();
-            let mmio_device: &mut MmioDevice = bus_device
-                .as_mut_any()
-                .downcast_mut::<MmioDevice>()
-                .unwrap();
-
-            assert!(mmio_device
-                .device_mut()
-                .activate(
-                    vmm.guest_memory.as_ref().unwrap().clone(),
-                    EventFd::new().unwrap(),
-                    Arc::new(AtomicUsize::new(0)),
-                    vec![Queue::new(0), Queue::new(0)],
-                    vec![EventFd::new().unwrap(), EventFd::new().unwrap()],
-                )
-                .is_ok());
-        }
+        activate_device(&vmm, TYPE_NET, "1", 2);
 
         // the update should succeed after the device activation
         vmm.update_net_device(NetworkInterfaceUpdateConfig {
@@ -4765,5 +4774,36 @@ mod tests {
         assert!(vmm.create_snapshot_file(snapshot_path.to_string()).is_ok());
         assert!(Path::new(snapshot_path).exists());
         remove_file(snapshot_path).unwrap();
+    }
+
+    #[test]
+    fn test_mmio_device_states() {
+        let mut vmm = create_vmm_object(InstanceState::Uninitialized);
+        vmm.init_guest_memory().unwrap();
+        vmm.setup_interrupt_controller().unwrap();
+        vmm.default_kernel_config(None);
+        vmm.init_mmio_device_manager().unwrap();
+
+        let block_file = NamedTempFile::new().unwrap();
+        let block_id = "block";
+        vmm.insert_block_device(BlockDeviceConfig {
+            drive_id: block_id.to_string(),
+            path_on_host: block_file.path().to_path_buf(),
+            is_root_device: true,
+            partuuid: None,
+            is_read_only: true,
+            rate_limiter: None,
+        })
+        .unwrap();
+        vmm.attach_block_devices().unwrap();
+        activate_device(&vmm, TYPE_BLOCK, block_id, 1);
+
+        let states = vmm.mmio_device_states().unwrap();
+        assert_eq!(states.len(), 1);
+        // check that the block device state has been saved
+        assert_eq!(
+            states[0].generic_virtio_device_state().device_type(),
+            TYPE_BLOCK
+        );
     }
 }

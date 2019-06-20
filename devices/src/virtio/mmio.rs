@@ -36,7 +36,7 @@ pub enum MmioDeviceStateError {
 /// and all the events, memory, and queues for device operation will be moved into the device.
 /// Optionally, a virtio device can implement device reset in which it returns said resources and
 /// resets its internal.
-pub trait VirtioDevice: Send {
+pub trait VirtioDevice: AsAny + Send {
     /// The virtio device type.
     fn device_type(&self) -> u32;
 

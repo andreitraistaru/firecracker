@@ -23,10 +23,10 @@ use super::{
 };
 use logger::{Metric, METRICS};
 use memory_model::{GuestAddress, GuestMemory, GuestMemoryError};
-use rate_limiter::{RateLimiter, TokenType};
+use rate_limiter::{RateLimiter, RateLimiterState, TokenType};
 use std::path::PathBuf;
 use sys_util::EventFd;
-use virtio::{EpollConfigConstructor, SpecificVirtioDeviceStateError};
+use virtio::{EpollConfigConstructor, GenericVirtioDeviceState, SpecificVirtioDeviceStateError};
 use virtio_gen::virtio_blk::*;
 use {DeviceEventT, EpollHandler};
 
@@ -71,6 +71,8 @@ pub enum BlockError {
     OpenFile(io::Error),
     /// Failed to seek the backing file of the Block device
     Seek(io::Error),
+    /// Failed to restore the RateLimiter
+    RestoreRateLimiter(io::Error),
 }
 
 #[derive(Debug)]
@@ -439,11 +441,11 @@ impl EpollHandler for BlockEpollHandler {
     }
 
     fn interrupt_status(&self) -> usize {
-        unimplemented!()
+        self.interrupt_status.load(Ordering::Relaxed)
     }
 
     fn queues(&self) -> Vec<Queue> {
-        unimplemented!()
+        self.queues.to_vec()
     }
 }
 
@@ -680,26 +682,68 @@ impl VirtioDevice for Block {
     }
 
     fn avail_features(&self) -> u64 {
-        unimplemented!()
+        self.avail_features
     }
 
     fn acked_features(&self) -> u64 {
-        unimplemented!()
+        self.acked_features
     }
 
     fn config_space(&self) -> Vec<u8> {
-        unimplemented!()
+        self.config_space.to_vec()
     }
 }
 
-pub struct BlockState {}
+pub struct BlockState {
+    disk_image_path: PathBuf,
+    is_disk_read_only: bool,
+    rate_limiter: RateLimiterState,
+}
 
 impl BlockState {
     pub fn new(
         device: &VirtioDevice,
         handler: &EpollHandler,
     ) -> Result<BlockState, SpecificVirtioDeviceStateError> {
-        Ok(BlockState {})
+        let block_device = device
+            .as_any()
+            .downcast_ref::<Block>()
+            .ok_or(SpecificVirtioDeviceStateError::InvalidDowncast)?;
+        let block_handler = handler
+            .as_any()
+            .downcast_ref::<BlockEpollHandler>()
+            .ok_or(SpecificVirtioDeviceStateError::InvalidDowncast)?;
+
+        Ok(BlockState {
+            disk_image_path: block_device.disk_image_path.clone(),
+            is_disk_read_only: block_device.is_disk_read_only,
+            rate_limiter: RateLimiterState::new(&block_handler.rate_limiter),
+        })
+    }
+
+    pub fn restore(
+        &self,
+        generic_virtio_device_state: &GenericVirtioDeviceState,
+        epoll_config: EpollConfig,
+    ) -> Result<Box<VirtioDevice>, BlockError> {
+        // Create block device.
+        let mut block = Block::new(
+            &self.disk_image_path,
+            self.is_disk_read_only,
+            epoll_config,
+            Some(
+                self.rate_limiter
+                    .restore()
+                    .map_err(BlockError::RestoreRateLimiter)?,
+            ),
+        )?;
+
+        // Restore block device properties.
+        block.avail_features = generic_virtio_device_state.avail_features();
+        block.acked_features = generic_virtio_device_state.acked_features();
+        block.config_space = generic_virtio_device_state.config_space().to_vec();
+
+        Ok(Box::new(block))
     }
 }
 
@@ -712,7 +756,7 @@ mod tests {
 
     use libc;
     use std::fs::{metadata, OpenOptions};
-    use std::sync::mpsc::Receiver;
+    use std::sync::mpsc::{channel, Receiver};
     use std::thread;
     use std::time::Duration;
     use std::u32;
@@ -1595,5 +1639,58 @@ mod tests {
             assert_eq!(h.disk_image.metadata().unwrap().st_ino(), mdata.st_ino());
             assert_eq!(h.disk_image_id, id);
         }
+    }
+
+    #[test]
+    fn test_block_state() {
+        let file = NamedTempFile::new().unwrap();
+        let (sender, _receiver) = channel();
+        let epoll_config = EpollConfig::new(0, 0, sender);
+        let block = Block::new(
+            &file.path().to_path_buf(),
+            false,
+            epoll_config,
+            Some(RateLimiter::default()),
+        )
+        .unwrap();
+
+        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let (handler, _vq) = default_test_blockepollhandler(&m);
+
+        let block_state =
+            BlockState::new(&block, &handler).expect("Error creating BlockState instance");
+        assert_eq!(block_state.disk_image_path, file.path().to_path_buf());
+        assert_eq!(block_state.is_disk_read_only, block.is_disk_read_only);
+        assert_eq!(
+            block_state.rate_limiter,
+            RateLimiterState::new(&handler.rate_limiter)
+        );
+
+        let generic_virtio_device_state = GenericVirtioDeviceState::new(
+            TYPE_BLOCK,
+            "block",
+            21,
+            2,
+            vec![1, 2, 3, 4, 5],
+            3,
+            vec![],
+        );
+        let (sender, _receiver) = channel();
+        let epoll_config = EpollConfig::new(0, 0, sender);
+        let restored_block = block_state
+            .restore(&generic_virtio_device_state, epoll_config)
+            .expect("Unable to restore Block device from BlockState");
+        assert_eq!(
+            restored_block.avail_features(),
+            generic_virtio_device_state.avail_features()
+        );
+        assert_eq!(
+            restored_block.acked_features(),
+            generic_virtio_device_state.acked_features()
+        );
+        assert_eq!(
+            restored_block.config_space(),
+            generic_virtio_device_state.config_space().to_vec()
+        );
     }
 }
