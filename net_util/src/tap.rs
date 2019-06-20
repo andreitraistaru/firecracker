@@ -228,6 +228,10 @@ impl Tap {
 
         ifreq
     }
+
+    pub fn if_name(&self) -> &str {
+        std::str::from_utf8(&self.if_name[0..14]).unwrap()
+    }
 }
 
 impl Read for Tap {
