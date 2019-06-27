@@ -947,7 +947,7 @@ mod tests {
         let (_, mut vcpu, _, _) = setup_vcpu();
 
         // Running on the TLS vcpu should fail before we actually initialize it.
-        assert!(Vcpu::run_on_thread_local_vcpu(|_| {}).is_err());
+        assert!(Vcpu::run_on_thread_local_vcpu(|_| ()).is_err());
 
         // Initialize vcpu TLS.
         vcpu.init_thread_local_data();
@@ -962,7 +962,7 @@ mod tests {
         assert!(vcpu.reset_thread_local_data().is_ok());
 
         // Running on the TLS vcpu after TLS reset should fail.
-        assert!(Vcpu::run_on_thread_local_vcpu(|_| {}).is_err());
+        assert!(Vcpu::run_on_thread_local_vcpu(|_| ()).is_err());
 
         // Second reset should return EINVAL.
         assert!(vcpu.reset_thread_local_data().is_err());

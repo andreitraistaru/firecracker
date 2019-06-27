@@ -1657,7 +1657,7 @@ mod tests {
             panic!("mmap failed.");
         }
 
-        return addr as *mut u8;
+        addr as *mut u8
     }
 
     impl KvmRunWrapper {
@@ -2194,7 +2194,7 @@ mod tests {
             // Get a mutable slice of `mem_size` from `load_addr`.
             // This is safe because we mapped it before.
             let mut slice = std::slice::from_raw_parts_mut(load_addr, mem_size);
-            slice.write(&code).unwrap();
+            slice.write_all(&code).unwrap();
         }
 
         let vcpu_fd = vm.create_vcpu(0).expect("new VcpuFd failed");
@@ -2244,10 +2244,10 @@ mod tests {
                     // * one when the code itself is loaded in memory;
                     // * and one more from the `movl` that writes to address 0x2000
                     let dirty_pages_bitmap = vm.get_dirty_log(slot, mem_size).unwrap();
-                    let dirty_pages = dirty_pages_bitmap
+                    let dirty_pages: u32 = dirty_pages_bitmap
                         .into_iter()
                         .map(|page| page.count_ones())
-                        .fold(0, |dirty_page_count, i| dirty_page_count + i);
+                        .sum();
                     assert_eq!(dirty_pages, 2);
                     break;
                 }
@@ -2263,6 +2263,7 @@ mod tests {
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[allow(clippy::cyclomatic_complexity)]
     #[test]
     fn faulty_kvm_fds_test() {
         let badf_errno = libc::EBADF;
@@ -2487,7 +2488,7 @@ mod tests {
             function: 0x4,
             index: 0,
             flags: 1,
-            eax: 0b1100000,
+            eax: 0b110_0000,
             ebx: 0,
             ecx: 0,
             edx: 0,
@@ -2535,7 +2536,7 @@ mod tests {
             function: 0x4,
             index: 0,
             flags: 1,
-            eax: 0b1100000,
+            eax: 0b110_0000,
             ebx: 0,
             ecx: 0,
             edx: 0,

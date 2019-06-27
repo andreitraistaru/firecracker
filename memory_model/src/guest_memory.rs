@@ -748,7 +748,7 @@ mod tests {
             gpa: GuestAddress(0),
             size: 1024,
             fd: -1,
-            offset: 0x100000,
+            offset: 0x0010_0000,
             shared: false,
         };
         ranges.push(range);
@@ -788,7 +788,7 @@ mod tests {
     fn test_valid_range_descriptors() {
         let file = tempfile().unwrap();
         let mut ranges = Vec::new();
-        let chunk_size = 0x100000;
+        let chunk_size = 0x0010_0000;
         let num_ranges = 5;
         for i in { 0..num_ranges } {
             let range = FileMemoryDesc {
@@ -808,7 +808,7 @@ mod tests {
     #[test]
     fn test_overlapping_range_descriptors() {
         let file = tempfile().unwrap();
-        let chunk_size = 0x100000;
+        let chunk_size = 0x0010_0000;
         let num_ranges = 5;
         let fd = file.as_raw_fd();
         let create_ranges = move || {

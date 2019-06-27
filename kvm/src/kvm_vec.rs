@@ -279,7 +279,7 @@ mod tests {
 
     const ENTRIES_OFFSET: usize = 2;
 
-    const NUM_ELEMENTS_TO_KVM_ARRAY_LEN: &'static [(usize, usize)] = &[
+    const NUM_ELEMENTS_TO_KVM_ARRAY_LEN: &[(usize, usize)] = &[
         (0, 1),
         (1, 2),
         (2, 2),
