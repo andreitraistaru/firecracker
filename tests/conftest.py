@@ -121,12 +121,7 @@ DEFAULT_ROOT_TESTSESSION_PATH = '/tmp/firecracker_test_session/'
 
 IP4_GENERATOR_CREATE_LOCK = threading.Lock()
 
-MICROVM_FIXTURE_PARAMS = ['', 'vsock']
-# Since this is a temporary feature, we do not test
-# it on aarch64.
-if platform.machine() == "aarch64":
-    MICROVM_FIXTURE_PARAMS = ['']
-
+MICROVM_FIXTURE_PARAMS = ['']
 
 # This codebase uses Python features available in Python 3.6 or above
 if sys.version_info < (3, 6):

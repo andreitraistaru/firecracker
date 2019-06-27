@@ -11,13 +11,7 @@ import pytest
 import host_tools.cargo_build as host  # pylint:disable=import-error
 
 MACHINE = platform.machine()
-FEATURES = ["", "vsock"]
-
-# Since this is a temporary feature, we do not test
-# it on aarch64.
-if MACHINE == "aarch64":
-    FEATURES = [""]
-
+FEATURES = [""]
 BUILD_TYPES = ["debug", "release"]
 
 TARGETS = ["{}-unknown-linux-gnu".format(MACHINE),
