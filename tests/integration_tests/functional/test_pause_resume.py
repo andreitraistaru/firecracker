@@ -82,7 +82,8 @@ def test_snapshot_without_devices(test_microvm_with_api):
     assert "Microvm is not running." in response.text
 
     # Start microVM.
-    test_microvm.start()
+    snapshot_filename = test_microvm.snapshot_filename()
+    test_microvm.start(snapshot_path=snapshot_filename)
     time.sleep(0.3)
 
     # The APIs for snapshot related procedures does not get timed (yet?).
@@ -94,7 +95,8 @@ def test_snapshot_without_devices(test_microvm_with_api):
     test_microvm.jailer.cleanup(force=False)
     test_microvm.spawn()
 
-    response = test_microvm.actions.put(action_type='ResumeFromSnapshot')
+    response = test_microvm.actions.put(action_type='ResumeFromSnapshot',
+                                        payload=snapshot_filename)
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
     # We are making sure that the firecracker process has started.

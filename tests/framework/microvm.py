@@ -14,6 +14,7 @@ import os
 from queue import Queue
 import re
 from subprocess import run, PIPE
+from tempfile import NamedTemporaryFile
 
 from retry import retry
 
@@ -214,6 +215,15 @@ class Microvm:
     def get_jailed_resource(self, path):
         """Get the jailed path to a resource."""
         return self.jailer.jailed_path(path, create=False)
+
+    def snapshot_filename(self):
+        """Generate a file name for the snapshot."""
+        snap_file = NamedTemporaryFile()
+        snap_path = self.get_jailed_resource(
+            os.path.basename(snap_file.name))
+        # The file should be deleted when closed.
+        snap_file.close()
+        return snap_path
 
     def setup(self):
         """Create a microvm associated folder on the host.
@@ -433,10 +443,11 @@ class Microvm:
         self.ssh_config['hostname'] = guest_ip
         return tap, host_ip, guest_ip
 
-    def start(self):
+    def start(self, snapshot_path=None):
         """Start the microvm.
 
-        This function has asserts to validate that the microvm boot success.
+        This function validates that the microVM boots successfully.
         """
-        response = self.actions.put(action_type='InstanceStart')
+        response = self.actions.put(action_type='InstanceStart',
+                                    payload=snapshot_path)
         assert self._api_session.is_status_no_content(response.status_code)
