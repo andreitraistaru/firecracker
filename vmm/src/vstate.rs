@@ -23,7 +23,10 @@ use arch;
 #[cfg(target_arch = "x86_64")]
 use cpuid::{c3, filter_cpuid, t2};
 use default_syscalls;
-use kvm::*;
+use kvm::{
+    CpuId, Kvm, KvmArray, KvmMsrs, MsrList, VcpuExit, VcpuFd, VmFd, KVM_CLOCK_TSC_STABLE,
+    KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE, MAX_KVM_CPUID_ENTRIES,
+};
 use kvm_bindings::kvm_userspace_memory_region;
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::{
@@ -356,6 +359,7 @@ pub struct VmState {
 }
 
 /// List of events that the Vcpu can receive.
+#[allow(unused)]
 pub enum VcpuEvent {
     /// Kill the Vcpu.
     #[cfg(target_arch = "x86_64")]
@@ -559,17 +563,6 @@ impl VcpuHandle {
 
     pub fn response_receiver(&self) -> &Receiver<VcpuResponse> {
         &self.response_receiver
-    }
-
-    /// Will block until thread is joined, make sure the vcpu has exited.
-    #[cfg(target_arch = "x86_64")]
-    pub fn join_vcpu_thread(self) -> Result<()> {
-        match self.state {
-            // Use expect() to crash the other thread had panicked.
-            VcpuHandleState::Active(thread) => thread.join().expect("vcpu thread panicked"),
-            _ => Err(Error::VcpuInvalidState)?,
-        };
-        Ok(())
     }
 }
 
@@ -1188,6 +1181,17 @@ mod tests {
                 _ => panic!("cannot kick inactive vcpu"),
             };
             thread.kill(VCPU_RTSIG_OFFSET).expect("failed kicking vcpu");
+        }
+
+        // Will block until thread is joined, make sure the vcpu has exited.
+        #[cfg(target_arch = "x86_64")]
+        pub fn join_vcpu_thread(self) -> Result<()> {
+            match self.state {
+                // Use expect() to crash the other thread had panicked.
+                VcpuHandleState::Active(thread) => thread.join().expect("vcpu thread panicked"),
+                _ => Err(Error::VcpuInvalidState)?,
+            };
+            Ok(())
         }
     }
 

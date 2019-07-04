@@ -30,6 +30,7 @@ extern crate kernel;
 extern crate kvm;
 #[macro_use]
 extern crate logger;
+extern crate core;
 extern crate memory_model;
 extern crate net_util;
 extern crate rate_limiter;
@@ -91,8 +92,8 @@ use sys_util::{EventFd, Terminal};
 use vmm_config::boot_source::{BootSourceConfig, BootSourceConfigError};
 use vmm_config::drive::{BlockDeviceConfig, BlockDeviceConfigs, DriveError};
 use vmm_config::instance_info::{
-    InstanceInfo, InstanceState, KillVcpusError, PauseMicrovmError, ResumeMicrovmError,
-    StartMicrovmError, StateError,
+    InstanceInfo, InstanceState, PauseMicrovmError, ResumeMicrovmError, StartMicrovmError,
+    StateError,
 };
 use vmm_config::logger::{LoggerConfig, LoggerConfigError, LoggerLevel};
 use vmm_config::machine_config::{VmConfig, VmConfigError};
@@ -2142,23 +2143,6 @@ impl Vmm {
         Ok(VmmData::Empty)
     }
 
-    #[cfg(target_arch = "x86_64")]
-    fn kill_vcpus(&mut self) -> std::result::Result<(), KillVcpusError> {
-        self.validate_vcpus_are_active()
-            .map_err(KillVcpusError::MicroVMInvalidState)?;
-
-        for handle in self.vcpus_handles.iter() {
-            handle
-                .send_event(VcpuEvent::Exit)
-                .map_err(KillVcpusError::SignalVcpu)?;
-        }
-        for mut handle in self.vcpus_handles.drain(..) {
-            handle.join_vcpu_thread().expect("Unreachable.");
-        }
-
-        Ok(())
-    }
-
     fn initiate_vcpu_pause(&mut self) -> VmmRequestOutcome {
         let vcpus_thread_barrier = Arc::new(Barrier::new(self.vcpus_handles.len() + 1));
         for handle in self.vcpus_handles.iter() {
@@ -2189,31 +2173,12 @@ impl Vmm {
             .collect::<std::result::Result<Vec<VcpuResponse>, RecvTimeoutError>>()
             .map_err(|_| PauseMicrovmError::VcpuPause)?;
 
-        // Check that all the vCPUs responded with `PausedToSnapshot`.
-        responses
-            .iter()
-            .find(|resp| match resp {
-                VcpuResponse::PausedToSnapshot(_) => false,
-                _ => true,
-            })
-            .map(|_| PauseMicrovmError::SaveVcpuState(None));
-
-        // Serialize kvm VM state after the vCPUs are paused.
-        self.snapshot_image
-            .as_mut()
-            .ok_or(PauseMicrovmError::InvalidSnapshot)?
-            .set_kvm_vm_state(
-                self.vm
-                    .save_state()
-                    .map_err(PauseMicrovmError::SaveVmState)?,
-            );
-
         for (idx, response) in responses.into_iter().enumerate() {
             match response {
                 VcpuResponse::PausedToSnapshot(vcpu_state) => self
                     .snapshot_image
                     .as_mut()
-                    .unwrap()
+                    .ok_or(PauseMicrovmError::InvalidSnapshot)?
                     .serialize_vcpu(idx, vcpu_state)
                     .map_err(PauseMicrovmError::SerializeVcpu)?,
                 VcpuResponse::SaveStateFailed(err) => {
@@ -2222,6 +2187,16 @@ impl Vmm {
                 _ => Err(PauseMicrovmError::SaveVcpuState(None))?,
             }
         }
+
+        // Serialize kvm VM state after the vCPUs are paused and serialized.
+        self.snapshot_image
+            .as_mut()
+            .ok_or(PauseMicrovmError::InvalidSnapshot)?
+            .set_kvm_vm_state(
+                self.vm
+                    .save_state()
+                    .map_err(PauseMicrovmError::SaveVmState)?,
+            );
 
         // Persist the snapshot header and the guest memory.
         self.snapshot_image
@@ -2262,9 +2237,6 @@ impl Vmm {
                 .expect("Failed to resume vCPUs after an unsuccessful microVM pause");
             e
         })?;
-
-        // This will also notify the VMM (current) thread and will lead to firecracker exit.
-        self.kill_vcpus().map_err(PauseMicrovmError::StopVcpus)?;
 
         // Relinquish ownership of the snapshot image.
         self.snapshot_image = None;
@@ -2428,7 +2400,13 @@ impl Vmm {
             }
             #[cfg(target_arch = "x86_64")]
             VmmAction::PauseToSnapshot(sender) => {
-                Vmm::send_response(self.pause_to_snapshot(), sender);
+                let result = self.pause_to_snapshot();
+                let pause_ok = result.is_ok();
+                Vmm::send_response(result, sender);
+                if pause_ok {
+                    thread::sleep(Duration::from_millis(150));
+                    self.stop(i32::from(FC_EXIT_CODE_OK));
+                }
             }
             VmmAction::PauseVCPUs(sender) => {
                 Vmm::send_response(self.pause_vcpus(), sender);
@@ -2446,6 +2424,7 @@ impl Vmm {
                 Vmm::send_response(result, sender);
                 if resume_failed {
                     error!("Failed to resume from snapshot. Will terminate the VM.");
+                    thread::sleep(Duration::from_millis(150));
                     self.stop(i32::from(FC_EXIT_CODE_RESUME_ERROR));
                 }
             }
@@ -2620,7 +2599,7 @@ mod tests {
     use net_util::MacAddr;
     use std::path::Path;
     use vmm_config::machine_config::CpuFeaturesTemplate;
-    use vmm_config::{RateLimiterConfig, TokenBucketConfig};
+    use vmm_config::{instance_info::KillVcpusError, RateLimiterConfig, TokenBucketConfig};
 
     fn good_kernel_file() -> PathBuf {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -2692,6 +2671,23 @@ mod tests {
                     break;
                 }
             }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        fn kill_vcpus(&mut self) -> std::result::Result<(), KillVcpusError> {
+            self.validate_vcpus_are_active()
+                .map_err(KillVcpusError::MicroVMInvalidState)?;
+
+            for handle in self.vcpus_handles.iter() {
+                handle
+                    .send_event(VcpuEvent::Exit)
+                    .map_err(KillVcpusError::SignalVcpu)?;
+            }
+            for mut handle in self.vcpus_handles.drain(..) {
+                handle.join_vcpu_thread().expect("Unreachable.");
+            }
+
+            Ok(())
         }
     }
 
@@ -3907,8 +3903,7 @@ mod tests {
             vmm1.snapshot_image = None;
             assert!(vmm1.pause_to_snapshot().is_err());
             vmm1.snapshot_image = tmp_img;
-            vmm1.pause_to_snapshot().unwrap();
-            //            assert!(vmm1.pause_to_snapshot().is_ok());
+            assert!(vmm1.pause_to_snapshot().is_ok());
         }
 
         // Wait a bit to make sure all the kvm resources associated with this thread are released.
