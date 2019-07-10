@@ -427,6 +427,14 @@ impl EpollHandler for BlockEpollHandler {
             }),
         }
     }
+
+    fn interrupt_status(&self) -> usize {
+        unimplemented!()
+    }
+
+    fn queues(&self) -> Vec<Queue> {
+        unimplemented!()
+    }
 }
 
 pub struct EpollConfig {
@@ -647,6 +655,18 @@ impl VirtioDevice for Block {
         }
         METRICS.block.activate_fails.inc();
         Err(ActivateError::BadActivate)
+    }
+
+    fn avail_features(&self) -> u64 {
+        unimplemented!()
+    }
+
+    fn acked_features(&self) -> u64 {
+        unimplemented!()
+    }
+
+    fn config_space(&self) -> Vec<u8> {
+        unimplemented!()
     }
 }
 

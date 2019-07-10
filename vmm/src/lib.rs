@@ -2703,6 +2703,14 @@ mod tests {
             self.evt = Some(device_event);
             Ok(())
         }
+
+        fn interrupt_status(&self) -> usize {
+            unimplemented!()
+        }
+
+        fn queues(&self) -> Vec<Queue> {
+            unimplemented!()
+        }
     }
 
     #[allow(dead_code)]
@@ -2746,6 +2754,18 @@ mod tests {
             mut queue_evts: Vec<EventFd>,
         ) -> ActivateResult {
             Ok(())
+        }
+
+        fn avail_features(&self) -> u64 {
+            unimplemented!()
+        }
+
+        fn acked_features(&self) -> u64 {
+            unimplemented!()
+        }
+
+        fn config_space(&self) -> Vec<u8> {
+            unimplemented!()
         }
     }
 

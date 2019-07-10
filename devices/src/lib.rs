@@ -33,7 +33,7 @@ pub mod legacy;
 pub mod virtio;
 
 pub use self::bus::{Bus, BusDevice, Error as BusError};
-use virtio::AsAny;
+use virtio::{AsAny, Queue};
 
 pub type DeviceEventT = u16;
 
@@ -41,6 +41,10 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub trait EpollHandler: AsAny + Send {
     fn handle_event(&mut self, device_event: DeviceEventT) -> Result<()>;
+
+    fn interrupt_status(&self) -> usize;
+
+    fn queues(&self) -> Vec<Queue>;
 }
 
 #[derive(Debug)]

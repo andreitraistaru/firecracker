@@ -68,6 +68,12 @@ pub trait VirtioDevice: Send {
     fn reset(&mut self) -> Option<(EventFd, Vec<EventFd>)> {
         None
     }
+
+    fn avail_features(&self) -> u64;
+
+    fn acked_features(&self) -> u64;
+
+    fn config_space(&self) -> Vec<u8>;
 }
 
 /// Implements the
@@ -459,6 +465,18 @@ mod tests {
             self.interrupt_evt = Some(interrupt_evt);
             self.queue_evts = Some(queue_evts);
             Ok(())
+        }
+
+        fn avail_features(&self) -> u64 {
+            unimplemented!()
+        }
+
+        fn acked_features(&self) -> u64 {
+            unimplemented!()
+        }
+
+        fn config_space(&self) -> Vec<u8> {
+            unimplemented!()
         }
     }
 

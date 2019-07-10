@@ -9,7 +9,7 @@ use super::INTERRUPT_STATUS_USED_RING;
 
 use sys_util::EventFd;
 use vhost_backend::Vhost;
-use virtio::EpollConfigConstructor;
+use virtio::{EpollConfigConstructor, Queue};
 use DeviceEventT;
 use EpollHandler;
 
@@ -100,6 +100,14 @@ where
                 event: other,
             }),
         }
+    }
+
+    fn interrupt_status(&self) -> usize {
+        unimplemented!()
+    }
+
+    fn queues(&self) -> Vec<Queue> {
+        unimplemented!()
     }
 }
 

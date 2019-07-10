@@ -371,6 +371,18 @@ mod tests {
         ) -> ActivateResult {
             Ok(())
         }
+
+        fn avail_features(&self) -> u64 {
+            unimplemented!()
+        }
+
+        fn acked_features(&self) -> u64 {
+            unimplemented!()
+        }
+
+        fn config_space(&self) -> Vec<u8> {
+            unimplemented!()
+        }
     }
 
     fn create_vmm_object() -> Vmm {
