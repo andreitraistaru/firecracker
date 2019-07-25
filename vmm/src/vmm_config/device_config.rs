@@ -3,6 +3,7 @@
 
 #![deny(warnings)]
 
+use vmm_config::balloon::*;
 use vmm_config::drive::*;
 use vmm_config::net::*;
 use vmm_config::vsock::*;
@@ -11,6 +12,8 @@ use vmm_config::vsock::*;
 /// held in the Vmm.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct DeviceConfigs {
+    /// The configurations for balloon devices.
+    pub balloon: BalloonConfigs,
     /// The configurations for block devices.
     pub block: BlockDeviceConfigs,
     /// The configurations for network interface devices.
@@ -22,11 +25,13 @@ pub struct DeviceConfigs {
 impl DeviceConfigs {
     /// Construct a `DeviceConfigs` structure from its constituent parts.
     pub fn new(
+        balloon: BalloonConfigs,
         block: BlockDeviceConfigs,
         network_interface: NetworkInterfaceConfigs,
         vsock: Option<VsockDeviceConfig>,
     ) -> DeviceConfigs {
         DeviceConfigs {
+            balloon,
             block,
             network_interface,
             vsock,

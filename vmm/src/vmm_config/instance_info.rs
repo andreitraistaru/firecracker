@@ -211,6 +211,8 @@ pub enum StartMicrovmError {
     /// Unable to seek the block device backing file due to invalid permissions or
     /// the file was deleted/corrupted.
     CreateBlockDevice(devices::virtio::block::BlockError),
+    /// Splits this at some point.
+    CreateBalloon(devices::Error),
     /// Split this at some point.
     /// Internal errors are due to resource exhaustion.
     /// Users errors are due to invalid permissions.
@@ -241,6 +243,8 @@ pub enum StartMicrovmError {
     NetDeviceNotConfigured,
     /// Cannot open the block device backing file.
     OpenBlockDevice(std::io::Error),
+    /// Cannot initialize a MMIO Balloon Device or add a device to the MMIO Bus.
+    RegisterBalloonDevice(device_manager::mmio::Error),
     /// Cannot initialize a MMIO Block Device or add a device to the MMIO Bus.
     RegisterBlockDevice(device_manager::mmio::Error),
     /// Cannot add event to Epoll.
@@ -307,6 +311,12 @@ impl Display for StartMicrovmError {
             ),
             CreateRateLimiter(ref err) => write!(f, "Cannot create RateLimiter. {}", err),
             CreateVsockDevice => write!(f, "Cannot create vsock device."),
+            CreateBalloon(ref err) => {
+                let mut err_msg = format!("{:?}", err);
+                err_msg = err_msg.replace("\"", "");
+
+                write!(f, "Cannot create balloon device. {}", err_msg)
+            }
             CreateNetDevice(ref err) => {
                 let mut err_msg = format!("{:?}", err);
                 err_msg = err_msg.replace("\"", "");
@@ -359,6 +369,15 @@ impl Display for StartMicrovmError {
                 "Cannot initialize a MMIO Block Device or add a device to the MMIO Bus. {}",
                 err
             ),
+            RegisterBalloonDevice(ref err) => {
+                let mut err_msg = format!("{}", err);
+                err_msg = err_msg.replace("\"", "");
+                write!(
+                    f,
+                    "Cannot initialize a MMIO Balloon Device or add a device to the MMIO Bus. {}",
+                    err_msg
+                )
+            }
             RegisterEvent => write!(f, "Cannot add event to Epoll."),
             RegisterMMIODevice(ref err) => {
                 let mut err_msg = format!("{}", err);
@@ -573,6 +592,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn test_start_microvm_error_messages() {
         use self::StartMicrovmError::*;
         assert_eq!(
@@ -593,6 +613,13 @@ mod tests {
                 "Unable to seek the block device backing file due to invalid permissions or \
                  the file was deleted/corrupted. Error number: {:?}",
                 devices::virtio::block::BlockError::OpenFile(std::io::Error::from_raw_os_error(0))
+            )
+        );
+        assert_eq!(
+            format!("{}", CreateBalloon(devices::Error::MalformedDescriptor)),
+            format!(
+                "Cannot create balloon device. {:?}",
+                devices::Error::MalformedDescriptor
             )
         );
         assert_eq!(
@@ -666,6 +693,16 @@ mod tests {
             ),
             format!(
                 "Cannot initialize a MMIO Block Device or add a device to the MMIO Bus. {}",
+                device_manager::mmio::Error::IrqsExhausted
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                RegisterBalloonDevice(device_manager::mmio::Error::IrqsExhausted)
+            ),
+            format!(
+                "Cannot initialize a MMIO Balloon Device or add a device to the MMIO Bus. {}",
                 device_manager::mmio::Error::IrqsExhausted
             )
         );
