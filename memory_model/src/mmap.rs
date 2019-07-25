@@ -27,12 +27,14 @@ pub enum Error {
     InvalidRange(usize, usize),
     /// Couldn't read from the given source.
     ReadFromSource(io::Error),
-    /// `mmap` returned the given error.
+    /// `mmap` or `madvise` returned the given error.
     SystemCallFailed(io::Error),
     /// Writing to memory failed.
     WriteToMemory(io::Error),
     /// Reading from memory failed.
     ReadFromMemory(io::Error),
+    /// A madvise was called with unsupported advice.
+    UnsupportedMadvise(libc::c_int),
 }
 type Result<T> = std::result::Result<T, Error>;
 
@@ -155,7 +157,7 @@ impl MemoryMapping {
                 null_mut(),
                 size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_ANONYMOUS | libc::MAP_NORESERVE | libc::MAP_PRIVATE,
+                libc::MAP_ANONYMOUS | libc::MAP_NORESERVE | libc::MAP_SHARED,
                 -1,
                 0,
             )
@@ -397,6 +399,86 @@ impl MemoryMapping {
         // overflow. However, it is possible to alias.
         std::slice::from_raw_parts_mut(self.addr, self.size)
     }
+
+    /// Call madvise on a certain range, with a certain advice.
+    ///
+    /// Only MADV_DONTNEED and MADV_REMOVE are currently supported.
+    ///
+    /// If called with MADV_DONTNEED it takes back pages from the guest. If read from after this
+    /// call, the memory will contain only zeroes, if the underlying memory region is an anonymous
+    /// private mapping, or will result in repopulating the memory contents from the up-to-date
+    /// contents of the underlying mapped file. The given offset must be page aligned.
+    ///
+    /// If called with MADV_REMOVE it takes back pages from the guest. If read from after this
+    /// call, the memory will contain only zeroes. The given offset must be page aligned.
+    ///
+    /// To learn more about madvise, read this manual page:
+    /// http://man7.org/linux/man-pages/man2/madvise.2.html
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use memory_model::MemoryMapping;
+    /// # fn test_dontneed_range() -> Result<(), ()> {
+    ///   // Function use for shared anonymous mappings.
+    ///   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
+    ///   assert!(mem_map.write_obj(123u32, 0).is_ok());
+    /// # assert_eq!(mem_map.read_obj::<u32>(32).unwrap(), 123u32);
+    ///   assert!(mem_map.madvise_range(0, 32, libc::MADV_DONTNEED).is_ok());
+    ///   // The kernel is now advised that the first 32 bytes of `mem_map` is not needed
+    ///   // A read will now yield the old contents, since the mapping is anonymous and shared.
+    ///   assert_eq!(mem_map.read_obj::<u32>(32).unwrap(), 123u32);
+    /// # Ok(())
+    /// # }
+    ///
+    /// # fn test_remove_range() -> Result<(), ()> {
+    ///   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
+    ///   assert!(mem_map.write_obj(123u32, 0).is_ok());
+    ///   assert!(mem_map.madvise_range(0, 32, libc::MADV_REMOVE).is_ok());
+    ///   // The kernel is now advised that the first 32 bytes of `mem_map` can be removed.
+    ///   assert_eq!(mem_map.read_obj::<u32>(32).unwrap(), 0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn madvise_range(
+        &self,
+        mem_offset: usize,
+        count: usize,
+        advice: libc::c_int,
+    ) -> Result<()> {
+        if advice != libc::MADV_REMOVE && advice != libc::MADV_DONTNEED {
+            return Err(Error::UnsupportedMadvise(advice));
+        }
+
+        self.range_end(mem_offset, count)
+            .map_err(|_| Error::InvalidRange(mem_offset, count))?;
+
+        let ret = unsafe {
+            // This is safe for the same reason that write_obj is safe:
+            // `madvise`-ing the kernel that some memory can be removed is,
+            // from the point of view of a userspace process, either the same as
+            // setting the memory to 0 (for remove or dontneed) -- which is fine as
+            // long as we make sure that we get the bound check correct
+            // (which was done through the call to range_end previously); or,
+            // does not modify it, which is clearly safe (for dontneed).
+            libc::madvise((self.addr as usize + mem_offset) as *mut _, count, advice)
+        };
+        if ret < 0 {
+            Err(Error::SystemCallFailed(io::Error::last_os_error()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Check that offset + count falls within our mapped range,
+    /// and return the result.
+    fn range_end(&self, offset: usize, count: usize) -> Result<usize> {
+        let mem_end = offset.checked_add(count).ok_or(Error::InvalidAddress)?;
+        if mem_end > self.size() {
+            return Err(Error::InvalidAddress);
+        }
+        Ok(mem_end)
+    }
 }
 
 impl Drop for MemoryMapping {
@@ -418,6 +500,16 @@ mod tests {
     use std::fs::File;
     use std::mem;
     use std::path::Path;
+
+    /// This asserts that $lhs matches $rhs.
+    macro_rules! assert_match {
+        ($lhs:expr, $rhs:pat) => {{
+            assert!(match $lhs {
+                $rhs => true,
+                _ => false,
+            })
+        }};
+    }
 
     #[test]
     fn basic_map() {
@@ -469,6 +561,113 @@ mod tests {
         assert_eq!(mem_map.read_obj::<u16>(2).unwrap(), 55u16);
         assert!(mem_map.read_obj::<u16>(4).is_err());
         assert!(mem_map.read_obj::<u16>(core::usize::MAX).is_err());
+    }
+
+    #[test]
+    fn test_unsupported_madvise() {
+        let mem_map = MemoryMapping::new_anon(1024).unwrap();
+        let unsupported_madvises = vec![
+            libc::MADV_DODUMP,
+            libc::MADV_DOFORK,
+            libc::MADV_DONTDUMP,
+            libc::MADV_DONTFORK,
+            libc::MADV_HUGEPAGE,
+            libc::MADV_HWPOISON,
+            libc::MADV_MERGEABLE,
+            libc::MADV_NOHUGEPAGE,
+            libc::MADV_NORMAL,
+            libc::MADV_RANDOM,
+            libc::MADV_SEQUENTIAL,
+            libc::MADV_UNMERGEABLE,
+            libc::MADV_WILLNEED,
+        ];
+        for &advice in unsupported_madvises.iter() {
+            if let Error::UnsupportedMadvise(x) = mem_map.madvise_range(1, 2, advice).unwrap_err() {
+                assert_eq!(x, advice);
+            } else {
+                panic!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_remove_range() {
+        let mem_map = MemoryMapping::new_anon(1024).unwrap();
+
+        // This should fail, since it's out of the mapping's bounds.
+        assert_match!(
+            mem_map.madvise_range(600, 600, libc::MADV_REMOVE),
+            Err(Error::InvalidRange(600, 600))
+        );
+
+        // This should fail, since this address is not page aligned.
+        #[allow(clippy::match_wild_err_arm)]
+        match mem_map.madvise_range(1, 100, libc::MADV_REMOVE) {
+            Ok(_) => panic!("This remove_range should return an error"),
+            Err(Error::SystemCallFailed(x)) => assert_eq!(x.kind(), io::ErrorKind::InvalidInput),
+            _ => panic!("This remove_range returned the wrong type of error"),
+        }
+
+        // Write, to test later that this disappears after the madvise.
+        assert!(mem_map.write_obj(123 as u32, 0).is_ok());
+
+        // Check that write was succesful.
+        assert_match!(mem_map.read_obj::<u32>(0), Ok(123));
+
+        // Remove range. This should succeed.
+        assert!(mem_map.madvise_range(0, 500, libc::MADV_REMOVE).is_ok());
+
+        // Now, reading the integer at 0 should yield 0.
+        assert_match!(mem_map.read_obj::<u32>(0), Ok(0));
+    }
+
+    #[test]
+    fn test_dontneed_range() {
+        let mem_map = MemoryMapping::new_anon(1024).unwrap();
+
+        // This should fail, since it's out of the mapping's bounds.
+        assert_match!(
+            mem_map.madvise_range(600, 600, libc::MADV_DONTNEED),
+            Err(Error::InvalidRange(600, 600))
+        );
+
+        // This should fail, since this address is not page aligned.
+        #[allow(clippy::match_wild_err_arm)]
+        match mem_map.madvise_range(1, 100, libc::MADV_DONTNEED) {
+            Ok(_) => panic!("This dontneed_range should give an error"),
+            Err(Error::SystemCallFailed(x)) => assert_eq!(x.kind(), io::ErrorKind::InvalidInput),
+            Err(_) => panic!("This dontneed_range returned the wrong type of error"),
+        }
+
+        // This should fail, since it's out of the mapping's bounds.
+        assert_match!(
+            mem_map.madvise_range(600, 600, libc::MADV_DONTNEED),
+            Err(Error::InvalidRange(600, 600))
+        );
+
+        // Write, to test later that this disappears after the madvise.
+        assert!(mem_map.write_obj(123 as u32, 0).is_ok());
+
+        // Check that write was succesful.
+        assert_match!(mem_map.read_obj::<u32>(0), Ok(123));
+
+        // Remove range. This should succeed.
+        assert!(mem_map.madvise_range(0, 500, libc::MADV_DONTNEED).is_ok());
+
+        // Now, reading the integer at 0 should yield the previous value, since the
+        // mapping is shared.
+        assert_match!(mem_map.read_obj::<u32>(0), Ok(123));
+    }
+
+    #[test]
+    fn test_range_end() {
+        let mm = MemoryMapping::new_anon(123).unwrap();
+
+        // This should work, since 50 + 50 < 123.
+        assert_match!(mm.range_end(50, 50), Ok(100));
+
+        // This should return an error, since 50 + 80 >= 123.
+        assert_match!(mm.range_end(50, 80), Err(Error::InvalidAddress));
     }
 
     #[test]

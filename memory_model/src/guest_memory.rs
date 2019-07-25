@@ -40,6 +40,8 @@ pub enum Error {
     NoMemoryRegions,
     /// Failure in setting the size of the guest memory backing file.
     Truncate(std::io::Error),
+    /// An unsupported madvise was attempted.
+    UnsupportedMadvise(GuestAddress, u64, libc::c_int),
 }
 type Result<T> = result::Result<T, Error>;
 
@@ -199,6 +201,60 @@ impl GuestMemory {
     /// Returns the size of the memory region.
     pub fn num_regions(&self) -> usize {
         self.regions.len()
+    }
+
+    /// Call madvise on a certain range, with a certain advice.
+    ///
+    /// Only MADV_DONTNEED and MADV_REMOVE are currently supported.
+    ///
+    /// If called with  MADV_DONTNEED it takes memory back from the guest. If read from after this
+    /// call, the memory will contain only zeroes, if the underlying memory region is an anonymous
+    /// private mapping, or will result in repopulating the memory contents from the up-to-date
+    /// contents of the underlying mapped file.
+    ///
+    /// If called with with MADV_REMOVE it takes memory back from the guest. If read from after this
+    /// call, the memory will contain only zeroes.
+    ///
+    /// To learn more about madvise, read this manual page:
+    /// http://man7.org/linux/man-pages/man2/madvise.2.html
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use memory_model::{GuestAddress, GuestMemory, MemoryMapping, AnonMemoryDesc};
+    /// # fn test_remove_range() -> Result<(), ()> {
+    ///    let start_addr = GuestAddress(0x1000);
+    ///    let mut gm = GuestMemory::new_anon(&vec![AnonMemoryDesc { gpa: start_addr, size: 0x400 }]).map_err(|_| ())?;
+    ///    gm.write_obj_at_addr(123, start_addr);
+    ///    assert_eq!(gm.read_obj_from_addr::<u32>(start_addr).unwrap(), 123);
+    ///    gm.madvise_range(start_addr, 32, libc::MADV_REMOVE);
+    ///    // The kernel is now advised that the next 32 bytes after `start_addr` can be removed.
+    ///    assert_eq!(gm.read_obj_from_addr::<u32>(start_addr).unwrap(), 0);
+    /// #  Ok(())
+    /// # }
+    ///
+    /// # fn test_dontneed_range() -> Result<(), ()> {
+    ///   let start_addr = GuestAddress(0x2000);
+    ///   let mut gm = GuestMemory::new_anon(&vec![AnonMemoryDesc { gpa: start_addr, size: 0x400 }]).map_err(|_| ())?;
+    ///   gm.write_obj_at_addr(123, start_addr);
+    ///   assert_eq!(gm.read_obj_from_addr::<u32>(start_addr).unwrap(), 123);
+    ///   gm.madvise_range(start_addr, 32, libc::MADV_DONTNEED);
+    ///   // The kernel is now advised that the next 32 bytes after `start_addr` are not needed
+    ///   // A read will now yield the old contents, since the mapping is anonymous and shared.
+    ///   assert_eq!(gm.read_obj_from_addr::<u32>(start_addr).unwrap(), 123);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn madvise_range(&self, addr: GuestAddress, count: u64, advice: libc::c_int) -> Result<()> {
+        if advice != libc::MADV_DONTNEED && advice != libc::MADV_REMOVE {
+            return Err(Error::UnsupportedMadvise(addr, count, advice));
+        }
+
+        self.do_in_region(addr, count as usize, move |mapping, offset| {
+            mapping
+                .madvise_range(offset, count as usize, advice)
+                .map_err(|e| Error::MemoryAccess(addr, e))
+        })
     }
 
     /// Perform the specified action on each region's addresses.
@@ -860,5 +916,105 @@ mod tests {
             format!("{:?}", mem.err().unwrap()),
             format!("{:?}", Error::MemoryRegionOverlap)
         );
+    }
+
+    #[test]
+    fn test_remove_range() {
+        let start_addr = GuestAddress(0x0);
+        let mem = GuestMemory::new_anon(&[AnonMemoryDesc {
+            gpa: start_addr,
+            size: 1024,
+        }])
+        .unwrap();
+
+        // Bad range leads to appropriate error.
+        assert!(
+            match mem.madvise_range(start_addr, 1025, libc::MADV_REMOVE) {
+                Err(Error::InvalidGuestAddressRange(addr, 1025)) => addr == start_addr,
+                _ => false,
+            }
+        );
+
+        // Write into memory.
+        assert!(mem.write_obj_at_addr::<u32>(123, start_addr).is_ok());
+
+        // Check that the write was successful.
+        assert_eq!(mem.read_obj_from_addr::<u32>(start_addr).unwrap(), 123);
+
+        // Remove affected range.
+        assert!(mem.madvise_range(start_addr, 32, libc::MADV_REMOVE).is_ok());
+
+        // Check that the remove was successful.
+        assert_eq!(mem.read_obj_from_addr::<u32>(start_addr).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_unsupported_madvise() {
+        let start_addr = GuestAddress(0x0);
+        let mem = GuestMemory::new_anon(&[AnonMemoryDesc {
+            gpa: start_addr,
+            size: 1024,
+        }])
+        .unwrap();
+        let unsupported_madvises = vec![
+            libc::MADV_DODUMP,
+            libc::MADV_DOFORK,
+            libc::MADV_DONTDUMP,
+            libc::MADV_DONTFORK,
+            libc::MADV_HUGEPAGE,
+            libc::MADV_HWPOISON,
+            libc::MADV_MERGEABLE,
+            libc::MADV_NOHUGEPAGE,
+            libc::MADV_NORMAL,
+            libc::MADV_RANDOM,
+            libc::MADV_SEQUENTIAL,
+            libc::MADV_UNMERGEABLE,
+            libc::MADV_WILLNEED,
+        ];
+
+        for &advice in unsupported_madvises.iter() {
+            if let Error::UnsupportedMadvise(addr, len, adv) =
+                mem.madvise_range(start_addr, 1, advice).unwrap_err()
+            {
+                assert_eq!(addr, start_addr);
+                assert_eq!(len, 1);
+                assert_eq!(adv, advice);
+            } else {
+                panic!();
+            }
+        }
+    }
+
+    #[test]
+    fn test_dontneed_range() {
+        let start_addr = GuestAddress(0x0);
+        let mem = GuestMemory::new_anon(&[AnonMemoryDesc {
+            gpa: start_addr,
+            size: 1024,
+        }])
+        .unwrap();
+
+        // Bad range leads to appropriate error.
+        assert!(
+            match mem.madvise_range(start_addr, 1025, libc::MADV_DONTNEED) {
+                Err(Error::InvalidGuestAddressRange(addr, 1025)) => addr == start_addr,
+                _ => false,
+            }
+        );
+
+        // Write into memory.
+        assert!(mem.write_obj_at_addr::<u32>(123, start_addr).is_ok());
+
+        // Check that the write was successful.
+        assert_eq!(mem.read_obj_from_addr::<u32>(start_addr).unwrap(), 123);
+
+        // Remove affected range.
+        assert!(mem
+            .madvise_range(start_addr, 32, libc::MADV_DONTNEED)
+            .is_ok());
+
+        // Check that the dontneed_range was successful -- since the mapping
+        // is shared, this should yield the old value.
+        assert_eq!(mem.read_obj_from_addr::<u32>(start_addr).unwrap(), 123);
     }
 }
