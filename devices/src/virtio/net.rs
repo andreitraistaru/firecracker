@@ -2062,7 +2062,7 @@ mod tests {
         assert_eq!(net_state.tx_rate_limiter_state, tx_rate_limiter_state);
 
         let generic_virtio_device_state =
-            GenericVirtioDeviceState::new(TYPE_NET, "net", 21, 2, vec![1, 2, 3, 4, 5], 3, vec![]);
+            GenericVirtioDeviceState::new(TYPE_NET, "net", 21, 2, vec![1, 2, 3, 4, 5]);
         let (sender, _receiver) = channel();
         let epoll_config = EpollConfig::new(0, 0, sender);
         let restored_virtio_device = net_state

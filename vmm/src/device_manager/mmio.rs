@@ -210,7 +210,8 @@ impl MMIODeviceManager {
             .map_err(Error::CreateMmioDevice)?;
 
         self.register_virtio_device_events(vm, &mmio_device)?;
-        if !mmio_device.activate() {
+        // Recreate the epoll handler if the device was activated
+        if device_state.device_activated() && !mmio_device.activate() {
             return Err(Error::ActivationFailed);
         }
         self.insert_virtio_device(mmio_device, type_id, device_id)?;

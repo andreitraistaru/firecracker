@@ -1664,15 +1664,8 @@ mod tests {
         assert_eq!(block_state.is_disk_read_only, is_disk_read_only);
         assert_eq!(block_state.rate_limiter_state, rate_limiter_state);
 
-        let generic_virtio_device_state = GenericVirtioDeviceState::new(
-            TYPE_BLOCK,
-            "block",
-            21,
-            2,
-            vec![1, 2, 3, 4, 5],
-            3,
-            vec![],
-        );
+        let generic_virtio_device_state =
+            GenericVirtioDeviceState::new(TYPE_BLOCK, "block", 21, 2, vec![1, 2, 3, 4, 5]);
         let (sender, _receiver) = channel();
         let epoll_config = EpollConfig::new(0, 0, sender);
         let restored_virtio_device = block_state

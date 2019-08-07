@@ -2258,25 +2258,22 @@ impl Vmm {
                 .as_mut_any()
                 .downcast_mut::<MmioDevice>()
                 .unwrap();
-            let virtio_device = mmio_device.device_mut();
 
             // Get the EpollHandler associated with the virtio device
+            // If the EpollHandler doesn't exist, the device hasn't been activated yet
             let maybe_epoll_handler = self
                 .epoll_context
-                .get_generic_device_handler_by_device_id(*type_id, device_id);
-            // If the EpollHandler doesn't exist, the device hasn't been activated yet, so we'll skip it
-            if maybe_epoll_handler.is_err() {
-                continue;
-            }
-            let epoll_handler = maybe_epoll_handler.unwrap();
+                .get_generic_device_handler_by_device_id(*type_id, device_id)
+                .ok()
+                .map(|epoll_handler| &*epoll_handler);
 
             let device_state = MmioDeviceState::new(
                 device_info.addr(),
                 device_info.irq(),
                 *type_id,
                 device_id,
-                virtio_device,
-                epoll_handler,
+                mmio_device,
+                maybe_epoll_handler,
             )?;
             states.push(device_state);
         }
@@ -2732,6 +2729,7 @@ mod tests {
     use self::tempfile::NamedTempFile;
     use arch::DeviceType;
     use devices::virtio::{ActivateResult, BlockEpollHandler, MmioDevice, NetEpollHandler, Queue};
+    use devices::BusDevice;
     use net_util::MacAddr;
     use std::path::Path;
     use vmm_config::machine_config::CpuFeaturesTemplate;
@@ -2940,26 +2938,25 @@ mod tests {
             .downcast_mut::<MmioDevice>()
             .unwrap();
 
-        let mut queues = Vec::new();
-        let mut queue_evts = Vec::new();
-        for _ in 0..num_queues {
-            let mut queue = Queue::new(1);
-            queue.size = 1;
-            queue.ready = true;
-            queues.push(queue);
-            queue_evts.push(EventFd::new().unwrap());
+        let mut buf: Vec<u8> = vec![0, 0, 0, 0];
+        for q in 0..num_queues {
+            // set driver status
+            // DEVICE_ACKNOWLEDGE;
+            mmio_device.write(0x70, &[1, 0, 0, 0]);
+            // DEVICE_ACKNOWLEDGE | DEVICE_DRIVER
+            mmio_device.write(0x70, &[3, 0, 0, 0]);
+            // DEVICE_ACKNOWLEDGE | DEVICE_DRIVER | DEVICE_FEATURES_OK
+            mmio_device.write(0x70, &[11, 0, 0, 0]);
+            // select queue
+            buf[0] = q as u8;
+            mmio_device.write(0x30, &buf[..]);
+            // set queue size to 1
+            mmio_device.write(0x38, &[1, 0, 0, 0]);
+            // set queue ready
+            mmio_device.write(0x44, &[1, 0, 0, 0]);
         }
 
-        assert!(mmio_device
-            .device_mut()
-            .activate(
-                vmm.guest_memory.as_ref().unwrap().clone(),
-                EventFd::new().unwrap(),
-                Arc::new(AtomicUsize::new(0)),
-                queues,
-                queue_evts,
-            )
-            .is_ok());
+        assert!(mmio_device.activate());
     }
 
     #[test]
@@ -4837,8 +4834,7 @@ mod tests {
         remove_file(snapshot_path).unwrap();
     }
 
-    #[test]
-    fn test_save_restore_devices() {
+    fn test_save_restore_devices(activate_devices: bool) {
         let block_file = NamedTempFile::new().unwrap();
         let block_id = "block";
         let net_id = "net";
@@ -4860,7 +4856,6 @@ mod tests {
             })
             .unwrap();
             vmm.attach_block_devices().unwrap();
-            activate_device(&vmm, TYPE_BLOCK, block_id, 1);
 
             vmm.insert_net_device(NetworkInterfaceConfig {
                 iface_id: net_id.to_string(),
@@ -4873,7 +4868,11 @@ mod tests {
             })
             .unwrap();
             vmm.attach_net_devices().unwrap();
-            activate_device(&vmm, TYPE_NET, net_id, 2);
+
+            if activate_devices {
+                activate_device(&vmm, TYPE_BLOCK, block_id, 1);
+                activate_device(&vmm, TYPE_NET, net_id, 2);
+            }
 
             let states = vmm.mmio_device_states().unwrap();
             assert_eq!(states.len(), 2);
@@ -4910,18 +4909,30 @@ mod tests {
             assert!(device_manager
                 .get_device(DeviceType::Virtio(TYPE_BLOCK), block_id)
                 .is_some());
-            assert!(vmm
-                .epoll_context
-                .get_device_handler_by_device_id::<BlockEpollHandler>(TYPE_BLOCK, block_id)
-                .is_ok());
             // validate net device
             assert!(device_manager
                 .get_device(DeviceType::Virtio(TYPE_NET), net_id)
                 .is_some());
-            assert!(vmm
-                .epoll_context
-                .get_device_handler_by_device_id::<NetEpollHandler>(TYPE_NET, net_id)
-                .is_ok());
+            if activate_devices {
+                assert!(vmm
+                    .epoll_context
+                    .get_device_handler_by_device_id::<BlockEpollHandler>(TYPE_BLOCK, block_id)
+                    .is_ok());
+                assert!(vmm
+                    .epoll_context
+                    .get_device_handler_by_device_id::<NetEpollHandler>(TYPE_NET, net_id)
+                    .is_ok());
+            }
         }
+    }
+
+    #[test]
+    fn test_save_restore_inactive_devices() {
+        test_save_restore_devices(false);
+    }
+
+    #[test]
+    fn test_save_restore_active_devices() {
+        test_save_restore_devices(true);
     }
 }

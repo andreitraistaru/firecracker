@@ -87,8 +87,6 @@ pub struct GenericVirtioDeviceState {
     avail_features: u64,
     acked_features: u64,
     config_space: Vec<u8>,
-    interrupt_status: usize,
-    queues: Vec<Queue>,
 }
 
 impl GenericVirtioDeviceState {
@@ -98,8 +96,6 @@ impl GenericVirtioDeviceState {
         avail_features: u64,
         acked_features: u64,
         config_space: Vec<u8>,
-        interrupt_status: usize,
-        queues: Vec<Queue>,
     ) -> GenericVirtioDeviceState {
         GenericVirtioDeviceState {
             device_type,
@@ -107,8 +103,6 @@ impl GenericVirtioDeviceState {
             avail_features,
             acked_features,
             config_space,
-            interrupt_status,
-            queues,
         }
     }
 
@@ -488,6 +482,16 @@ impl BusDevice for MmioDevice {
 pub struct MmioDeviceState {
     addr: u64,
     irq: u32,
+
+    device_activated: bool,
+    features_select: u32,
+    acked_features_select: u32,
+    queue_select: u32,
+    interrupt_status: usize,
+    driver_status: u32,
+    config_generation: u32,
+    queues: Vec<Queue>,
+
     generic_virtio_device_state: GenericVirtioDeviceState,
     specific_virtio_device_state: SpecificVirtioDeviceState,
 }
@@ -498,26 +502,25 @@ impl MmioDeviceState {
         irq: u32,
         device_type: u32,
         device_id: &str,
-        device: &VirtioDevice,
-        handler: &EpollHandler,
+        mmio_device: &MmioDevice,
+        handler: Option<&EpollHandler>,
     ) -> std::result::Result<MmioDeviceState, MmioDeviceStateError> {
+        let device = mmio_device.device.as_ref();
         let generic_virtio_device_state = GenericVirtioDeviceState {
             device_type,
             device_id: device_id.to_string(),
             avail_features: device.avail_features(),
             acked_features: device.acked_features(),
             config_space: device.config_space(),
-            interrupt_status: handler.interrupt_status(),
-            queues: handler.queues().to_vec(),
         };
 
-        let specific_virtio_device_state: SpecificVirtioDeviceState = match device_type {
+        let specific_virtio_device_state = match device_type {
             TYPE_BLOCK => SpecificVirtioDeviceState::Block(
-                BlockState::new(device, Some(handler))
+                BlockState::new(device, handler)
                     .map_err(MmioDeviceStateError::SaveSpecificVirtioDevice)?,
             ),
             TYPE_NET => SpecificVirtioDeviceState::Net(
-                NetState::new(device, Some(handler))
+                NetState::new(device, handler)
                     .map_err(MmioDeviceStateError::SaveSpecificVirtioDevice)?,
             ),
             _ => {
@@ -530,6 +533,21 @@ impl MmioDeviceState {
         Ok(MmioDeviceState {
             addr,
             irq,
+
+            device_activated: mmio_device.device_activated || handler.is_some(),
+            features_select: mmio_device.features_select,
+            acked_features_select: mmio_device.features_select,
+            queue_select: mmio_device.queue_select,
+            interrupt_status: match handler {
+                Some(handler) => handler.interrupt_status(),
+                None => mmio_device.interrupt_status.load(Ordering::Relaxed),
+            },
+            driver_status: mmio_device.driver_status,
+            config_generation: mmio_device.config_generation,
+            queues: match handler {
+                Some(handler) => handler.queues(),
+                None => mmio_device.queues.to_vec(),
+            },
             generic_virtio_device_state,
             specific_virtio_device_state,
         })
@@ -541,6 +559,10 @@ impl MmioDeviceState {
 
     pub fn irq(&self) -> u32 {
         self.irq
+    }
+
+    pub fn device_activated(&self) -> bool {
+        self.device_activated
     }
 
     pub fn generic_virtio_device_state(&self) -> &GenericVirtioDeviceState {
@@ -559,17 +581,24 @@ impl MmioDeviceState {
         mem: GuestMemory,
         device: Box<VirtioDevice>,
     ) -> std::io::Result<MmioDevice> {
-        // create MmioDevice
-        let mut mmio_device = MmioDevice::new(mem, device)?;
-
-        // restore MmioDevice properties
-        mmio_device.interrupt_status = Arc::new(AtomicUsize::new(
-            self.generic_virtio_device_state.interrupt_status,
-        ));
-        mmio_device.queues = self.generic_virtio_device_state.queues.to_vec();
-        mmio_device.driver_status = DEVICE_ACKNOWLEDGE | DEVICE_DRIVER | DEVICE_FEATURES_OK;
-
-        Ok(mmio_device)
+        let mut queue_evts = Vec::new();
+        for _ in device.queue_max_sizes().iter() {
+            queue_evts.push(EventFd::new()?)
+        }
+        Ok(MmioDevice {
+            device,
+            device_activated: false,
+            features_select: self.features_select,
+            acked_features_select: self.acked_features_select,
+            queue_select: self.queue_select,
+            interrupt_status: Arc::new(AtomicUsize::new(self.interrupt_status)),
+            interrupt_evt: Some(EventFd::new()?),
+            driver_status: self.driver_status,
+            config_generation: self.config_generation,
+            queues: self.queues.to_vec(),
+            queue_evts,
+            mem: Some(mem),
+        })
     }
 }
 
@@ -1009,6 +1038,7 @@ mod tests {
         // Setup queue data structures
         let mut buf = vec![0; 4];
         for q in 0..d.queues.len() {
+            LittleEndian::write_u32(&mut buf[..], q as u32);
             d.queue_select = q as u32;
             LittleEndian::write_u32(&mut buf[..], 16);
             d.write(0x38, &buf[..]);
@@ -1056,10 +1086,11 @@ mod tests {
 
     #[test]
     fn test_mmio_device_state_with_invalid_device_type() {
-        let device = DummyDevice::new();
+        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let mmio_device = MmioDevice::new(m, Box::new(DummyDevice::new())).unwrap();
         let handler = DummyEpollHandler {};
 
-        let state = MmioDeviceState::new(0, 0, 100, "1", &device, &handler);
+        let state = MmioDeviceState::new(0, 0, 100, "1", &mmio_device, Some(&handler));
         assert!(state.is_err());
     }
 }
