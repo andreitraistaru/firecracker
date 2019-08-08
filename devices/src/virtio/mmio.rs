@@ -517,7 +517,7 @@ impl MmioDeviceState {
                     .map_err(MmioDeviceStateError::SaveSpecificVirtioDevice)?,
             ),
             TYPE_NET => SpecificVirtioDeviceState::Net(
-                NetState::new(device, handler)
+                NetState::new(device, Some(handler))
                     .map_err(MmioDeviceStateError::SaveSpecificVirtioDevice)?,
             ),
             _ => {

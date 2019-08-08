@@ -958,30 +958,47 @@ impl VirtioDevice for Net {
 }
 
 pub struct NetState {
-    tap_if_name: String,
-    rx_rate_limiter: RateLimiterState,
-    tx_rate_limiter: RateLimiterState,
+    tap_if_name: Option<String>,
+    rx_rate_limiter_state: Option<RateLimiterState>,
+    tx_rate_limiter_state: Option<RateLimiterState>,
     allow_mmds_requests: bool,
 }
 
 impl NetState {
     pub fn new(
         device: &VirtioDevice,
-        handler: &EpollHandler,
+        maybe_handler: Option<&EpollHandler>,
     ) -> result::Result<NetState, SpecificVirtioDeviceStateError> {
         let net_device = device
             .as_any()
             .downcast_ref::<Net>()
             .ok_or(SpecificVirtioDeviceStateError::InvalidDowncast)?;
-        let net_handler = handler
-            .as_any()
-            .downcast_ref::<NetEpollHandler>()
-            .ok_or(SpecificVirtioDeviceStateError::InvalidDowncast)?;
+
+        let mut tap_if_name = net_device.tap.as_ref().map(|tap| tap.if_name().to_string());
+        let mut rx_rate_limiter_state = net_device
+            .rx_rate_limiter
+            .as_ref()
+            .map(|rate_limiter| RateLimiterState::new(rate_limiter));
+        let mut tx_rate_limiter_state = net_device
+            .tx_rate_limiter
+            .as_ref()
+            .map(|rate_limiter| RateLimiterState::new(rate_limiter));
+
+        if let Some(handler) = maybe_handler {
+            let net_handler = handler
+                .as_any()
+                .downcast_ref::<NetEpollHandler>()
+                .ok_or(SpecificVirtioDeviceStateError::InvalidDowncast)?;
+
+            tap_if_name = Some(net_handler.tap.if_name().to_string());
+            rx_rate_limiter_state = Some(RateLimiterState::new(&net_handler.rx.rate_limiter));
+            tx_rate_limiter_state = Some(RateLimiterState::new(&net_handler.tx.rate_limiter));
+        }
 
         Ok(NetState {
-            tap_if_name: net_handler.tap.if_name().to_string(),
-            rx_rate_limiter: RateLimiterState::new(&net_handler.rx.rate_limiter),
-            tx_rate_limiter: RateLimiterState::new(&net_handler.tx.rate_limiter),
+            tap_if_name,
+            rx_rate_limiter_state,
+            tx_rate_limiter_state,
             allow_mmds_requests: net_device.allow_mmds_requests,
         })
     }
@@ -992,25 +1009,34 @@ impl NetState {
         epoll_config: EpollConfig,
     ) -> Result<Box<VirtioDevice>> {
         // Create Net device.
-        let tap = Tap::open_named(self.tap_if_name.as_str()).map_err(Error::TapOpen)?;
+        let tap = match &self.tap_if_name {
+            Some(tap_if_name) => Tap::open_named(tap_if_name).map_err(Error::TapOpen)?,
+            None => Tap::new().map_err(Error::TapOpen)?,
+        };
         let mut net = Net::new_with_tap(
             tap,
             None,
             epoll_config,
-            Some(
-                self.rx_rate_limiter
-                    .restore()
-                    .map_err(Error::RestoreRateLimiter)?,
-            ),
-            Some(
-                self.tx_rate_limiter
-                    .restore()
-                    .map_err(Error::RestoreRateLimiter)?,
-            ),
+            None,
+            None,
             self.allow_mmds_requests,
         )?;
 
         // Restore Net device properties.
+        if let Some(rate_limiter_state) = self.rx_rate_limiter_state.as_ref() {
+            net.rx_rate_limiter = Some(
+                rate_limiter_state
+                    .restore()
+                    .map_err(Error::RestoreRateLimiter)?,
+            );
+        }
+        if let Some(rate_limiter_state) = self.tx_rate_limiter_state.as_ref() {
+            net.tx_rate_limiter = Some(
+                rate_limiter_state
+                    .restore()
+                    .map_err(Error::RestoreRateLimiter)?,
+            );
+        }
         net.avail_features = generic_virtio_device_state.avail_features();
         net.acked_features = generic_virtio_device_state.acked_features();
         net.config_space = generic_virtio_device_state.config_space().to_vec();
@@ -2021,58 +2047,144 @@ mod tests {
         compare_buckets(h.get_tx_rate_limiter().ops().unwrap(), &tx_ops);
     }
 
-    #[test]
-    fn test_net_state() {
-        let (sender, _receiver) = channel();
-        let epoll_config = EpollConfig::new(0, 0, sender);
-        let net = Net {
-            tap: Some(Tap::new().unwrap()),
-            avail_features: 0,
-            acked_features: 0,
-            config_space: vec![],
-            epoll_config,
-            rx_rate_limiter: Some(RateLimiter::default()),
-            tx_rate_limiter: Some(RateLimiter::default()),
-            allow_mmds_requests: false,
-        };
-
-        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
-
-        let net_state = {
-            let (handler, _, _) = default_test_netepollhandler(&m, TestMutators::default());
-            let net_state =
-                NetState::new(&net, &handler).expect("Error creating BlockState instance");
-            assert_eq!(net_state.allow_mmds_requests, net.allow_mmds_requests);
-            assert_eq!(net_state.tap_if_name, handler.tap.if_name());
-            assert_eq!(
-                net_state.rx_rate_limiter,
-                RateLimiterState::new(&handler.rx.rate_limiter)
-            );
-            assert_eq!(
-                net_state.tx_rate_limiter,
-                RateLimiterState::new(&handler.tx.rate_limiter)
-            );
-            net_state
-        };
+    fn check_net_state(
+        net_state: &NetState,
+        allow_mmds_requests: bool,
+        tap_if_name: Option<String>,
+        rx_rate_limiter_state: Option<RateLimiterState>,
+        rx_rate_limiter: Option<&RateLimiter>,
+        tx_rate_limiter_state: Option<RateLimiterState>,
+        tx_rate_limiter: Option<&RateLimiter>,
+    ) {
+        assert_eq!(net_state.allow_mmds_requests, allow_mmds_requests);
+        assert_eq!(net_state.tap_if_name, tap_if_name);
+        assert_eq!(net_state.rx_rate_limiter_state, rx_rate_limiter_state);
+        assert_eq!(net_state.tx_rate_limiter_state, tx_rate_limiter_state);
 
         let generic_virtio_device_state =
             GenericVirtioDeviceState::new(TYPE_NET, "net", 21, 2, vec![1, 2, 3, 4, 5], 3, vec![]);
         let (sender, _receiver) = channel();
         let epoll_config = EpollConfig::new(0, 0, sender);
-        let restored_net = net_state
+        let restored_virtio_device = net_state
             .restore(&generic_virtio_device_state, epoll_config)
-            .expect("Unable to restore Block device from BlockState");
+            .expect("Unable to restore Virtio device from NetState");
+        let restored_net: &Net = restored_virtio_device
+            .as_any()
+            .downcast_ref::<Net>()
+            .expect("Unable to restore Net device from NetState");
+        assert_eq!(restored_net.rx_rate_limiter.as_ref(), rx_rate_limiter);
+        assert_eq!(restored_net.tx_rate_limiter.as_ref(), tx_rate_limiter);
+        assert_eq!(restored_net.allow_mmds_requests, allow_mmds_requests);
         assert_eq!(
-            restored_net.avail_features(),
+            restored_virtio_device.avail_features(),
             generic_virtio_device_state.avail_features()
         );
         assert_eq!(
-            restored_net.acked_features(),
+            restored_virtio_device.acked_features(),
             generic_virtio_device_state.acked_features()
         );
         assert_eq!(
-            restored_net.config_space(),
+            restored_virtio_device.config_space(),
             generic_virtio_device_state.config_space().to_vec()
+        );
+    }
+
+    #[test]
+    fn test_net_state_from_inactive_device() {
+        let net_state = {
+            let (sender, _receiver) = channel();
+            let epoll_config = EpollConfig::new(0, 0, sender);
+            let net = Net {
+                tap: Some(Tap::open_named("test_tap").unwrap()),
+                avail_features: 0,
+                acked_features: 0,
+                config_space: vec![],
+                epoll_config,
+                rx_rate_limiter: None,
+                tx_rate_limiter: None,
+                allow_mmds_requests: false,
+            };
+            NetState::new(&net, None).expect("Error creating BlockState instance")
+        };
+        check_net_state(
+            &net_state,
+            false,
+            Some("test_tap\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let (sender, _receiver) = channel();
+        let epoll_config = EpollConfig::new(0, 0, sender);
+        let mut net = Net {
+            tap: None,
+            avail_features: 0,
+            acked_features: 0,
+            config_space: vec![],
+            epoll_config,
+            rx_rate_limiter: None,
+            tx_rate_limiter: None,
+            allow_mmds_requests: false,
+        };
+
+        let net_state = NetState::new(&net, None).expect("Error creating BlockState instance");
+        check_net_state(
+            &net_state,
+            net.allow_mmds_requests,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        net.rx_rate_limiter = Some(RateLimiter::new(100, None, 100, 100, None, 100).unwrap());
+        net.tx_rate_limiter = Some(RateLimiter::new(100, None, 100, 100, None, 100).unwrap());
+        let net_state = NetState::new(&net, None).expect("Error creating BlockState instance");
+        check_net_state(
+            &net_state,
+            net.allow_mmds_requests,
+            None,
+            Some(RateLimiterState::new(net.rx_rate_limiter.as_ref().unwrap())),
+            Some(&net.rx_rate_limiter.unwrap()),
+            Some(RateLimiterState::new(net.tx_rate_limiter.as_ref().unwrap())),
+            Some(&net.tx_rate_limiter.unwrap()),
+        );
+    }
+
+    #[test]
+    fn test_net_state_from_activated_device() {
+        let (sender, _receiver) = channel();
+        let epoll_config = EpollConfig::new(0, 0, sender);
+        let net = Net {
+            tap: None,
+            avail_features: 0,
+            acked_features: 0,
+            config_space: vec![],
+            epoll_config,
+            rx_rate_limiter: Some(RateLimiter::new(100, None, 100, 100, None, 100).unwrap()),
+            tx_rate_limiter: Some(RateLimiter::new(100, None, 100, 100, None, 100).unwrap()),
+            allow_mmds_requests: false,
+        };
+
+        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let (net_state, tap_if_name) = {
+            let (handler, _, _) = default_test_netepollhandler(&m, TestMutators::default());
+            (
+                NetState::new(&net, Some(&handler)).expect("Error creating BlockState instance"),
+                handler.tap.if_name().to_string(),
+            )
+        };
+        check_net_state(
+            &net_state,
+            net.allow_mmds_requests,
+            Some(tap_if_name.to_string()),
+            Some(RateLimiterState::new(&RateLimiter::default())),
+            Some(&RateLimiter::default()),
+            Some(RateLimiterState::new(&RateLimiter::default())),
+            Some(&RateLimiter::default()),
         );
     }
 }
