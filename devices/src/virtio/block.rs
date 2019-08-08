@@ -697,27 +697,36 @@ impl VirtioDevice for Block {
 pub struct BlockState {
     disk_image_path: PathBuf,
     is_disk_read_only: bool,
-    rate_limiter: RateLimiterState,
+    rate_limiter_state: Option<RateLimiterState>,
 }
 
 impl BlockState {
     pub fn new(
         device: &VirtioDevice,
-        handler: &EpollHandler,
+        maybe_handler: Option<&EpollHandler>,
     ) -> Result<BlockState, SpecificVirtioDeviceStateError> {
         let block_device = device
             .as_any()
             .downcast_ref::<Block>()
             .ok_or(SpecificVirtioDeviceStateError::InvalidDowncast)?;
-        let block_handler = handler
-            .as_any()
-            .downcast_ref::<BlockEpollHandler>()
-            .ok_or(SpecificVirtioDeviceStateError::InvalidDowncast)?;
+
+        let mut rate_limiter_state = block_device
+            .rate_limiter
+            .as_ref()
+            .map(|rate_limiter| RateLimiterState::new(rate_limiter));
+        if let Some(handler) = maybe_handler {
+            let block_handler = handler
+                .as_any()
+                .downcast_ref::<BlockEpollHandler>()
+                .ok_or(SpecificVirtioDeviceStateError::InvalidDowncast)?;
+
+            rate_limiter_state = Some(RateLimiterState::new(&block_handler.rate_limiter));
+        }
 
         Ok(BlockState {
             disk_image_path: block_device.disk_image_path.clone(),
             is_disk_read_only: block_device.is_disk_read_only,
-            rate_limiter: RateLimiterState::new(&block_handler.rate_limiter),
+            rate_limiter_state,
         })
     }
 
@@ -731,14 +740,17 @@ impl BlockState {
             &self.disk_image_path,
             self.is_disk_read_only,
             epoll_config,
-            Some(
-                self.rate_limiter
-                    .restore()
-                    .map_err(BlockError::RestoreRateLimiter)?,
-            ),
+            None,
         )?;
 
         // Restore block device properties.
+        if let Some(rate_limiter_state) = self.rate_limiter_state.as_ref() {
+            block.rate_limiter = Some(
+                rate_limiter_state
+                    .restore()
+                    .map_err(BlockError::RestoreRateLimiter)?,
+            );
+        }
         block.avail_features = generic_virtio_device_state.avail_features();
         block.acked_features = generic_virtio_device_state.acked_features();
         block.config_space = generic_virtio_device_state.config_space().to_vec();
@@ -1641,30 +1653,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_block_state() {
-        let file = NamedTempFile::new().unwrap();
-        let (sender, _receiver) = channel();
-        let epoll_config = EpollConfig::new(0, 0, sender);
-        let block = Block::new(
-            &file.path().to_path_buf(),
-            false,
-            epoll_config,
-            Some(RateLimiter::default()),
-        )
-        .unwrap();
-
-        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
-        let (handler, _vq) = default_test_blockepollhandler(&m);
-
-        let block_state =
-            BlockState::new(&block, &handler).expect("Error creating BlockState instance");
-        assert_eq!(block_state.disk_image_path, file.path().to_path_buf());
-        assert_eq!(block_state.is_disk_read_only, block.is_disk_read_only);
-        assert_eq!(
-            block_state.rate_limiter,
-            RateLimiterState::new(&handler.rate_limiter)
-        );
+    fn check_block_state(
+        block_state: &BlockState,
+        disk_image_path: &PathBuf,
+        is_disk_read_only: bool,
+        rate_limiter_state: Option<RateLimiterState>,
+        rate_limiter: Option<&RateLimiter>,
+    ) {
+        assert_eq!(block_state.disk_image_path, disk_image_path.to_path_buf());
+        assert_eq!(block_state.is_disk_read_only, is_disk_read_only);
+        assert_eq!(block_state.rate_limiter_state, rate_limiter_state);
 
         let generic_virtio_device_state = GenericVirtioDeviceState::new(
             TYPE_BLOCK,
@@ -1677,9 +1675,19 @@ mod tests {
         );
         let (sender, _receiver) = channel();
         let epoll_config = EpollConfig::new(0, 0, sender);
-        let restored_block = block_state
+        let restored_virtio_device = block_state
             .restore(&generic_virtio_device_state, epoll_config)
+            .expect("Unable to restore VirtioDevice device from BlockState");
+        let restored_block: &Block = restored_virtio_device
+            .as_any()
+            .downcast_ref::<Block>()
             .expect("Unable to restore Block device from BlockState");
+        assert_eq!(
+            restored_block.disk_image_path,
+            disk_image_path.to_path_buf()
+        );
+        assert_eq!(restored_block.is_disk_read_only, is_disk_read_only);
+        assert_eq!(restored_block.rate_limiter.as_ref(), rate_limiter);
         assert_eq!(
             restored_block.avail_features(),
             generic_virtio_device_state.avail_features()
@@ -1691,6 +1699,62 @@ mod tests {
         assert_eq!(
             restored_block.config_space(),
             generic_virtio_device_state.config_space().to_vec()
+        );
+    }
+
+    #[test]
+    fn test_block_state_from_inactive_device() {
+        let file = NamedTempFile::new().unwrap();
+        let (sender, _receiver) = channel();
+        let epoll_config = EpollConfig::new(0, 0, sender);
+        let mut block = Block::new(&file.path().to_path_buf(), false, epoll_config, None).unwrap();
+
+        let block_state =
+            BlockState::new(&block, None).expect("Error creating BlockState instance");
+        check_block_state(
+            &block_state,
+            &block.disk_image_path,
+            block.is_disk_read_only,
+            None,
+            None,
+        );
+
+        block.rate_limiter = Some(RateLimiter::new(100, None, 100, 100, None, 100).unwrap());
+        let block_state =
+            BlockState::new(&block, None).expect("Error creating BlockState instance");
+        check_block_state(
+            &block_state,
+            &block.disk_image_path,
+            block.is_disk_read_only,
+            Some(RateLimiterState::new(block.rate_limiter.as_ref().unwrap())),
+            block.rate_limiter.as_ref(),
+        );
+    }
+
+    #[test]
+    fn test_block_state_from_activated_device() {
+        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let (handler, _vq) = default_test_blockepollhandler(&m);
+
+        let file = NamedTempFile::new().unwrap();
+        let (sender, _receiver) = channel();
+        let epoll_config = EpollConfig::new(0, 0, sender);
+        let block = Block::new(
+            &file.path().to_path_buf(),
+            false,
+            epoll_config,
+            Some(RateLimiter::new(100, None, 100, 100, None, 100).unwrap()),
+        )
+        .unwrap();
+
+        let block_state =
+            BlockState::new(&block, Some(&handler)).expect("Error creating BlockState instance");
+        check_block_state(
+            &block_state,
+            &block.disk_image_path,
+            block.is_disk_read_only,
+            Some(RateLimiterState::new(&handler.rate_limiter)),
+            Some(&handler.rate_limiter),
         );
     }
 }

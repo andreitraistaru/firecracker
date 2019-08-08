@@ -513,7 +513,7 @@ impl MmioDeviceState {
 
         let specific_virtio_device_state: SpecificVirtioDeviceState = match device_type {
             TYPE_BLOCK => SpecificVirtioDeviceState::Block(
-                BlockState::new(device, handler)
+                BlockState::new(device, Some(handler))
                     .map_err(MmioDeviceStateError::SaveSpecificVirtioDevice)?,
             ),
             TYPE_NET => SpecificVirtioDeviceState::Net(
