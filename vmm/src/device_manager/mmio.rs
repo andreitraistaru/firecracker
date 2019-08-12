@@ -358,7 +358,7 @@ impl MMIODeviceInfo {
 #[cfg(target_arch = "aarch64")]
 impl DeviceInfoForFDT for MMIODeviceInfo {
     fn addr(&self) -> u64 {
-        self.mmio_base
+        self.addr
     }
     fn irq(&self) -> u32 {
         self.irq
