@@ -5,26 +5,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use epoll;
 use std::cmp;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::linux::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::path::PathBuf;
 use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+
+use epoll;
+use serde::{Deserialize, Serialize};
 
 use super::super::Error as DeviceError;
 use super::{
     ActivateError, ActivateResult, DescriptorChain, Queue, VirtioDevice, TYPE_BLOCK,
     VIRTIO_MMIO_INT_VRING,
 };
+
 use logger::{Metric, METRICS};
 use memory_model::{GuestAddress, GuestMemory, GuestMemoryError};
 use rate_limiter::{RateLimiter, RateLimiterState, TokenType};
-use std::path::PathBuf;
 use sys_util::EventFd;
 use virtio::{EpollConfigConstructor, GenericVirtioDeviceState, SpecificVirtioDeviceStateError};
 use virtio_gen::virtio_blk::*;
@@ -694,6 +696,7 @@ impl VirtioDevice for Block {
     }
 }
 
+#[derive(Deserialize, Serialize)]
 pub struct BlockState {
     disk_image_path: PathBuf,
     is_disk_read_only: bool,
@@ -1666,6 +1669,15 @@ mod tests {
 
         let generic_virtio_device_state =
             GenericVirtioDeviceState::new(TYPE_BLOCK, "block", 21, 2, vec![1, 2, 3, 4, 5]);
+
+        let serialized_state: Vec<u8> = bincode::serialize(&generic_virtio_device_state).unwrap();
+        assert!(
+            generic_virtio_device_state.eq(&bincode::deserialize::<GenericVirtioDeviceState>(
+                serialized_state.as_slice()
+            )
+            .unwrap())
+        );
+
         let (sender, _receiver) = channel();
         let epoll_config = EpollConfig::new(0, 0, sender);
         let restored_virtio_device = block_state

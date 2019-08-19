@@ -9,6 +9,8 @@ use std::cmp::min;
 use std::num::Wrapping;
 use std::sync::atomic::{fence, Ordering};
 
+use serde::{Deserialize, Serialize};
+
 use memory_model::{DataInit, GuestAddress, GuestMemory};
 
 pub(super) const VIRTQ_DESC_F_NEXT: u16 = 0x1;
@@ -22,7 +24,7 @@ pub(super) const VIRTQ_DESC_F_WRITE: u16 = 0x2;
 // The Virtio Spec 1.0 defines the alignment of VirtIO descriptor is 16 bytes,
 // which fulfills the explicit constraint of GuestMemory::read_obj_from_addr().
 
-/// A virtio descriptor constraints with C representive.
+/// A virtio descriptor constraints with C representation.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 struct Descriptor {
@@ -201,7 +203,7 @@ impl<'a, 'b> Iterator for AvailIter<'a, 'b> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 /// A virtio queue's parameters.
 pub struct Queue {
     /// The maximal size in elements offered by the device

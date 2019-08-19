@@ -86,7 +86,7 @@ fn gcd(x: u64, y: u64) -> u64 {
 
 /// TokenBucket provides a lower level interface to rate limiting with a
 /// configurable capacity, refill-rate and initial burst.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenBucket {
     // Bucket defining traits.
@@ -486,7 +486,7 @@ impl Default for RateLimiter {
 }
 
 /// Rate Limiter State
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RateLimiterState {
     bandwidth: Option<TokenBucket>,
     ops: Option<TokenBucket>,

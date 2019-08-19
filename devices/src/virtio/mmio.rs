@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use byteorder::{ByteOrder, LittleEndian};
+use serde::{Deserialize, Serialize};
 
 use super::*;
 use memory_model::{GuestAddress, GuestMemory};
@@ -81,6 +82,7 @@ pub trait VirtioDevice: AsAny + Send {
     fn config_space(&self) -> Vec<u8>;
 }
 
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 pub struct GenericVirtioDeviceState {
     device_type: u32,
     device_id: String,
@@ -135,6 +137,7 @@ pub enum SpecificVirtioDeviceStateError {
     RestoreNetDevice(net::Error),
 }
 
+#[derive(Deserialize, Serialize)]
 pub enum SpecificVirtioDeviceState {
     Block(BlockState),
     Net(NetState),
@@ -479,6 +482,7 @@ impl BusDevice for MmioDevice {
     }
 }
 
+#[derive(Deserialize, Serialize)]
 pub struct MmioDeviceState {
     addr: u64,
     irq: u32,
@@ -599,6 +603,15 @@ impl MmioDeviceState {
             queue_evts,
             mem: Some(mem),
         })
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct MmioDeviceStates(pub Vec<MmioDeviceState>);
+
+impl MmioDeviceStates {
+    pub fn new() -> Self {
+        MmioDeviceStates(vec![])
     }
 }
 

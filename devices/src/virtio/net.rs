@@ -5,8 +5,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use epoll;
-use libc::EAGAIN;
 use std::cmp;
 #[cfg(not(test))]
 use std::io::Read;
@@ -20,8 +18,13 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::vec::Vec;
 
+use epoll;
+use libc::EAGAIN;
+use serde::{Deserialize, Serialize};
+
 use super::super::Error as DeviceError;
 use super::{ActivateError, ActivateResult, Queue, VirtioDevice, TYPE_NET, VIRTIO_MMIO_INT_VRING};
+
 use dumbo::{ns::MmdsNetworkStack, pdu::ethernet::EthernetFrame};
 use logger::{Metric, METRICS};
 use memory_model::{GuestAddress, GuestMemory};
@@ -957,6 +960,7 @@ impl VirtioDevice for Net {
     }
 }
 
+#[derive(Deserialize, Serialize)]
 pub struct NetState {
     tap_if_name: Option<String>,
     rx_rate_limiter_state: Option<RateLimiterState>,
@@ -2063,6 +2067,11 @@ mod tests {
 
         let generic_virtio_device_state =
             GenericVirtioDeviceState::new(TYPE_NET, "net", 21, 2, vec![1, 2, 3, 4, 5]);
+
+        let serialized_state: Vec<u8> = bincode::serialize(&generic_virtio_device_state).unwrap();
+        assert!(generic_virtio_device_state
+            .eq(&bincode::deserialize(serialized_state.as_slice()).unwrap()));
+
         let (sender, _receiver) = channel();
         let epoll_config = EpollConfig::new(0, 0, sender);
         let restored_virtio_device = net_state
@@ -2177,6 +2186,7 @@ mod tests {
                 handler.tap.if_name().to_string(),
             )
         };
+
         check_net_state(
             &net_state,
             net.allow_mmds_requests,

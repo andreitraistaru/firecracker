@@ -2730,7 +2730,9 @@ mod tests {
 
     use self::tempfile::NamedTempFile;
     use arch::DeviceType;
-    use devices::virtio::{ActivateResult, BlockEpollHandler, MmioDevice, NetEpollHandler, Queue};
+    use devices::virtio::{
+        ActivateResult, BlockEpollHandler, MmioDevice, MmioDeviceStates, NetEpollHandler, Queue,
+    };
     use devices::BusDevice;
     use net_util::MacAddr;
     use std::path::Path;
@@ -4841,7 +4843,7 @@ mod tests {
         let block_id = "block";
         let net_id = "net";
 
-        let states = {
+        let serialized_states = {
             let mut vmm = create_vmm_object(InstanceState::Uninitialized);
             vmm.init_guest_memory().unwrap();
             vmm.setup_interrupt_controller().unwrap();
@@ -4894,7 +4896,7 @@ mod tests {
             );
             assert_eq!(states[1].generic_virtio_device_state().device_id(), net_id);
 
-            states
+            bincode::serialize(&MmioDeviceStates(states)).unwrap()
         };
 
         {
@@ -4904,7 +4906,14 @@ mod tests {
             vmm.default_kernel_config(None);
             vmm.init_mmio_device_manager().unwrap();
 
-            assert!(vmm.restore_mmio_devices(&states).is_ok());
+            assert!(vmm
+                .restore_mmio_devices(
+                    bincode::deserialize::<MmioDeviceStates>(serialized_states.as_slice())
+                        .unwrap()
+                        .0
+                        .as_slice()
+                )
+                .is_ok());
 
             let device_manager = vmm.mmio_device_manager.as_ref().unwrap();
             // validate block device
