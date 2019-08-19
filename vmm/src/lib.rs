@@ -9,14 +9,14 @@
 //! and other virtualization features to run a single lightweight micro-virtual
 //! machine (microVM).
 #![deny(missing_docs)]
+extern crate bincode;
 extern crate chrono;
 extern crate epoll;
 extern crate futures;
 extern crate kvm_bindings;
 extern crate libc;
-extern crate serde;
 #[macro_use]
-extern crate serde_derive;
+extern crate serde;
 extern crate serde_json;
 extern crate time;
 extern crate timerfd;

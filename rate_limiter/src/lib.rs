@@ -45,11 +45,10 @@
 //! needs to be called by the user on every event on the rate limiter's `AsRawFd` FD.
 //!
 
+#[macro_use]
 extern crate serde;
 extern crate time;
 extern crate timerfd;
-#[macro_use]
-extern crate serde_derive;
 
 #[macro_use]
 extern crate logger;

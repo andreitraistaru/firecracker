@@ -6,9 +6,11 @@
 // found in the THIRD-PARTY file.
 
 //! Emulates virtual and hardware devices.
+extern crate bincode;
 extern crate byteorder;
 extern crate epoll;
 extern crate libc;
+extern crate serde;
 extern crate time;
 
 extern crate dumbo;

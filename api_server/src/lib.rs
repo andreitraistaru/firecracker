@@ -4,9 +4,8 @@
 extern crate chrono;
 extern crate futures;
 extern crate hyper;
-extern crate serde;
 #[macro_use]
-extern crate serde_derive;
+extern crate serde;
 extern crate serde_json;
 extern crate tokio_core;
 extern crate tokio_uds;
