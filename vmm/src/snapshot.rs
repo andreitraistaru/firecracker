@@ -16,7 +16,6 @@ use std::fmt::{self, Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
-use std::ptr::null_mut;
 use std::slice;
 use std::{io, mem};
 
@@ -28,6 +27,7 @@ use kvm_bindings::{
     kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave,
 };
 
+use serialize::SnapshotReaderWriter;
 use vmm_config::machine_config::VmConfig;
 use vstate::{VcpuState, VmState};
 
@@ -223,39 +223,6 @@ pub struct SnapshotImage {
 }
 
 impl SnapshotImage {
-    fn mmap_region(
-        file: &File,
-        offset: usize,
-        size: usize,
-        shared_mapping: bool,
-    ) -> std::io::Result<*mut u8> {
-        let flags = libc::MAP_NORESERVE
-            | if shared_mapping {
-                libc::MAP_SHARED
-            } else {
-                libc::MAP_PRIVATE
-            };
-        // Safe because we are checking the return value and also unmapping in destructor.
-        let addr = unsafe {
-            libc::mmap(
-                null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                flags,
-                file.as_raw_fd(),
-                offset as i64,
-            )
-        };
-        if addr == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        info!(
-            "mapped addr {:x} at offset {} of size {}",
-            addr as u64, offset, size
-        );
-        Ok(addr as *mut u8)
-    }
-
     fn msync_region(addr: *mut u8, size: usize) -> std::io::Result<()> {
         // Safe because we check the return value.
         let ret = unsafe { libc::msync(addr as *mut libc::c_void, size, libc::MS_SYNC) };
@@ -341,7 +308,8 @@ impl SnapshotImage {
         // Any changes to the mapping should be visible on the snapshot file.
         let shared = true;
 
-        let addr = Self::mmap_region(&file, 0, mapping_size, shared).map_err(Error::Mmap)?;
+        let addr = SnapshotReaderWriter::mmap_region(&file, 0, mapping_size as u64, shared)
+            .map_err(Error::Mmap)?;
 
         let header = unsafe { &mut *(addr as *mut SnapshotHdr) };
         // Create and write the header in the mapping.
@@ -395,11 +363,12 @@ impl SnapshotImage {
         let shared = false;
 
         // Map the header region.
-        let addr = Self::mmap_region(&file, 0, header_size, shared).map_err(Error::Mmap)?;
+        let addr = SnapshotReaderWriter::mmap_region(&file, 0, header_size as u64, shared)
+            .map_err(Error::Mmap)?;
         let header = unsafe { &*(addr as *const SnapshotHdr) };
 
         if let Err(e) = Self::validate_header(header, header_size, file_size, nmsrs, ncpuids) {
-            if let Err(err) = Self::munmap_region(addr, header_size) {
+            if let Err(err) = Self::munmap_region(addr as *mut u8, header_size) {
                 error!("failed to munmap on error: {}", err);
             }
             return Err(e);
@@ -407,10 +376,11 @@ impl SnapshotImage {
 
         let mapping_size = header.mapping_size;
         // Unmap the header region.
-        Self::munmap_region(addr, header_size).map_err(Error::Munmap)?;
+        Self::munmap_region(addr as *mut u8, header_size).map_err(Error::Munmap)?;
 
         // Map the header + vcpus region.
-        let addr = Self::mmap_region(&file, 0, mapping_size, shared).map_err(Error::Mmap)?;
+        let addr = SnapshotReaderWriter::mmap_region(&file, 0, mapping_size as u64, shared)
+            .map_err(Error::Mmap)?;
         let header = unsafe { &mut *(addr as *mut SnapshotHdr) };
 
         Ok(SnapshotImage {
@@ -682,7 +652,7 @@ mod tests {
         let mut f = tempfile().expect("failed to create temp file");
 
         // Verify mmap errors.
-        SnapshotImage::mmap_region(&f, 0, 0, true)
+        SnapshotReaderWriter::mmap_region(&f, 0, 0, true)
             .expect_err("mmap_region should have failed because size is 0");
 
         let control_slice = [1, 2, 3, 4];
@@ -691,8 +661,8 @@ mod tests {
             .expect("failed to write to temp file");
 
         // Do the correct mapping this time.
-        let mapping: *mut u8 = SnapshotImage::mmap_region(&f, 0, control_slice.len(), false)
-            .expect("failed to mmap_region");
+        let mapping = SnapshotReaderWriter::mmap_region(&f, 0, control_slice.len() as u64, false)
+            .expect("failed to mmap_region") as *mut u8;
         // Build a slice from the mmap'ed memory.
         let slice = unsafe { std::slice::from_raw_parts_mut(mapping, control_slice.len()) };
         // Verify the mmap'ed contents match the contents written in the file.
