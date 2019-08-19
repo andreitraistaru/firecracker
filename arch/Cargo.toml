@@ -5,7 +5,7 @@ authors = ["The Chromium OS Authors"]
 
 [dependencies]
 byteorder = "=1.2.1"
-kvm-bindings = "0.1"
+kvm-bindings = { git = "https://github.com/aghecenco/kvm-bindings", branch = "serde_dev" }
 libc = ">=0.2.39"
 
 arch_gen = { path = "../arch_gen" }
