@@ -350,7 +350,7 @@ impl Vm {
 
 /// Structure holding VM kvm state.
 #[cfg(target_arch = "x86_64")]
-#[derive(Default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[repr(C)]
 pub struct VmState {
     pitstate: kvm_pit_state2,
@@ -1922,8 +1922,10 @@ mod tests {
         assert!(res.is_ok());
 
         let state = res.unwrap();
-        let (vm, _) = setup_vcpu();
-        assert!(vm.restore_state(&state).is_ok());
+        let serialized_state = bincode::serialize(&state).unwrap();
+        let deserialized_state =
+            bincode::deserialize::<VmState>(serialized_state.as_slice()).unwrap();
+        assert!(vm.restore_state(&deserialized_state).is_ok());
     }
 
     #[test]
