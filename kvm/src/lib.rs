@@ -10,6 +10,7 @@
 //! A safe wrapper around the kernel's KVM interface.
 
 extern crate libc;
+extern crate serde;
 
 extern crate kvm_bindings;
 #[macro_use]

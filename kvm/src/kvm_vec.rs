@@ -5,9 +5,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+use std::mem::{self, size_of};
+
+use serde::de::{Deserialize, Deserializer};
+use serde::{Serialize, Serializer};
+
 use kvm_bindings::__IncompleteArrayField;
-use std::mem;
-use std::mem::size_of;
 
 /// Errors associated with the [`KvmVec`](struct.KvmVec.html) struct.
 pub enum Error {
@@ -236,15 +239,44 @@ impl<T: Default + KvmArray> Clone for KvmVec<T> {
     }
 }
 
+impl<T: Default + KvmArray + Serialize> Serialize for KvmVec<T>
+where
+    <T as KvmArray>::Entry: serde::Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.as_entries_slice().serialize(serializer)
+    }
+}
+
+impl<'de, T: Default + KvmArray + Deserialize<'de>> Deserialize<'de> for KvmVec<T>
+where
+    <T as KvmArray>::Entry: std::marker::Copy + serde::Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+        <T as KvmArray>::Entry: std::marker::Copy + serde::Deserialize<'de>,
+    {
+        let entries_vec: Vec<<T as KvmArray>::Entry> = Vec::deserialize(deserializer)?;
+        Ok(KvmVec::from_entries(entries_vec.as_slice()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    extern crate serde_derive;
+
+    use self::serde_derive::{Deserialize, Serialize};
     use super::*;
     use kvm_bindings::*;
 
     const MAX_LEN: usize = 100;
 
     #[repr(C)]
-    #[derive(Default)]
+    #[derive(Default, Deserialize, Serialize)]
     struct MockKvmArray {
         pub len: __u32,
         pub padding: __u32,
@@ -401,5 +433,23 @@ mod tests {
 
         assert!(kvm_vec_1 == kvm_vec_2);
         assert!(kvm_vec_1 != kvm_vec_3);
+    }
+
+    #[test]
+    fn test_serialization() {
+        let mut kvm_vec = MockKvmVec::new(0);
+        for i in 0..10 {
+            assert!(kvm_vec.push(i as u32).is_ok());
+        }
+        let serialized_kvm_vec = serde_json::to_string(&kvm_vec).unwrap();
+        let str_kvm_vec = "[0,1,2,3,4,5,6,7,8,9]";
+
+        assert_eq!(str_kvm_vec, serialized_kvm_vec);
+        assert_eq!(
+            serde_json::from_str::<MockKvmVec>(str_kvm_vec)
+                .unwrap()
+                .as_entries_slice(),
+            kvm_vec.as_entries_slice()
+        );
     }
 }
