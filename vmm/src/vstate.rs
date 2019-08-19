@@ -7,7 +7,6 @@
 
 extern crate kvm_bindings;
 
-use libc::{c_int, c_void, siginfo_t, EINVAL};
 use std::cell::Cell;
 use std::io;
 use std::ops::Deref;
@@ -18,7 +17,10 @@ use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+use libc::{c_int, c_void, siginfo_t, EINVAL};
+
 use super::{KvmContext, TimestampUs};
+
 use arch;
 #[cfg(target_arch = "x86_64")]
 use cpuid::{c3, filter_cpuid, t2};
@@ -1139,6 +1141,7 @@ impl Drop for Vcpu {
 
 /// Structure holding VCPU kvm state.
 #[cfg(target_arch = "x86_64")]
+#[derive(Deserialize, Serialize)]
 pub struct VcpuState {
     pub cpuid: CpuId,
     pub msrs: KvmMsrs,
@@ -1926,23 +1929,35 @@ mod tests {
     #[test]
     fn test_vcpu_save_restore_state() {
         let (_vm, vcpu) = setup_vcpu();
-        let state = vcpu.save_state();
-        assert!(state.is_ok());
-        assert!(vcpu.restore_state(state.unwrap()).is_ok());
+        {
+            let state_res = vcpu.save_state();
+            assert!(state_res.is_ok());
+            let state = state_res.unwrap();
+            let serialized_state = bincode::serialize(&state).unwrap();
+            let deserialized_state =
+                bincode::deserialize::<VcpuState>(serialized_state.as_slice()).unwrap();
+            assert!(vcpu.restore_state(deserialized_state).is_ok());
+        }
 
         unsafe { libc::close(vcpu.fd.as_raw_fd()) };
-        let state = VcpuState {
-            cpuid: CpuId::new(1),
-            msrs: KvmMsrs::new(1),
-            debug_regs: Default::default(),
-            lapic: Default::default(),
-            mp_state: Default::default(),
-            regs: Default::default(),
-            sregs: Default::default(),
-            vcpu_events: Default::default(),
-            xcrs: Default::default(),
-            xsave: Default::default(),
-        };
-        assert!(vcpu.restore_state(state).is_err());
+
+        {
+            let state = VcpuState {
+                cpuid: CpuId::new(1),
+                msrs: KvmMsrs::new(1),
+                debug_regs: Default::default(),
+                lapic: Default::default(),
+                mp_state: Default::default(),
+                regs: Default::default(),
+                sregs: Default::default(),
+                vcpu_events: Default::default(),
+                xcrs: Default::default(),
+                xsave: Default::default(),
+            };
+            let serialized_state = bincode::serialize(&state).unwrap();
+            let deserialized_state =
+                bincode::deserialize::<VcpuState>(serialized_state.as_slice()).unwrap();
+            assert!(vcpu.restore_state(deserialized_state).is_err());
+        }
     }
 }
