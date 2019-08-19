@@ -283,6 +283,7 @@ fn parse_machine_config_req<'a>(
                 mem_size_mib: None,
                 ht_enabled: None,
                 cpu_template: None,
+                memfile: None,
             };
             Ok(empty_machine_config
                 .into_parsed_request(None, method)
@@ -1190,6 +1191,7 @@ mod tests {
             mem_size_mib: Some(1025),
             ht_enabled: Some(true),
             cpu_template: Some(CpuFeaturesTemplate::T2),
+            memfile: None,
         };
 
         match vm_config.into_parsed_request(None, Method::Put) {
@@ -1206,6 +1208,7 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: None,
             cpu_template: None,
+            memfile: None,
         };
         let body = r#"{
             "vcpu_count": 32

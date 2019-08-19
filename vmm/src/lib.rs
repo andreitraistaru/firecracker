@@ -1179,19 +1179,48 @@ impl Vmm {
         let guest_memory = GuestMemory::new_anon_from_tuples(&arch_mem_regions)
             .map_err(StartMicrovmError::GuestMemory)?;
         #[cfg(target_arch = "x86_64")]
-        let guest_memory = match self.snapshot_image.as_ref() {
+        let guest_memory = match self.vm_config.memfile.as_ref() {
             Some(image) => {
                 let mut ranges = Vec::<FileMemoryDesc>::with_capacity(arch_mem_regions.len());
-                let snapshot_fd = image.as_raw_fd();
-                let mut region_offset = image.memory_offset();
-                let shared_mapping = image.is_shared_mapping();
+                let is_clone = match std::fs::metadata(image) {
+                    Ok(metadata) => {
+                        if metadata.len() != mem_size as u64 {
+                            // TODO appropriate error
+                            Err(StartMicrovmError::SnapshotBackingFile(
+                                snapshot::Error::InvalidFileType,
+                            ))?;
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    _ => false,
+                };
+
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(!is_clone)
+                    .truncate(!is_clone)
+                    .open(image)
+                    .map_err(|e| {
+                        StartMicrovmError::SnapshotBackingFile(snapshot::Error::CreateNew(e))
+                    })?;
+                if !is_clone {
+                    file.set_len(mem_size as u64).map_err(|e| {
+                        StartMicrovmError::SnapshotBackingFile(snapshot::Error::Truncate(e))
+                    })?;
+                }
+                let snapshot_fd = file.as_raw_fd();
+                let mut region_offset = 0;
+
                 for (gpa, size) in arch_mem_regions {
                     ranges.push(FileMemoryDesc {
                         gpa,
                         size,
                         fd: snapshot_fd,
                         offset: region_offset,
-                        shared: shared_mapping,
+                        shared: !is_clone,
                     });
                     region_offset += size;
                 }
@@ -1875,6 +1904,10 @@ impl Vmm {
 
         if machine_config.cpu_template.is_some() {
             self.vm_config.cpu_template = machine_config.cpu_template;
+        }
+
+        if machine_config.memfile.is_some() {
+            self.vm_config.memfile = machine_config.memfile;
         }
 
         Ok(VmmData::Empty)
@@ -3238,6 +3271,7 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: None,
             cpu_template: None,
+            memfile: None,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_ok());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
@@ -3250,6 +3284,7 @@ mod tests {
             mem_size_mib: Some(256),
             ht_enabled: None,
             cpu_template: None,
+            memfile: None,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_ok());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
@@ -3263,6 +3298,7 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: None,
             cpu_template: None,
+            memfile: None,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
@@ -3274,6 +3310,7 @@ mod tests {
             mem_size_mib: Some(0),
             ht_enabled: Some(false),
             cpu_template: Some(CpuFeaturesTemplate::T2),
+            memfile: None,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
@@ -3289,6 +3326,7 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: Some(true),
             cpu_template: None,
+            memfile: None,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
         assert_eq!(vmm.vm_config.ht_enabled, Some(false));
@@ -3299,6 +3337,7 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: Some(true),
             cpu_template: Some(CpuFeaturesTemplate::T2),
+            memfile: None,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_ok());
         assert_eq!(vmm.vm_config.vcpu_count, Some(2));
@@ -3312,6 +3351,7 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: Some(true),
             cpu_template: Some(CpuFeaturesTemplate::T2),
+            memfile: None,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
     }
@@ -4072,6 +4112,7 @@ mod tests {
             vmm1.shared_info.write().unwrap().id = microvm_id.clone();
 
             vmm1.default_kernel_config(Some(good_kernel_file()));
+            vmm1.vm_config.memfile = Some(tmp_path());
             // The kernel provided contains  "return 0" which will make the
             // advanced seccomp filter return bad syscall so we disable it.
             vmm1.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
@@ -4832,7 +4873,16 @@ mod tests {
             "SnapshotBackingFile(MissingVcpuNum)"
         );
 
+        // Error case: no guest memory file.
         vmm.vm_config.vcpu_count = Some(1);
+        let res = vmm.create_snapshot_file(snapshot_path.to_string());
+        assert!(res.is_err());
+        assert_eq!(
+            format!("{:?}", res.err().unwrap()),
+            "SnapshotBackingFile(MissingMemFile)"
+        );
+
+        vmm.vm_config.memfile = Some("foo".to_string());
         assert!(vmm.create_snapshot_file(snapshot_path.to_string()).is_ok());
         assert!(Path::new(snapshot_path).exists());
         remove_file(snapshot_path).unwrap();

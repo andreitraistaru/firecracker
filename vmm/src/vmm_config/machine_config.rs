@@ -58,6 +58,9 @@ pub struct VmConfig {
     /// A CPU template that it is used to filter the CPU features exposed to the guest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_template: Option<CpuFeaturesTemplate>,
+    /// Guest memory file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memfile: Option<String>,
 }
 
 impl Default for VmConfig {
@@ -67,6 +70,7 @@ impl Default for VmConfig {
             mem_size_mib: Some(128),
             ht_enabled: Some(false),
             cpu_template: None,
+            memfile: None,
         }
     }
 }

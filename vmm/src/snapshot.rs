@@ -65,6 +65,7 @@ pub enum Error {
     InvalidSnapshot,
     InvalidSnapshotSize,
     MissingVcpuNum,
+    MissingMemFile,
     MissingMemSize,
     Mmap(io::Error),
     Munmap(io::Error),
@@ -85,6 +86,7 @@ impl Display for Error {
             InvalidSnapshot => write!(f, "Invalid snapshot file"),
             InvalidSnapshotSize => write!(f, "Invalid snapshot file size"),
             MissingVcpuNum => write!(f, "Missing number of vCPUs"),
+            MissingMemFile => write!(f, "Missing guest memory file"),
             MissingMemSize => write!(f, "Missing guest memory size"),
             Mmap(ref e) => write!(f, "Failed to map memory: {}", e),
             Munmap(ref e) => write!(f, "Failed to unmap memory: {}", e),
@@ -218,8 +220,6 @@ pub struct SnapshotImage {
     // Not accessible from outside this object.
     // TODO: wrap it in a struct that mmaps on ctor and munmaps on dtor.
     header: &'static mut SnapshotHdr,
-    // Specifies whether this snapshot is read-only or should persist state.
-    shared_mapping: bool,
 }
 
 impl SnapshotImage {
@@ -284,6 +284,9 @@ impl SnapshotImage {
     ) -> Result<SnapshotImage> {
         let vcpu_count = *vm_cfg.vcpu_count.as_ref().ok_or(Error::MissingVcpuNum)?;
         let mem_size_mib = *vm_cfg.mem_size_mib.as_ref().ok_or(Error::MissingMemSize)?;
+        if vm_cfg.memfile.is_none() {
+            return Err(Error::MissingMemFile);
+        }
 
         let header_size = mem::size_of::<SnapshotHdr>();
         let mapping_size =
@@ -328,11 +331,7 @@ impl SnapshotImage {
         };
 
         // VM and VCPU state still needed to make snapshot complete.
-        Ok(SnapshotImage {
-            file,
-            header,
-            shared_mapping: shared,
-        })
+        Ok(SnapshotImage { file, header })
     }
 
     pub fn open_existing<P: AsRef<Path>>(
@@ -383,11 +382,7 @@ impl SnapshotImage {
             .map_err(Error::Mmap)?;
         let header = unsafe { &mut *(addr as *mut SnapshotHdr) };
 
-        Ok(SnapshotImage {
-            file,
-            header,
-            shared_mapping: shared,
-        })
+        Ok(SnapshotImage { file, header })
     }
 
     pub fn can_deserialize(&self) -> Result<()> {
@@ -545,14 +540,6 @@ impl SnapshotImage {
     pub fn mem_size_mib(&self) -> usize {
         self.header.mem_size_mib
     }
-
-    pub fn memory_offset(&self) -> usize {
-        self.header.memory_offset
-    }
-
-    pub fn is_shared_mapping(&self) -> bool {
-        self.shared_mapping
-    }
 }
 
 impl AsRawFd for SnapshotImage {
@@ -607,6 +594,7 @@ mod tests {
                 | Error::InvalidSnapshot
                 | Error::InvalidSnapshotSize
                 | Error::MissingVcpuNum
+                | Error::MissingMemFile
                 | Error::MissingMemSize
                 | Error::Mmap(_)
                 | Error::Munmap(_)
@@ -623,6 +611,7 @@ mod tests {
                 (Error::InvalidSnapshot, Error::InvalidSnapshot) => true,
                 (Error::InvalidSnapshotSize, Error::InvalidSnapshotSize) => true,
                 (Error::MissingVcpuNum, Error::MissingVcpuNum) => true,
+                (Error::MissingMemFile, Error::MissingMemFile) => true,
                 (Error::MissingMemSize, Error::MissingMemSize) => true,
                 (Error::Mmap(_), Error::Mmap(_)) => true,
                 (Error::Munmap(_), Error::Munmap(_)) => true,
@@ -842,16 +831,10 @@ mod tests {
 
         let file = tempfile().expect("failed to create temp file");
         let file_rawfd = file.as_raw_fd();
-        let image = SnapshotImage {
-            file,
-            header,
-            shared_mapping: true,
-        };
+        let image = SnapshotImage { file, header };
 
-        assert!(image.is_shared_mapping());
         assert_eq!(image.vcpu_count(), vcpu_count);
         assert_eq!(image.mem_size_mib(), mem_size_mib);
-        assert_eq!(image.memory_offset(), memory_offset);
         assert_eq!(image.as_raw_fd(), file_rawfd);
     }
 
@@ -887,6 +870,7 @@ mod tests {
                     mem_size_mib: Some(mem_size_mib),
                     ht_enabled: None,
                     cpu_template: None,
+                    memfile: Some("foo".to_string()),
                 },
                 nmsrs,
                 ncpuids,
@@ -898,9 +882,25 @@ mod tests {
                 snapshot_path,
                 VmConfig {
                     vcpu_count: Some(vcpu_count),
+                    mem_size_mib: Some(mem_size_mib),
+                    ht_enabled: None,
+                    cpu_template: None,
+                    memfile: None, // Error case.
+                },
+                nmsrs,
+                ncpuids,
+            ) {
+                Err(Error::MissingMemFile) => (),
+                _ => assert!(false),
+            };
+            match SnapshotImage::create_new(
+                snapshot_path,
+                VmConfig {
+                    vcpu_count: Some(vcpu_count),
                     mem_size_mib: None, // Error case.
                     ht_enabled: None,
                     cpu_template: None,
+                    memfile: Some("foo".to_string()),
                 },
                 nmsrs,
                 ncpuids,
@@ -917,6 +917,7 @@ mod tests {
                     mem_size_mib: Some(mem_size_mib),
                     ht_enabled: None,
                     cpu_template: None,
+                    memfile: Some("foo".to_string()),
                 },
                 nmsrs,
                 ncpuids,
@@ -1050,6 +1051,10 @@ mod tests {
         assert_eq!(
             format!("{}", Error::MissingVcpuNum),
             "Missing number of vCPUs"
+        );
+        assert_eq!(
+            format!("{}", Error::MissingMemFile),
+            "Missing guest memory file"
         );
         assert_eq!(
             format!("{}", Error::MissingMemSize),

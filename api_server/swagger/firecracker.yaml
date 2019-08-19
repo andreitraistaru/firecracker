@@ -496,8 +496,8 @@ definitions:
   MachineConfiguration:
     type: object
     description:
-      Describes the number of vCPUs, memory size, Hyperthreading capabilities and
-      the CPU template.
+      Describes the number of vCPUs, memory size, Hyperthreading capabilities, CPU template and
+      guest memory backing file.
     required:
       - vcpu_count
       - mem_size_mib
@@ -516,6 +516,9 @@ definitions:
         description: Flag for enabling/disabling Hyperthreading
       cpu_template:
         $ref: "#/definitions/CpuTemplate"
+      memfile:
+        type: string
+        description: Optional path to guest memory backing file.
 
   NetworkInterface:
     type: object
