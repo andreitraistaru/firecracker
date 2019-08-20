@@ -24,8 +24,8 @@ use arch;
 use cpuid::{c3, filter_cpuid, t2};
 use default_syscalls;
 use kvm::{
-    CpuId, Kvm, KvmArray, KvmMsrs, MsrList, VcpuExit, VcpuFd, VmFd, KVM_CLOCK_TSC_STABLE,
-    KVM_IRQCHIP_IOAPIC, KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE, MAX_KVM_CPUID_ENTRIES,
+    CpuId, Kvm, KvmArray, KvmMsrs, MsrList, VcpuExit, VcpuFd, VmFd, KVM_IRQCHIP_IOAPIC,
+    KVM_IRQCHIP_PIC_MASTER, KVM_IRQCHIP_PIC_SLAVE, MAX_KVM_CPUID_ENTRIES,
 };
 use kvm_bindings::kvm_userspace_memory_region;
 #[cfg(target_arch = "x86_64")]
@@ -297,8 +297,8 @@ impl Vm {
 
         let mut clock = kvm_clock_data::default();
         self.fd.get_clock(&mut clock).map_err(Error::VmGetClock)?;
-        // This bit is not accepted in SET_CLOCK, clear it.
-        clock.flags &= !KVM_CLOCK_TSC_STABLE;
+        // `flags` are not accepted when setting the kvmclock, remove them at serialization.
+        clock.flags = 0;
 
         let mut pic_master = kvm_irqchip::default();
         pic_master.chip_id = KVM_IRQCHIP_PIC_MASTER;

@@ -53,9 +53,6 @@ pub const MAX_KVM_CPUID_ENTRIES: usize = 80;
 /// Maximum number of MSRs KVM supports (See arch/x86/kvm/x86.c).
 pub const MAX_KVM_MSR_ENTRIES: usize = 256;
 
-/// Kvm Clock TSC stable flag (include/uapi/linux/kvm.h).
-pub const KVM_CLOCK_TSC_STABLE: u32 = 2;
-
 /// Taken from Linux Kernel v4.14.13 (arch/x86/include/uapi/asm/kvm.h).
 pub const KVM_IRQCHIP_PIC_MASTER: u32 = 0;
 /// Taken from Linux Kernel v4.14.13 (arch/x86/include/uapi/asm/kvm.h).
