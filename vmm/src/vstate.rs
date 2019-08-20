@@ -949,6 +949,10 @@ impl Vcpu {
                 self.response_sender
                     .send(VcpuResponse::Paused)
                     .expect("failed to send pause status");
+
+                // TODO (issue #84): we should call `KVM_KVMCLOCK_CTRL` here to make sure
+                // TODO: the guest soft lockup watchdog does not panic on Resume.
+
                 // Move to 'paused' state.
                 state = StateStruct::next(Self::paused);
             }
