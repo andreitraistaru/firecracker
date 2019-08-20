@@ -7,298 +7,117 @@
 // Do not allow warnings. If any of our structures become FFI-unsafe we want to error.
 #![deny(warnings)]
 
-// Allow casting to a more-strictly-aligned pointer.
-#![allow(clippy::cast_ptr_alignment)]
-
 extern crate kvm_bindings;
 
 use std::fmt::{self, Display, Formatter};
 use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
-use std::slice;
-use std::{io, mem};
 
-use libc;
-
-use kvm::{CpuId, KvmMsrs};
-use kvm_bindings::{
-    kvm_cpuid_entry2, kvm_debugregs, kvm_lapic_state, kvm_mp_state, kvm_msr_entry, kvm_regs,
-    kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave,
-};
+use bincode::Error as SerializationError;
 
 use serialize::SnapshotReaderWriter;
 use vmm_config::machine_config::VmConfig;
 use vstate::{VcpuState, VmState};
 
 pub(super) const SNAPSHOT_MAGIC: u64 = 0xEDA3_25D9_EDA3_25D9;
-
-// Snapshot flags.
-const VM_STATE_PRESENT: u64 = 1;
-const VCPU_STATE_PRESENT: u64 = 1 << 1;
-//const MEM_STATE_PRESENT: u64 = 1 << 2;
-
-// Necessary flags to consider serialization complete.
-const SERIALIZATION_COMPLETE: u64 = VM_STATE_PRESENT | VCPU_STATE_PRESENT;
-
-//   Snapshot layout:       Offset
-//   +-------------------+  0
-//   |  Snapshot header  |
-//   +-------------------+  Snapshot header size
-//   |    vcpu 0 state   |
-//   |        ...        |
-//   |    vcpu N state   |
-//   +-------------------+  prev + (num_vcpus * sizeof(VcpuRegs))
-//   |   devices state   |
-//   +-------------------+  prev + sizeof(devices_state) // TODO
-//   |      Padding      |
-//   +-------------------+  Linux page size alignment (multiple of system page size)
-//   |    Guest memory   |
-//   +-------------------+  prev + Guest memory size
+// Major.Minor.BuildHi.BuildLo
+// TODO use CARGO_PKG_VERSION instead
+pub(super) const SNAPSHOT_VERSION: u64 = 0x0000_0001_0000_0000;
 
 /// Snapshot related errors.
 #[derive(Debug)]
 pub enum Error {
+    BadMagicNumber,
+    BadVcpuCount,
     CreateNew(io::Error),
+    Deserialize(SerializationError),
     InvalidVcpuIndex,
     InvalidFileType,
-    InvalidSnapshot,
-    InvalidSnapshotSize,
-    MissingVcpuNum,
+    IO(io::Error),
+    Memfile(io::Error),
+    MemfileSize,
     MissingMemFile,
     MissingMemSize,
+    MissingReaderWriter,
+    MissingVcpuNum,
     Mmap(io::Error),
-    Munmap(io::Error),
-    MsyncHeader(io::Error),
     OpenExisting(io::Error),
+    Serialize(SerializationError),
+    UnsupportedVersion(u64),
     Truncate(io::Error),
-    VcpusNotSerialized,
-    VmNotSerialized,
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         use self::Error::*;
         match *self {
+            BadMagicNumber => write!(f, "Bad snapshot magic number."),
+            BadVcpuCount => write!(f, "The vCPU count in the snapshot header does not match the number of vCPUs serialized in the snapshot."),
             CreateNew(ref e) => write!(f, "Failed to create new snapshot file: {}", e),
-            InvalidVcpuIndex => write!(f, "Invalid vCPU index"),
-            InvalidFileType => write!(f, "Invalid snapshot file type"),
-            InvalidSnapshot => write!(f, "Invalid snapshot file"),
-            InvalidSnapshotSize => write!(f, "Invalid snapshot file size"),
-            MissingVcpuNum => write!(f, "Missing number of vCPUs"),
-            MissingMemFile => write!(f, "Missing guest memory file"),
-            MissingMemSize => write!(f, "Missing guest memory size"),
+            Deserialize(ref e) => write!(f, "Failed to deserialize: {}", e),
+            InvalidVcpuIndex => write!(f, "Invalid vCPU index."),
+            InvalidFileType => write!(f, "Invalid snapshot file type."),
+            IO(ref e) => write!(f, "Input/output error. {}", e),
+            Memfile(ref e) => write!(f, "Cannot access guest memory file. {}", e),
+            MemfileSize => write!(f, "The memory file size saved in the snapshot header does not match the size of the memory file."),
+            MissingMemFile => write!(f, "Missing guest memory file."),
+            MissingMemSize => write!(f, "Missing guest memory size."),
+            MissingReaderWriter => write!(f, "Missing snapshot reader/writer."),
+            MissingVcpuNum => write!(f, "Missing number of vCPUs."),
             Mmap(ref e) => write!(f, "Failed to map memory: {}", e),
-            Munmap(ref e) => write!(f, "Failed to unmap memory: {}", e),
-            MsyncHeader(ref e) => write!(f, "Failed to synchronize snapshot header: {}", e),
             OpenExisting(ref e) => write!(f, "Failed to open snapshot file: {}", e),
+            Serialize(ref e) => write!(f, "Failed to serialize snapshot content. {}", e),
+            UnsupportedVersion(ref v) => write!(f, "Unsupported snapshot version: {}.", v),
             Truncate(ref e) => write!(f, "Failed to truncate snapshot file: {}", e),
-            VcpusNotSerialized => write!(f, "vCPUs not serialized in the snapshot"),
-            VmNotSerialized => write!(f, "VM state not serialized in the snapshot"),
         }
     }
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
-/// Minimal `Option` implementation that is FFI-safe.
-#[repr(C)]
-enum COption<T> {
-    /// No value
-    CNone,
-    /// Some value `T`
-    CSome(T),
-}
-
-impl<T> COption<T> {
-    #[inline]
-    pub fn is_some(&self) -> bool {
-        match *self {
-            COption::CSome(_) => true,
-            COption::CNone => false,
-        }
-    }
-
-    #[inline]
-    pub fn is_none(&self) -> bool {
-        !self.is_some()
-    }
-
-    #[inline]
-    pub fn as_ref(&self) -> Option<&T> {
-        match *self {
-            COption::CSome(ref x) => Some(x),
-            COption::CNone => None,
-        }
-    }
-}
-
-// Declare this FFI extern functions that take pointers to `VcpuRegs` and `SnapshotHdr` to
-// force the compiler to check whether they are FFI-safe and warn us if their layout is not fixed.
-#[allow(dead_code)]
-extern "C" {
-    fn test_vcpu_regs(ptr: *const VcpuRegs);
-    fn test_header(ptr: *const SnapshotHdr);
-}
-
-/** The header of VCPU state. */
-#[repr(C)]
-struct VcpuRegs {
-    /** KVM multi-processor state. */
-    mp_state: kvm_mp_state,
-
-    /** KVM general purpose register state. */
-    regs: kvm_regs,
-
-    /** KVM segment register state. */
-    sregs: kvm_sregs,
-
-    /** KVM FPU state. */
-    xsave: kvm_xsave,
-
-    /** KVM eXtended Control Register state. */
-    xcrs: kvm_xcrs,
-
-    /** KVM debug register state. */
-    debugregs: kvm_debugregs,
-
-    /** KVM local APIC state. */
-    lapic: kvm_lapic_state,
-
-    /** KVM VCPU events. */
-    vcpu_events: kvm_vcpu_events,
-}
-
 /** The header of a Firecracker snapshot image. */
-#[repr(C)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SnapshotHdr {
     /** SNAPSHOT_IMAGE_MAGIC */
     magic_id: u64,
-
-    /** Size of file. */
-    file_size: usize,
-
-    mapping_size: usize,
-
-    /** Flags indicating which fields are in this header */
-    flags: u64,
-
-    /** Number of vcpu to start. */
+    /** SNAPSHOT_VERSION */
+    version: u64,
+    /** Guest memory size */
+    mem_size_mib: u64,
+    /** Number of vCPUs. */
     vcpu_count: u8,
+    /** Memory file path. */
+    memfile: String,
+}
 
-    /** Offset from start of file to the serialized vcpus. */
-    vcpus_offset: u32,
-    nmsrs: u32,
-    ncpuids: u32,
+impl SnapshotHdr {
+    pub fn new(mem_size_mib: u64, vcpu_count: u8, memfile: String) -> Self {
+        SnapshotHdr {
+            magic_id: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            mem_size_mib,
+            vcpu_count,
+            memfile,
+        }
+    }
+}
 
-    /** The memory size in MiB. */
-    mem_size_mib: usize,
-
-    /** Offset from start to first byte of memory. */
-    memory_offset: usize,
-
-    kvm_vm_state: COption<VmState>,
-    //    /**
-    //     * The value of the clock.  This is a monotonic clock that begins at
-    //     * zero and increments whenever the image is running.  This clock will
-    //     * stop incrementing when the image is paused.  This clock is used to
-    //     * drive timers.
-    //     */
-    //    vm_clock_usec: u64,
-    //
-    //    /** The number of timers in this image. */
-    //    num_timers: u32,
-    //
-    //    /** Offset from the start of file to the timers array. */
-    //    timers_off: u32,
+#[derive(Deserialize, Serialize)]
+pub struct MicrovmState {
+    pub header: SnapshotHdr,
+    pub vm_state: Option<VmState>,
+    pub vcpu_states: Vec<VcpuState>,
 }
 
 pub struct SnapshotImage {
     file: File,
-    // Static ref to mapped header. Will live as long as the object, will be unmapped
-    // in destructor.
-    // Not accessible from outside this object.
-    // TODO: wrap it in a struct that mmaps on ctor and munmaps on dtor.
-    header: &'static mut SnapshotHdr,
+    pub microvm_state: MicrovmState,
 }
 
 impl SnapshotImage {
-    fn msync_region(addr: *mut u8, size: usize) -> std::io::Result<()> {
-        // Safe because we check the return value.
-        let ret = unsafe { libc::msync(addr as *mut libc::c_void, size, libc::MS_SYNC) };
-        if ret == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    fn munmap_region(addr: *mut u8, size: usize) -> io::Result<()> {
-        // This is safe because we mmap the area at addr ourselves, and nobody
-        // else is holding a reference to it.
-        let ret = unsafe { libc::munmap(addr as *mut libc::c_void, size) };
-        if ret == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    fn validate_header(
-        header: &SnapshotHdr,
-        header_size: usize,
-        file_size: usize,
-        nmsrs: u32,
-        ncpuids: u32,
-    ) -> Result<()> {
-        let computed_mapping_size =
-            header_size + (Self::serialized_vcpu_size(nmsrs, ncpuids) * header.vcpu_count as usize);
-        if header.magic_id != SNAPSHOT_MAGIC
-            || header.vcpus_offset as usize != header_size
-            || header.mapping_size < computed_mapping_size
-            || header.flags & SERIALIZATION_COMPLETE != SERIALIZATION_COMPLETE
-            || header.nmsrs != nmsrs
-            || header.ncpuids != ncpuids
-        {
-            return Err(Error::InvalidSnapshot);
-        }
-        if header.file_size != file_size {
-            return Err(Error::InvalidSnapshotSize);
-        }
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
-        // Memory has to be mapped at a page boundary.
-        let computed_memory_offset = (((header.mapping_size - 1) / page_size) + 1) * page_size;
-        let computed_file_size = computed_memory_offset + (header.mem_size_mib << 20);
-        if header.memory_offset != computed_memory_offset
-            || file_size != computed_file_size
-            || header.kvm_vm_state.is_none()
-        {
-            return Err(Error::InvalidSnapshot);
-        }
-        Ok(())
-    }
-
-    pub fn create_new<P: AsRef<Path>>(
-        path: P,
-        vm_cfg: VmConfig,
-        nmsrs: u32,
-        ncpuids: u32,
-    ) -> Result<SnapshotImage> {
-        let vcpu_count = *vm_cfg.vcpu_count.as_ref().ok_or(Error::MissingVcpuNum)?;
-        let mem_size_mib = *vm_cfg.mem_size_mib.as_ref().ok_or(Error::MissingMemSize)?;
-        if vm_cfg.memfile.is_none() {
-            return Err(Error::MissingMemFile);
-        }
-
-        let header_size = mem::size_of::<SnapshotHdr>();
-        let mapping_size =
-            header_size + (Self::serialized_vcpu_size(nmsrs, ncpuids) * vcpu_count as usize);
-
-        // TODO: add validation for same page-size across runs.
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
-        // Memory has to be mapped at a page boundary.
-        let memory_offset = (((mapping_size - 1) / page_size) + 1) * page_size;
-        let mem_size = mem_size_mib << 20;
-        let file_size = memory_offset + mem_size;
-
+    pub fn create_new<P: AsRef<Path>>(path: P, vm_cfg: VmConfig) -> Result<SnapshotImage> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -306,39 +125,25 @@ impl SnapshotImage {
             .truncate(true)
             .open(path.as_ref())
             .map_err(Error::CreateNew)?;
-        file.set_len(file_size as u64).map_err(Error::Truncate)?;
-
-        // Any changes to the mapping should be visible on the snapshot file.
-        let shared = true;
-
-        let addr = SnapshotReaderWriter::mmap_region(&file, 0, mapping_size as u64, shared)
-            .map_err(Error::Mmap)?;
-
-        let header = unsafe { &mut *(addr as *mut SnapshotHdr) };
-        // Create and write the header in the mapping.
-        *header = SnapshotHdr {
+        let header = SnapshotHdr {
             magic_id: SNAPSHOT_MAGIC,
-            file_size,
-            mapping_size,
-            flags: 0,
-            vcpu_count,
-            vcpus_offset: header_size as u32,
-            nmsrs,
-            ncpuids,
-            mem_size_mib,
-            memory_offset,
-            kvm_vm_state: COption::CNone,
+            version: SNAPSHOT_VERSION,
+            mem_size_mib: vm_cfg.mem_size_mib.ok_or(Error::MissingMemSize)? as u64,
+            vcpu_count: vm_cfg.vcpu_count.ok_or(Error::MissingVcpuNum)?,
+            memfile: vm_cfg.memfile.ok_or(Error::MissingMemFile)?,
         };
-
-        // VM and VCPU state still needed to make snapshot complete.
-        Ok(SnapshotImage { file, header })
+        let microvm_state = MicrovmState {
+            header,
+            vm_state: None,
+            vcpu_states: vec![],
+        };
+        Ok(SnapshotImage {
+            file,
+            microvm_state,
+        })
     }
 
-    pub fn open_existing<P: AsRef<Path>>(
-        path: P,
-        nmsrs: u32,
-        ncpuids: u32,
-    ) -> Result<SnapshotImage> {
+    pub fn open_existing<P: AsRef<Path>>(path: P) -> Result<SnapshotImage> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -351,194 +156,75 @@ impl SnapshotImage {
             return Err(Error::InvalidFileType);
         }
 
-        let file_size = metadata.len() as usize;
-        let header_size = mem::size_of::<SnapshotHdr>();
+        let reader_writer = SnapshotReaderWriter::new(&file, 0, metadata.len() as u64, false)
+            .map_err(Error::OpenExisting)?;
+        let microvm_state =
+            bincode::deserialize_from::<SnapshotReaderWriter, MicrovmState>(reader_writer)
+                .map_err(Error::Deserialize)?;
 
-        if file_size < header_size {
-            return Err(Error::InvalidSnapshotSize);
-        }
+        Self::validate_header(&microvm_state)?;
 
-        // No changes should persist on the snapshot file.
-        let shared = false;
-
-        // Map the header region.
-        let addr = SnapshotReaderWriter::mmap_region(&file, 0, header_size as u64, shared)
-            .map_err(Error::Mmap)?;
-        let header = unsafe { &*(addr as *const SnapshotHdr) };
-
-        if let Err(e) = Self::validate_header(header, header_size, file_size, nmsrs, ncpuids) {
-            if let Err(err) = Self::munmap_region(addr as *mut u8, header_size) {
-                error!("failed to munmap on error: {}", err);
-            }
-            return Err(e);
-        }
-
-        let mapping_size = header.mapping_size;
-        // Unmap the header region.
-        Self::munmap_region(addr as *mut u8, header_size).map_err(Error::Munmap)?;
-
-        // Map the header + vcpus region.
-        let addr = SnapshotReaderWriter::mmap_region(&file, 0, mapping_size as u64, shared)
-            .map_err(Error::Mmap)?;
-        let header = unsafe { &mut *(addr as *mut SnapshotHdr) };
-
-        Ok(SnapshotImage { file, header })
-    }
-
-    pub fn can_deserialize(&self) -> Result<()> {
-        if self.header.flags & VM_STATE_PRESENT == 0 {
-            Err(Error::VmNotSerialized)
-        } else if self.header.flags & VCPU_STATE_PRESENT == 0 {
-            Err(Error::VcpusNotSerialized)
-        } else {
-            Ok(())
-        }
-    }
-
-    pub fn kvm_vm_state(&self) -> Option<&VmState> {
-        self.header.kvm_vm_state.as_ref()
-    }
-
-    pub fn set_kvm_vm_state(&mut self, kvm_vm_state: VmState) {
-        self.header.kvm_vm_state = COption::CSome(kvm_vm_state);
-        self.header.flags |= VM_STATE_PRESENT;
-    }
-
-    // TODO: maybe have this logic in `kvm-ioctls` crate as a `serialize()` function.
-    fn serialized_vcpu_size(nmsrs: u32, ncpuids: u32) -> usize {
-        // vcpu registers
-        mem::size_of::<VcpuRegs>() +
-        // sizeof msr entries
-        nmsrs as usize * mem::size_of::<kvm_msr_entry>() +
-        // sizeof cpuid entries
-        ncpuids as usize * mem::size_of::<kvm_cpuid_entry2>()
-    }
-
-    // Returns the addresses for (vcpu_regs, msrs, cpuid).
-    fn vcpu_offsets(&mut self, vcpu_index: usize) -> (*mut u8, *mut u8, *mut u8) {
-        #[allow(clippy::ptr_offset_with_cast)]
-        let vcpu_regs_offset = unsafe {
-            (self.header as *mut SnapshotHdr as *mut u8)
-                .offset(self.header.vcpus_offset as isize)
-                .offset(
-                    (Self::serialized_vcpu_size(self.header.nmsrs, self.header.ncpuids)
-                        * vcpu_index) as isize,
-                )
-        };
-        #[allow(clippy::ptr_offset_with_cast)]
-        let msrs_offset = unsafe { vcpu_regs_offset.offset(mem::size_of::<VcpuRegs>() as isize) };
-        #[allow(clippy::ptr_offset_with_cast)]
-        let cpuid_offset = unsafe {
-            msrs_offset
-                .offset(self.header.nmsrs as isize * mem::size_of::<kvm_msr_entry>() as isize)
-        };
-
-        (vcpu_regs_offset, msrs_offset, cpuid_offset)
-    }
-
-    pub fn serialize_vcpu(&mut self, vcpu_index: usize, vcpu_state: Box<VcpuState>) -> Result<()> {
-        if vcpu_index >= self.header.vcpu_count as usize {
-            return Err(Error::InvalidVcpuIndex);
-        }
-
-        let msrs = vcpu_state.msrs.as_entries_slice();
-        assert_eq!(self.header.nmsrs, msrs.len() as u32);
-
-        let cpuid = vcpu_state.cpuid.as_entries_slice();
-        assert_eq!(self.header.ncpuids, cpuid.len() as u32);
-
-        // Get offsets.
-        let (vcpu_regs_offset, msrs_offset, cpuid_offset) = self.vcpu_offsets(vcpu_index);
-
-        // Serialize `repr(C)` VcpuRegs.
-        {
-            // Safe because we computed the size and `VcpuRegs` is `repr(C)`.
-            let vcpu_regs = unsafe { &mut *(vcpu_regs_offset as *mut VcpuRegs) };
-            vcpu_regs.debugregs = vcpu_state.debug_regs;
-            vcpu_regs.lapic = vcpu_state.lapic;
-            vcpu_regs.mp_state = vcpu_state.mp_state;
-            vcpu_regs.regs = vcpu_state.regs;
-            vcpu_regs.sregs = vcpu_state.sregs;
-            vcpu_regs.vcpu_events = vcpu_state.vcpu_events;
-            vcpu_regs.xcrs = vcpu_state.xcrs;
-            vcpu_regs.xsave = vcpu_state.xsave;
-        }
-        // Serialize kvm msrs.
-        {
-            let msrs_addr = msrs_offset as *mut kvm_msr_entry;
-            let msrs_dest = unsafe { slice::from_raw_parts_mut(msrs_addr, msrs.len()) };
-            msrs_dest.copy_from_slice(msrs);
-        }
-        // Serialize kvm cpuid.
-        {
-            let cpuid_addr = cpuid_offset as *mut kvm_cpuid_entry2;
-            let cpuid_dest = unsafe { slice::from_raw_parts_mut(cpuid_addr, cpuid.len()) };
-            cpuid_dest.copy_from_slice(cpuid);
-        }
-
-        // TODO: this doesn't actually guarantee _all_ vcpus have been serialized.
-        self.header.flags |= VCPU_STATE_PRESENT;
-        Ok(())
-    }
-
-    pub fn deser_vcpu(&mut self, vcpu_index: usize) -> Result<VcpuState> {
-        if vcpu_index >= self.header.vcpu_count as usize {
-            return Err(Error::InvalidVcpuIndex);
-        }
-        if self.header.flags & VCPU_STATE_PRESENT == 0 {
-            return Err(Error::VcpusNotSerialized);
-        }
-
-        // Get offsets.
-        let (vcpu_regs_offset, msrs_offset, cpuid_offset) = self.vcpu_offsets(vcpu_index);
-
-        // Deserialize `repr(C)` components.
-        // Safe because we computed the size and `VcpuRegs` is `repr(C)`.
-        let vcpu_regs = unsafe { &mut *(vcpu_regs_offset as *mut VcpuRegs) };
-
-        // Deserialize kvm msrs.
-        let msrs = {
-            let msrs_addr = msrs_offset as *mut kvm_msr_entry;
-            let msr_entries =
-                unsafe { slice::from_raw_parts(msrs_addr, self.header.nmsrs as usize) };
-            KvmMsrs::from_entries(msr_entries)
-        };
-        // Deserialize kvm cpuid.
-        let cpuid = {
-            let cpuid_addr = cpuid_offset as *mut kvm_cpuid_entry2;
-            let cpuid = unsafe { slice::from_raw_parts(cpuid_addr, self.header.ncpuids as usize) };
-            CpuId::from_entries(cpuid)
-        };
-
-        Ok(VcpuState {
-            cpuid,
-            msrs,
-            debug_regs: vcpu_regs.debugregs,
-            lapic: vcpu_regs.lapic,
-            mp_state: vcpu_regs.mp_state,
-            regs: vcpu_regs.regs,
-            sregs: vcpu_regs.sregs,
-            vcpu_events: vcpu_regs.vcpu_events,
-            xcrs: vcpu_regs.xcrs,
-            xsave: vcpu_regs.xsave,
+        Ok(SnapshotImage {
+            file,
+            microvm_state,
         })
     }
 
-    pub fn sync_header(&mut self) -> Result<()> {
-        // Sync header + vcpus.
-        Self::msync_region(
-            self.header as *mut SnapshotHdr as *mut u8,
-            self.header.mapping_size,
-        )
-        .map_err(Error::MsyncHeader)
+    pub fn serialize_microvm(
+        &mut self,
+        header: SnapshotHdr,
+        vm_state: VmState,
+        vcpu_states: Vec<VcpuState>,
+    ) -> Result<()> {
+        self.microvm_state = MicrovmState {
+            header,
+            vm_state: Some(vm_state),
+            vcpu_states,
+        };
+        let serialized_microvm =
+            bincode::serialize(&self.microvm_state).map_err(Error::Serialize)?;
+        let microvm_size = serialized_microvm.len() as u64;
+        self.file.set_len(microvm_size).map_err(Error::Truncate)?;
+
+        let mut reader_writer = SnapshotReaderWriter::new(&self.file, 0, microvm_size, true)
+            .map_err(Error::CreateNew)?;
+        reader_writer
+            .write_all(serialized_microvm.as_slice())
+            .map_err(Error::IO)?;
+
+        Ok(())
     }
 
     pub fn vcpu_count(&self) -> u8 {
-        self.header.vcpu_count
+        self.microvm_state.vcpu_states.len() as u8
     }
 
     pub fn mem_size_mib(&self) -> usize {
-        self.header.mem_size_mib
+        self.microvm_state.header.mem_size_mib as usize
+    }
+
+    pub fn memfile(&self) -> String {
+        self.microvm_state.header.memfile.clone()
+    }
+
+    fn validate_header(microvm_state: &MicrovmState) -> Result<()> {
+        if microvm_state.header.magic_id != SNAPSHOT_MAGIC {
+            return Err(Error::BadMagicNumber);
+        }
+        // Versioning is not supported yet.
+        if microvm_state.header.version != SNAPSHOT_VERSION {
+            return Err(Error::UnsupportedVersion(microvm_state.header.version));
+        }
+        if microvm_state.header.vcpu_count != microvm_state.vcpu_states.len() as u8 {
+            return Err(Error::BadVcpuCount);
+        }
+        let metadata =
+            std::fs::metadata(microvm_state.header.memfile.as_str()).map_err(Error::Memfile)?;
+        if microvm_state.header.mem_size_mib << 20 != metadata.len() {
+            return Err(Error::MemfileSize);
+        }
+
+        Ok(())
     }
 }
 
@@ -548,29 +234,21 @@ impl AsRawFd for SnapshotImage {
     }
 }
 
-impl Drop for SnapshotImage {
-    fn drop(&mut self) {
-        let addr = self.header as *mut SnapshotHdr as *mut u8;
-        match Self::munmap_region(addr, self.header.mapping_size) {
-            Ok(()) => (),
-            Err(e) => error!(
-                "failed to munmap(addr: {:?}, len: {}) : {}",
-                addr, self.header.mapping_size, e
-            ),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     extern crate tempfile;
 
-    use self::tempfile::tempfile;
+    use self::tempfile::{tempfile, NamedTempFile, TempPath};
 
     use std::fmt;
     use std::io::Write;
+    use std::sync::mpsc::channel;
 
+    use super::super::{KvmContext, Vcpu, Vm};
     use super::*;
+
+    use memory_model::{GuestAddress, GuestMemory};
+    use sys_util::EventFd;
 
     impl fmt::Debug for SnapshotImage {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -588,56 +266,130 @@ mod tests {
         fn eq(&self, other: &Self) -> bool {
             // Guard match with no wildcard to make sure we catch new enum variants.
             match self {
-                Error::CreateNew(_)
+                Error::BadMagicNumber
+                | Error::BadVcpuCount
+                | Error::CreateNew(_)
+                | Error::Deserialize(_)
                 | Error::InvalidVcpuIndex
                 | Error::InvalidFileType
-                | Error::InvalidSnapshot
-                | Error::InvalidSnapshotSize
+                | Error::IO(_)
+                | Error::Memfile(_)
+                | Error::MemfileSize
                 | Error::MissingVcpuNum
                 | Error::MissingMemFile
                 | Error::MissingMemSize
+                | Error::MissingReaderWriter
                 | Error::Mmap(_)
-                | Error::Munmap(_)
-                | Error::MsyncHeader(_)
                 | Error::OpenExisting(_)
-                | Error::Truncate(_)
-                | Error::VcpusNotSerialized
-                | Error::VmNotSerialized => (),
+                | Error::Serialize(_)
+                | Error::UnsupportedVersion(_)
+                | Error::Truncate(_) => (),
             };
             match (self, other) {
+                (Error::BadMagicNumber, Error::BadMagicNumber) => true,
+                (Error::BadVcpuCount, Error::BadVcpuCount) => true,
                 (Error::CreateNew(_), Error::CreateNew(_)) => true,
+                (Error::Deserialize(_), Error::Deserialize(_)) => true,
                 (Error::InvalidVcpuIndex, Error::InvalidVcpuIndex) => true,
                 (Error::InvalidFileType, Error::InvalidFileType) => true,
-                (Error::InvalidSnapshot, Error::InvalidSnapshot) => true,
-                (Error::InvalidSnapshotSize, Error::InvalidSnapshotSize) => true,
+                (Error::IO(_), Error::IO(_)) => true,
+                (Error::Memfile(_), Error::Memfile(_)) => true,
                 (Error::MissingVcpuNum, Error::MissingVcpuNum) => true,
+                (Error::MemfileSize, Error::MemfileSize) => true,
                 (Error::MissingMemFile, Error::MissingMemFile) => true,
                 (Error::MissingMemSize, Error::MissingMemSize) => true,
+                (Error::MissingReaderWriter, Error::MissingReaderWriter) => true,
                 (Error::Mmap(_), Error::Mmap(_)) => true,
-                (Error::Munmap(_), Error::Munmap(_)) => true,
-                (Error::MsyncHeader(_), Error::MsyncHeader(_)) => true,
                 (Error::OpenExisting(_), Error::OpenExisting(_)) => true,
+                (Error::Serialize(_), Error::Serialize(_)) => true,
+                (Error::UnsupportedVersion(_), Error::UnsupportedVersion(_)) => true,
                 (Error::Truncate(_), Error::Truncate(_)) => true,
-                (Error::VcpusNotSerialized, Error::VcpusNotSerialized) => true,
-                (Error::VmNotSerialized, Error::VmNotSerialized) => true,
                 _ => false,
             }
         }
     }
 
-    #[test]
-    fn test_coption() {
-        let none: COption<bool> = COption::CNone;
-        assert!(none.is_none());
-        assert_eq!(none.as_ref(), None);
+    impl PartialEq for SnapshotHdr {
+        fn eq(&self, other: &Self) -> bool {
+            self.magic_id == other.magic_id
+                && self.version == other.version
+                && self.mem_size_mib == other.mem_size_mib
+                && self.vcpu_count == other.vcpu_count
+                && self.memfile == other.memfile
+        }
+    }
 
-        let some = COption::CSome(true);
-        assert!(some.is_some());
-        assert_eq!(some.as_ref(), Some(&true));
+    impl PartialEq for VmState {
+        fn eq(&self, other: &Self) -> bool {
+            unsafe {
+                libc::memcmp(
+                    self as *const VmState as *const libc::c_void,
+                    other as *const VmState as *const libc::c_void,
+                    std::mem::size_of::<VmState>(),
+                ) == 0
+            }
+        }
+    }
+
+    impl Clone for VcpuState {
+        fn clone(&self) -> Self {
+            VcpuState {
+                cpuid: self.cpuid.clone(),
+                msrs: self.msrs.clone(),
+                debug_regs: self.debug_regs.clone(),
+                lapic: self.lapic.clone(),
+                mp_state: self.mp_state.clone(),
+                regs: self.regs.clone(),
+                sregs: self.sregs.clone(),
+                vcpu_events: self.vcpu_events.clone(),
+                xcrs: self.xcrs.clone(),
+                xsave: self.xsave.clone(),
+            }
+        }
+    }
+
+    impl PartialEq for VcpuState {
+        fn eq(&self, other: &Self) -> bool {
+            self.cpuid.eq(&other.cpuid)
+                && self.msrs.eq(&other.msrs)
+                && self.debug_regs.eq(&other.debug_regs)
+                && self.lapic.regs[..].eq(&other.lapic.regs[..])
+                && self.mp_state.eq(&other.mp_state)
+                && self.regs.eq(&other.regs)
+                && self.sregs.eq(&other.sregs)
+                && self.vcpu_events.eq(&other.vcpu_events)
+                && self.xcrs.eq(&other.xcrs)
+                && self.xsave.region[..].eq(&other.xsave.region[..])
+        }
+    }
+
+    // Auxiliary function being used throughout the tests.
+    fn setup_vcpu() -> (Vm, Vcpu) {
+        let kvm = KvmContext::new().unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mut vm = Vm::new(kvm.fd()).expect("Cannot create new vm");
+        assert!(vm.memory_init(gm, &kvm).is_ok());
+
+        vm.setup_irqchip().unwrap();
+
+        let (_s1, r1) = channel();
+        let (s2, _r2) = channel();
+        let vcpu = Vcpu::new(
+            1,
+            &vm,
+            devices::Bus::new(),
+            EventFd::new().unwrap(),
+            r1,
+            s2,
+            super::super::TimestampUs::default(),
+        )
+        .expect("Cannot create Vcpu");
+
+        (vm, vcpu)
     }
 
     #[test]
-    fn test_mmap_msync_munmap() {
+    fn test_mmap() {
         let mut f = tempfile().expect("failed to create temp file");
 
         // Verify mmap errors.
@@ -657,371 +409,300 @@ mod tests {
         // Verify the mmap'ed contents match the contents written in the file.
         assert_eq!(slice, control_slice);
 
-        // Verify msync works on the mapped memory.
-        SnapshotImage::msync_region(mapping, control_slice.len()).expect("failed to msync_region");
-        // Verify msync errors.
-        SnapshotImage::msync_region((mapping as u64 + 1) as *mut u8, control_slice.len())
-            .expect_err("msync_region should have failed");
-
-        // Verify memory unmapping.
-        SnapshotImage::munmap_region(mapping, control_slice.len())
-            .expect("failed to munmap_region");
-        // Verify munmap errors.
-        SnapshotImage::munmap_region(mapping, 0)
-            .expect_err("mmap_region should have failed because size is 0");
+        // Clean up.
+        unsafe { libc::munmap(mapping as *mut libc::c_void, control_slice.len()) };
     }
 
-    fn build_valid_header(nmsrs: u32, ncpuids: u32) -> (SnapshotHdr, usize, usize) {
-        let vcpu_count = 1;
-        let mem_size_mib = 1;
-
-        let header_size = mem::size_of::<SnapshotHdr>();
-        let mapping_size = header_size
-            + (SnapshotImage::serialized_vcpu_size(nmsrs, ncpuids) * vcpu_count as usize);
-
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
-        // Memory has to be mapped at a page boundary.
-        let memory_offset = (((mapping_size - 1) / page_size) + 1) * page_size;
-        let mem_size = mem_size_mib << 20;
-        let file_size = memory_offset + mem_size;
-
-        (
-            SnapshotHdr {
-                magic_id: SNAPSHOT_MAGIC,
-                file_size,
-                mapping_size,
-                flags: SERIALIZATION_COMPLETE,
-                vcpu_count,
-                vcpus_offset: header_size as u32,
-                nmsrs,
-                ncpuids,
-                mem_size_mib,
-                memory_offset,
-                kvm_vm_state: COption::CSome(Default::default()),
-            },
-            header_size,
-            file_size,
-        )
+    fn build_valid_header(mem_size_mib: u64, vcpu_count: u8) -> SnapshotHdr {
+        SnapshotHdr {
+            magic_id: SNAPSHOT_MAGIC,
+            version: SNAPSHOT_VERSION,
+            mem_size_mib,
+            vcpu_count,
+            memfile: "foo".to_string(),
+        }
     }
 
     #[test]
-    fn test_validate_header() {
-        let nmsrs = 10;
-        let ncpuids = 10;
-
-        let (mut header, header_size, file_size) = build_valid_header(nmsrs, ncpuids);
-        SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids)
-            .expect("invalid header");
-
-        // Validate magic id.
-        header.magic_id = 0;
-        assert_eq!(
-            SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids),
-            Err(Error::InvalidSnapshot)
-        );
-
-        // Validate vcpus_offset.
-        let (mut header, header_size, file_size) = build_valid_header(nmsrs, ncpuids);
-        header.vcpus_offset -= 1;
-        assert_eq!(
-            SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids),
-            Err(Error::InvalidSnapshot)
-        );
-
-        // Validate mapping_size.
-        let (mut header, header_size, file_size) = build_valid_header(nmsrs, ncpuids);
-        header.mapping_size -= 1;
-        assert_eq!(
-            SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids),
-            Err(Error::InvalidSnapshot)
-        );
-
-        // Validate flags.
-        let (mut header, header_size, file_size) = build_valid_header(nmsrs, ncpuids);
-        header.flags = 0;
-        assert_eq!(
-            SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids),
-            Err(Error::InvalidSnapshot)
-        );
-
-        // Validate nmsrs.
-        let (mut header, header_size, file_size) = build_valid_header(nmsrs, ncpuids);
-        header.nmsrs -= 1;
-        assert_eq!(
-            SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids),
-            Err(Error::InvalidSnapshot)
-        );
-
-        // Validate ncpuids.
-        let (mut header, header_size, file_size) = build_valid_header(nmsrs, ncpuids);
-        header.ncpuids -= 1;
-        assert_eq!(
-            SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids),
-            Err(Error::InvalidSnapshot)
-        );
-
-        // Validate file_size.
-        let (mut header, header_size, file_size) = build_valid_header(nmsrs, ncpuids);
-        header.file_size -= 1;
-        assert_eq!(
-            SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids),
-            Err(Error::InvalidSnapshotSize)
-        );
-
-        // Validate memory_offset.
-        let (mut header, header_size, file_size) = build_valid_header(nmsrs, ncpuids);
-        header.memory_offset -= 1;
-        assert_eq!(
-            SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids),
-            Err(Error::InvalidSnapshot)
-        );
-
-        // Validate all offsets add up to file size.
-        let (mut header, header_size, file_size) = build_valid_header(nmsrs, ncpuids);
-        header.mem_size_mib += 1;
-        assert_eq!(
-            SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids),
-            Err(Error::InvalidSnapshot)
-        );
-
-        // Validate kvm_vm_state.
-        let (mut header, header_size, file_size) = build_valid_header(nmsrs, ncpuids);
-        header.kvm_vm_state = COption::CNone;
-        assert_eq!(
-            SnapshotImage::validate_header(&header, header_size, file_size, nmsrs, ncpuids),
-            Err(Error::InvalidSnapshot)
-        );
+    fn test_header_serialization() {
+        let header = build_valid_header(1, 1);
+        let serialized_header = bincode::serialize(&header).unwrap();
+        let deserialized_header =
+            bincode::deserialize::<SnapshotHdr>(serialized_header.as_slice()).unwrap();
+        assert_eq!(header, deserialized_header);
     }
 
     #[test]
     fn test_snapshot_getters() {
-        let nmsrs = 10;
-        let ncpuids = 10;
+        let vcpu_count = 1u8;
+        let mem_size_mib = 1u64;
+        let (_, vcpu) = setup_vcpu();
+        let vcpu_state = vcpu.save_state().unwrap();
 
-        let vcpu_count = 1;
-        let mem_size_mib = 1;
-
-        let header_size = mem::size_of::<SnapshotHdr>();
-        let mapping_size = header_size
-            + (SnapshotImage::serialized_vcpu_size(nmsrs, ncpuids) * vcpu_count as usize);
-
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
-        // Memory has to be mapped at a page boundary.
-        let memory_offset = (((mapping_size - 1) / page_size) + 1) * page_size;
-        let mem_size = mem_size_mib << 20;
-        let file_size = memory_offset + mem_size;
-
-        let mut header_ = SnapshotHdr {
-            magic_id: SNAPSHOT_MAGIC,
-            file_size,
-            mapping_size,
-            flags: SERIALIZATION_COMPLETE,
-            vcpu_count,
-            vcpus_offset: header_size as u32,
-            nmsrs,
-            ncpuids,
-            mem_size_mib,
-            memory_offset,
-            kvm_vm_state: COption::CSome(Default::default()),
+        let header = build_valid_header(mem_size_mib, vcpu_count);
+        let microvm_state = MicrovmState {
+            header: header,
+            vm_state: None,
+            vcpu_states: vec![vcpu_state],
+        };
+        let file = NamedTempFile::new().unwrap().into_file();
+        let fd = file.as_raw_fd();
+        let image = SnapshotImage {
+            file,
+            microvm_state,
         };
 
-        // Turn it into pointer then back to reference to get static ref.
-        let header_ptr: *mut SnapshotHdr = &mut header_;
-        let header: &mut SnapshotHdr = unsafe { &mut (*header_ptr) };
-
-        let file = tempfile().expect("failed to create temp file");
-        let file_rawfd = file.as_raw_fd();
-        let image = SnapshotImage { file, header };
-
         assert_eq!(image.vcpu_count(), vcpu_count);
-        assert_eq!(image.mem_size_mib(), mem_size_mib);
-        assert_eq!(image.as_raw_fd(), file_rawfd);
+        assert_eq!(image.mem_size_mib(), mem_size_mib as usize);
+        assert_eq!(image.as_raw_fd(), fd);
+        assert_eq!(image.memfile(), "foo".to_string());
+    }
+
+    fn make_snapshot(
+        tmp_snapshot_path: &TempPath,
+        vm_config: VmConfig,
+        vm_state: VmState,
+        vcpu_state: VcpuState,
+        header: SnapshotHdr,
+    ) -> String {
+        let snapshot_path = tmp_snapshot_path.to_str().unwrap();
+        let mut image = SnapshotImage::create_new(snapshot_path, vm_config).unwrap();
+        image
+            .serialize_microvm(header, vm_state, vec![vcpu_state])
+            .unwrap();
+        snapshot_path.to_string()
     }
 
     #[test]
     fn test_snapshot_ser_deser() {
-        let nmsrs = 10;
-        let ncpuids = 10;
-        let vcpu_count = 2;
-        let mem_size_mib = 128;
-        let vcpu_state = || VcpuState {
-            cpuid: CpuId::new(ncpuids as usize),
-            msrs: KvmMsrs::new(nmsrs as usize),
-            debug_regs: Default::default(),
-            lapic: Default::default(),
-            mp_state: Default::default(),
-            regs: Default::default(),
-            sregs: Default::default(),
-            vcpu_events: Default::default(),
-            xcrs: Default::default(),
-            xsave: Default::default(),
+        let tmp_snapshot_path = NamedTempFile::new().unwrap().into_temp_path();
+        let snapshot_path = tmp_snapshot_path.to_str().unwrap();
+
+        let mem_size_mib: usize = 10;
+        let vcpu_count: u8 = 1;
+
+        let tmp_memfile = NamedTempFile::new().unwrap();
+        tmp_memfile
+            .as_file()
+            .set_len(mem_size_mib as u64 * 1024 * 1024)
+            .unwrap();
+        let tmp_memfile_path = tmp_memfile.into_temp_path();
+        let memfile = tmp_memfile_path.to_str().unwrap().to_string();
+
+        let mut header = build_valid_header(mem_size_mib as u64, vcpu_count);
+        header.memfile = memfile.clone();
+
+        let mut vm_config = VmConfig {
+            vcpu_count: None,
+            mem_size_mib: None,
+            memfile: None,
+            cpu_template: None,
+            ht_enabled: None,
         };
-        let snapshot_path = "foo.image";
 
-        ////////////////////////////////////////////
-        // Test serialization
-        ////////////////////////////////////////////
+        let (vm, vcpu) = setup_vcpu();
+        let vm_state = vm.save_state().unwrap();
+        let vcpu_state = vcpu.save_state().unwrap();
+
+        // Save snapshot.
         {
-            // Test create errors.
-            match SnapshotImage::create_new(
-                snapshot_path,
-                VmConfig {
-                    vcpu_count: None, // Error case.
-                    mem_size_mib: Some(mem_size_mib),
-                    ht_enabled: None,
-                    cpu_template: None,
-                    memfile: Some("foo".to_string()),
-                },
-                nmsrs,
-                ncpuids,
-            ) {
-                Err(Error::MissingVcpuNum) => (),
-                _ => assert!(false),
-            };
-            match SnapshotImage::create_new(
-                snapshot_path,
-                VmConfig {
-                    vcpu_count: Some(vcpu_count),
-                    mem_size_mib: Some(mem_size_mib),
-                    ht_enabled: None,
-                    cpu_template: None,
-                    memfile: None, // Error case.
-                },
-                nmsrs,
-                ncpuids,
-            ) {
-                Err(Error::MissingMemFile) => (),
-                _ => assert!(false),
-            };
-            match SnapshotImage::create_new(
-                snapshot_path,
-                VmConfig {
-                    vcpu_count: Some(vcpu_count),
-                    mem_size_mib: None, // Error case.
-                    ht_enabled: None,
-                    cpu_template: None,
-                    memfile: Some("foo".to_string()),
-                },
-                nmsrs,
-                ncpuids,
-            ) {
-                Err(Error::MissingMemSize) => (),
-                _ => assert!(false),
-            };
+            let inaccessible_path = "/foo/bar";
 
-            // Test successful create.
-            let mut image = SnapshotImage::create_new(
-                snapshot_path,
-                VmConfig {
-                    vcpu_count: Some(vcpu_count),
-                    mem_size_mib: Some(mem_size_mib),
-                    ht_enabled: None,
-                    cpu_template: None,
-                    memfile: Some("foo".to_string()),
-                },
-                nmsrs,
-                ncpuids,
-            )
-            .expect("failed to create new snapshot image");
-
-            // Test complete serialization checks.
-            assert_eq!(image.can_deserialize(), Err(Error::VmNotSerialized));
-            image.set_kvm_vm_state(VmState::default());
-
-            assert_eq!(image.can_deserialize(), Err(Error::VcpusNotSerialized));
-
-            // Test vcpu serialization.
-            // Invalid vcpu index.
+            // Test error case: inaccessible snapshot path.
+            let ret = SnapshotImage::create_new(inaccessible_path, vm_config.clone());
+            assert!(ret.is_err());
             assert_eq!(
-                image.serialize_vcpu((vcpu_count + 1) as usize, Box::new(vcpu_state())),
-                Err(Error::InvalidVcpuIndex)
+                format!("{}", ret.err().unwrap()),
+                "Failed to create new snapshot file: No such file or directory (os error 2)"
             );
-            // Success.
-            for i in 0..vcpu_count {
-                assert!(image
-                    .serialize_vcpu(i as usize, Box::new(vcpu_state()))
-                    .is_ok());
-            }
 
-            // Serialization should be complete.
-            assert!(image.can_deserialize().is_ok());
+            // Test error case: missing guest memory size.
+            let ret = SnapshotImage::create_new(snapshot_path.clone(), vm_config.clone());
+            assert!(ret.is_err());
+            assert_eq!(
+                format!("{}", ret.err().unwrap()),
+                "Missing guest memory size."
+            );
 
-            // Syncing to snapshot file should work.
-            assert!(image.sync_header().is_ok());
+            vm_config.mem_size_mib = Some(mem_size_mib);
+
+            // Test error case: missing vCPU count.
+            let ret = SnapshotImage::create_new(snapshot_path.clone(), vm_config.clone());
+            assert!(ret.is_err());
+            assert_eq!(
+                format!("{}", ret.err().unwrap()),
+                "Missing number of vCPUs."
+            );
+
+            vm_config.vcpu_count = Some(vcpu_count);
+
+            // Test error case: missing memory file.
+            let ret = SnapshotImage::create_new(snapshot_path.clone(), vm_config.clone());
+            assert!(ret.is_err());
+            assert_eq!(
+                format!("{}", ret.err().unwrap()),
+                "Missing guest memory file."
+            );
+
+            vm_config.memfile = Some(memfile.clone());
+
+            // Good case: snapshot is created.
+            let ret = SnapshotImage::create_new(snapshot_path.clone(), vm_config.clone());
+            assert!(ret.is_ok());
+            let mut image = ret.unwrap();
+
+            assert!(image
+                .serialize_microvm(header.clone(), vm_state.clone(), vec![vcpu_state.clone()])
+                .is_ok());
         }
-        ////////////////////////////////////////////
-        // Test deserialization
-        ////////////////////////////////////////////
+
+        // Restore snapshot.
         {
-            let invalid_path = "invalid_path";
-            // Test invalid path.
+            // Test error case: inaccessible path.
+            let ret = SnapshotImage::open_existing("/foo/bar");
+            assert!(ret.is_err());
             assert_eq!(
-                SnapshotImage::open_existing(invalid_path, nmsrs, ncpuids).unwrap_err(),
-                Error::OpenExisting(io::Error::from_raw_os_error(libc::ENOENT))
+                format!("{}", ret.err().unwrap()),
+                "Failed to open snapshot file: No such file or directory (os error 2)"
             );
-            {
-                let _file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(invalid_path)
-                    .expect("failed to create file");
-            }
-            // Test invalid snapshot size.
+
+            // Test error case: path points to a directory.
+            let ret = SnapshotImage::open_existing(std::env::current_dir().unwrap());
+            assert!(ret.is_err());
             assert_eq!(
-                SnapshotImage::open_existing(invalid_path, nmsrs, ncpuids).unwrap_err(),
-                Error::InvalidSnapshotSize
+                format!("{}", ret.err().unwrap()),
+                "Failed to open snapshot file: Is a directory (os error 21)"
             );
-            std::fs::remove_file(invalid_path).expect("failed to delete invalid file");
 
-            // Opening correct snapshot file should work.
-            let mut image = SnapshotImage::open_existing(snapshot_path, nmsrs, ncpuids)
-                .expect("failed to open existing snapshot");
+            // Test error case: path points to an invalid snapshot.
+            let bad_snap = NamedTempFile::new().unwrap().into_temp_path();
+            let ret = SnapshotImage::open_existing(bad_snap);
+            assert!(ret.is_err());
+            assert_eq!(
+                format!("{}", ret.err().unwrap()),
+                "Failed to open snapshot file: Invalid argument (os error 22)"
+            );
 
-            // Deserialization should be possible.
-            assert!(image.can_deserialize().is_ok());
-
-            // Check vm state deserialization. Does not impl PartialEq to be able to compare.
-            assert!(image.kvm_vm_state().is_some());
-
-            // Check vcpu deserialization.
-
-            // Correct deser.
-            for i in 0..vcpu_count {
-                let state = image.deser_vcpu(i as usize).expect("failed to deser vcpu");
-                let orig = vcpu_state();
-                assert!(vcpu_states_eq(&orig, &state));
-            }
-
-            // Errors.
             {
-                // Test invalid vcpu index.
-                assert_eq!(
-                    image.deser_vcpu((vcpu_count + 1) as usize).unwrap_err(),
-                    Error::InvalidVcpuIndex
+                // Test error case: invalid magic number in header.
+                let bad_snap = NamedTempFile::new().unwrap();
+                let bad_snap_path = bad_snap.into_temp_path();
+                let mut bad_header = header.clone();
+                bad_header.magic_id = SNAPSHOT_MAGIC + 1;
+                let bad_image_path = make_snapshot(
+                    &bad_snap_path,
+                    vm_config.clone(),
+                    vm_state.clone(),
+                    vcpu_state.clone(),
+                    bad_header.clone(),
                 );
-                let flags = image.header.flags;
-                image.header.flags = 0;
-                // Test invalid vcpu index.
-                assert_eq!(image.deser_vcpu(0).unwrap_err(), Error::VcpusNotSerialized);
-                image.header.flags = flags;
+                assert!(std::fs::metadata(bad_image_path.as_str()).is_ok());
+                let ret = SnapshotImage::open_existing(bad_image_path.as_str());
+                assert!(ret.is_err());
+                assert_eq!(
+                    format!("{}", ret.err().unwrap()),
+                    "Bad snapshot magic number."
+                );
             }
+
+            {
+                // Test error case: invalid version number in header.
+                let bad_snap = NamedTempFile::new().unwrap();
+                let bad_snap_path = bad_snap.into_temp_path();
+                let mut bad_header = header.clone();
+                bad_header.version = SNAPSHOT_VERSION + 1;
+                let bad_image_path = make_snapshot(
+                    &bad_snap_path,
+                    vm_config.clone(),
+                    vm_state.clone(),
+                    vcpu_state.clone(),
+                    bad_header.clone(),
+                );
+                let ret = SnapshotImage::open_existing(bad_image_path.as_str());
+                assert!(ret.is_err());
+                assert_eq!(
+                    format!("{}", ret.err().unwrap()),
+                    format!("Unsupported snapshot version: {}.", bad_header.version)
+                );
+            }
+
+            {
+                // Test error case: incorrect vCPU count in header.
+                let bad_snap = NamedTempFile::new().unwrap();
+                let bad_snap_path = bad_snap.into_temp_path();
+                let mut bad_header = header.clone();
+                bad_header.vcpu_count = 2;
+                let bad_image_path = make_snapshot(
+                    &bad_snap_path,
+                    vm_config.clone(),
+                    vm_state.clone(),
+                    vcpu_state.clone(),
+                    bad_header.clone(),
+                );
+                let ret = SnapshotImage::open_existing(bad_image_path.as_str());
+                assert!(ret.is_err());
+                assert_eq!(
+                    format!("{}", ret.err().unwrap()),
+                    "The vCPU count in the snapshot header does not match the number of vCPUs serialized in the snapshot."
+                );
+            }
+
+            {
+                // Test error case: incorrect memory file path in header.
+                let bad_snap = NamedTempFile::new().unwrap();
+                let bad_snap_path = bad_snap.into_temp_path();
+                let mut bad_header = header.clone();
+                bad_header.memfile = "/foo/bar".to_string();
+                let bad_image_path = make_snapshot(
+                    &bad_snap_path,
+                    vm_config.clone(),
+                    vm_state.clone(),
+                    vcpu_state.clone(),
+                    bad_header.clone(),
+                );
+                let ret = SnapshotImage::open_existing(bad_image_path.as_str());
+                assert!(ret.is_err());
+                assert_eq!(
+                    format!("{}", ret.err().unwrap()),
+                    "Cannot access guest memory file. No such file or directory (os error 2)"
+                );
+            }
+
+            {
+                // Test error case: incorrect guest memory size in header.
+                let bad_snap = NamedTempFile::new().unwrap();
+                let bad_snap_path = bad_snap.into_temp_path();
+                let mut bad_header = header.clone();
+                bad_header.mem_size_mib = vm_config.mem_size_mib.clone().unwrap() as u64 + 1;
+                let bad_image_path = make_snapshot(
+                    &bad_snap_path,
+                    vm_config.clone(),
+                    vm_state.clone(),
+                    vcpu_state.clone(),
+                    bad_header.clone(),
+                );
+                let ret = SnapshotImage::open_existing(bad_image_path.as_str());
+                assert!(ret.is_err());
+                assert_eq!(
+                    format!("{}", ret.err().unwrap()),
+                    "The memory file size saved in the snapshot header does not match the size of the memory file."
+                );
+            }
+
+            // Good case: valid snapshot.
+            let ret = SnapshotImage::open_existing(snapshot_path);
+            assert!(ret.is_ok());
+            let image = ret.unwrap();
+
+            // Verify header deserialization.
+            assert!(header.eq(&image.microvm_state.header));
+
+            // Verify VM state deserialization.
+            assert!(Some(vm_state).eq(&image.microvm_state.vm_state));
+
+            // Verify vCPU state deserialization.
+            assert!(vec![vcpu_state].eq(&image.microvm_state.vcpu_states));
         }
-
-        // Remove snapshot file.
-        std::fs::remove_file(snapshot_path).expect("failed to delete snapshot");
-    }
-
-    fn vcpu_states_eq(one: &VcpuState, other: &VcpuState) -> bool {
-        one.cpuid == other.cpuid
-            && one.msrs == other.msrs
-            && one.debug_regs == other.debug_regs
-            && one.sregs == other.sregs
-            && one.mp_state == other.mp_state
-            && one.regs == other.regs
-            && one.vcpu_events == other.vcpu_events
-            && one.xcrs == other.xcrs
     }
 
     #[test]
@@ -1032,61 +713,83 @@ mod tests {
         let err0_str = "Success (os error 0)";
 
         assert_eq!(
+            format!("{}", Error::BadMagicNumber),
+            "Bad snapshot magic number."
+        );
+        assert_eq!(format!("{}", Error::BadVcpuCount),
+                   "The vCPU count in the snapshot header does not match the number of vCPUs serialized in the snapshot.");
+        assert_eq!(
             format!("{}", Error::CreateNew(io::Error::from_raw_os_error(0))),
             format!("Failed to create new snapshot file: {}", err0_str)
         );
-        assert_eq!(format!("{}", Error::InvalidVcpuIndex), "Invalid vCPU index");
+        assert_eq!(
+            format!(
+                "{}",
+                Error::Deserialize(SerializationError::from(io::Error::from_raw_os_error(0)))
+            ),
+            format!("Failed to deserialize: io error: {}", err0_str)
+        );
+        assert_eq!(
+            format!("{}", Error::InvalidVcpuIndex),
+            "Invalid vCPU index."
+        );
         assert_eq!(
             format!("{}", Error::InvalidFileType),
-            "Invalid snapshot file type"
+            "Invalid snapshot file type."
         );
         assert_eq!(
-            format!("{}", Error::InvalidSnapshot),
-            "Invalid snapshot file"
+            format!("{}", Error::IO(io::Error::from_raw_os_error(0))),
+            format!("Input/output error. {}", err0_str)
         );
         assert_eq!(
-            format!("{}", Error::InvalidSnapshotSize),
-            "Invalid snapshot file size"
+            format!("{}", Error::Memfile(io::Error::from_raw_os_error(0))),
+            format!("Cannot access guest memory file. {}", err0_str)
+        );
+        assert_eq!(
+            format!("{}", Error::MemfileSize),
+            "The memory file size saved in the snapshot header does not match the size of the memory file."
         );
         assert_eq!(
             format!("{}", Error::MissingVcpuNum),
-            "Missing number of vCPUs"
+            "Missing number of vCPUs."
         );
         assert_eq!(
             format!("{}", Error::MissingMemFile),
-            "Missing guest memory file"
+            "Missing guest memory file."
         );
         assert_eq!(
             format!("{}", Error::MissingMemSize),
-            "Missing guest memory size"
+            "Missing guest memory size."
+        );
+        assert_eq!(
+            format!("{}", Error::MissingReaderWriter),
+            "Missing snapshot reader/writer."
         );
         assert_eq!(
             format!("{}", Error::Mmap(io::Error::from_raw_os_error(0))),
             format!("Failed to map memory: {}", err0_str)
         );
         assert_eq!(
-            format!("{}", Error::Munmap(io::Error::from_raw_os_error(0))),
-            format!("Failed to unmap memory: {}", err0_str)
-        );
-        assert_eq!(
-            format!("{}", Error::MsyncHeader(io::Error::from_raw_os_error(0))),
-            format!("Failed to synchronize snapshot header: {}", err0_str)
-        );
-        assert_eq!(
             format!("{}", Error::OpenExisting(io::Error::from_raw_os_error(0))),
             format!("Failed to open snapshot file: {}", err0_str)
         );
         assert_eq!(
+            format!(
+                "{}",
+                Error::Serialize(SerializationError::from(io::Error::from_raw_os_error(0)))
+            ),
+            format!(
+                "Failed to serialize snapshot content. io error: {}",
+                err0_str
+            )
+        );
+        assert_eq!(
+            format!("{}", Error::UnsupportedVersion(42)),
+            "Unsupported snapshot version: 42."
+        );
+        assert_eq!(
             format!("{}", Error::Truncate(io::Error::from_raw_os_error(0))),
             format!("Failed to truncate snapshot file: {}", err0_str)
-        );
-        assert_eq!(
-            format!("{}", Error::VcpusNotSerialized),
-            "vCPUs not serialized in the snapshot"
-        );
-        assert_eq!(
-            format!("{}", Error::VmNotSerialized),
-            "VM state not serialized in the snapshot"
         );
     }
 }

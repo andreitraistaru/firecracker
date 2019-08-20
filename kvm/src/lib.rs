@@ -206,7 +206,8 @@ impl Kvm {
             return Err(io::Error::last_os_error());
         }
 
-        Ok(cpuid)
+        // TODO HACK! #86 until FAMstruct is integrated
+        Ok(CpuId::from_entries(cpuid.as_entries_slice()))
     }
 
     /// X86 specific call to read list of MSRs available for VMs.

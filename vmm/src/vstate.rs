@@ -351,7 +351,6 @@ impl Vm {
 /// Structure holding VM kvm state.
 #[cfg(target_arch = "x86_64")]
 #[derive(Clone, Default, Deserialize, Serialize)]
-#[repr(C)]
 pub struct VmState {
     pitstate: kvm_pit_state2,
     clock: kvm_clock_data,
@@ -1014,7 +1013,7 @@ impl Vcpu {
             // Paused ---- ResumeFromSnapshot ----> Running
             #[cfg(target_arch = "x86_64")]
             Ok(VcpuEvent::Deserialize(vcpu_state)) => {
-                self.restore_state(*vcpu_state)
+                self.restore_state(&vcpu_state)
                     .expect("restore state failed");
                 self.response_sender
                     .send(VcpuResponse::Deserialized)
@@ -1042,7 +1041,7 @@ impl Vcpu {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn save_state(&self) -> Result<VcpuState> {
+    pub(crate) fn save_state(&self) -> Result<VcpuState> {
         // Build the list of MSRs we want to save.
         let num_msrs = self.msr_list.as_original_struct().len();
         let mut msrs = KvmMsrs::new(num_msrs);
@@ -1104,7 +1103,7 @@ impl Vcpu {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn restore_state(&self, state: VcpuState) -> Result<()> {
+    fn restore_state(&self, state: &VcpuState) -> Result<()> {
         self.fd
             .set_cpuid2(&state.cpuid)
             .map_err(Error::VcpuSetCpuid)?;
@@ -1159,7 +1158,6 @@ pub struct VcpuState {
 mod tests {
     use std::fmt;
     use std::fs::File;
-    use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::thread;
@@ -1931,35 +1929,17 @@ mod tests {
     #[test]
     fn test_vcpu_save_restore_state() {
         let (_vm, vcpu) = setup_vcpu();
-        {
-            let state_res = vcpu.save_state();
-            assert!(state_res.is_ok());
-            let state = state_res.unwrap();
-            let serialized_state = bincode::serialize(&state).unwrap();
-            let deserialized_state =
-                bincode::deserialize::<VcpuState>(serialized_state.as_slice()).unwrap();
-            assert!(vcpu.restore_state(deserialized_state).is_ok());
-        }
+        let state_res = vcpu.save_state();
+        assert!(state_res.is_ok());
 
-        unsafe { libc::close(vcpu.fd.as_raw_fd()) };
+        // The error case cannot be safely exercised because `save_state` can only fail if the
+        // vCPU fd is invalid. There is no guarantee that another test running in parallel will
+        // not recreate the same fd and cause a false positive.
 
-        {
-            let state = VcpuState {
-                cpuid: CpuId::new(1),
-                msrs: KvmMsrs::new(1),
-                debug_regs: Default::default(),
-                lapic: Default::default(),
-                mp_state: Default::default(),
-                regs: Default::default(),
-                sregs: Default::default(),
-                vcpu_events: Default::default(),
-                xcrs: Default::default(),
-                xsave: Default::default(),
-            };
-            let serialized_state = bincode::serialize(&state).unwrap();
-            let deserialized_state =
-                bincode::deserialize::<VcpuState>(serialized_state.as_slice()).unwrap();
-            assert!(vcpu.restore_state(deserialized_state).is_err());
-        }
+        let state = state_res.unwrap();
+        let serialized_state = bincode::serialize(&state).unwrap();
+        let deserialized_state =
+            bincode::deserialize::<VcpuState>(serialized_state.as_slice()).unwrap();
+        assert!(vcpu.restore_state(&deserialized_state).is_ok());
     }
 }

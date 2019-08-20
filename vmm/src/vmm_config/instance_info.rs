@@ -102,9 +102,15 @@ pub enum PauseMicrovmError {
     SaveVcpuState(Option<vstate::Error>),
     /// Failed to save VM state.
     SaveVmState(vstate::Error),
+    /// Failed to serialize header.
+    #[cfg(target_arch = "x86_64")]
+    SerializeHeader(snapshot::Error),
     /// Failed to serialize vCPU state.
     #[cfg(target_arch = "x86_64")]
     SerializeVcpu(snapshot::Error),
+    /// Failed to serialize VM state.
+    #[cfg(target_arch = "x86_64")]
+    SerializeVmState(snapshot::Error),
     /// Failed to send event.
     SignalVcpu(vstate::Error),
     /// Failed to stop vcpus.
@@ -133,7 +139,11 @@ impl Display for PauseMicrovmError {
             },
             SaveVmState(ref e) => write!(f, "Failed to save VM state: {:?}", e),
             #[cfg(target_arch = "x86_64")]
+            SerializeHeader(ref e) => write!(f, "Failed to serialize header: {:?}", e),
+            #[cfg(target_arch = "x86_64")]
             SerializeVcpu(ref e) => write!(f, "Failed to serialize vCPU state: {:?}", e),
+            #[cfg(target_arch = "x86_64")]
+            SerializeVmState(ref e) => write!(f, "Failed to serialize VM state: {}", e),
             SignalVcpu(ref e) => write!(f, "Failed to signal vCPU: {:?}", e),
             StopVcpus(ref e) => write!(f, "Failed to stop vcpus: {}", e),
             #[cfg(target_arch = "x86_64")]
@@ -150,8 +160,17 @@ pub enum ResumeMicrovmError {
     /// Failed to deserialize vCPU state.
     #[cfg(target_arch = "x86_64")]
     DeserializeVcpu(snapshot::Error),
+    /// Failed to deserialize VM state.
+    #[cfg(target_arch = "x86_64")]
+    DeserializeVmState(snapshot::Error),
     /// Sanity checks failed.
     MicroVMInvalidState(StateError),
+    #[cfg(target_arch = "x86_64")]
+    /// Missing VM state in snapshot file.
+    MissingVmState,
+    #[cfg(target_arch = "x86_64")]
+    /// Missing snapshot file.
+    MissingSnapshot,
     /// Cannot open the snapshot image file.
     #[cfg(target_arch = "x86_64")]
     OpenSnapshotFile(snapshot::Error),
@@ -176,8 +195,14 @@ impl Display for ResumeMicrovmError {
         use self::ResumeMicrovmError::*;
         match *self {
             #[cfg(target_arch = "x86_64")]
-            DeserializeVcpu(ref e) => write!(f, "Failed to deserialize vCPU state: {:?}", e),
+            DeserializeVcpu(ref e) => write!(f, "Failed to deserialize vCPU state: {}", e),
+            #[cfg(target_arch = "x86_64")]
+            DeserializeVmState(ref e) => write!(f, "Failed to deserialize VM state: {}", e),
             MicroVMInvalidState(ref e) => write!(f, "{}", e),
+            #[cfg(target_arch = "x86_64")]
+            MissingVmState => write!(f, "Missing VM state in snapshot file"),
+            #[cfg(target_arch = "x86_64")]
+            MissingSnapshot => write!(f, "Missing snapshot file"),
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(ref err) => {
                 write!(f, "Cannot open the snapshot image file: {:?}", err)
@@ -455,6 +480,16 @@ mod tests {
             )
         );
         assert_eq!(
+            format!(
+                "{}",
+                SaveMmioDeviceState(MmioDeviceStateError::SaveSpecificVirtioDevice(
+                    SpecificVirtioDeviceStateError::InvalidDeviceType
+                ))
+            ),
+            "Cannot save a mmio device. SaveSpecificVirtioDevice(InvalidDeviceType)"
+        );
+
+        assert_eq!(
             format!("{}", SaveVcpuState(None)),
             "Failed to save vCPU state.".to_string()
         );
@@ -479,6 +514,11 @@ mod tests {
                 "Failed to serialize vCPU state: {:?}",
                 snapshot::Error::InvalidFileType
             )
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            format!("{}", SerializeVmState(snapshot::Error::InvalidFileType)),
+            "Failed to serialize VM state: Invalid snapshot file type."
         );
         assert_eq!(
             format!("{}", SignalVcpu(vstate::Error::NotEnoughMemorySlots)),
@@ -524,14 +564,21 @@ mod tests {
         assert_eq!(
             format!("{}", DeserializeVcpu(snapshot::Error::InvalidFileType)),
             format!(
-                "Failed to deserialize vCPU state: {:?}",
+                "Failed to deserialize vCPU state: {}",
                 snapshot::Error::InvalidFileType
             )
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            format!("{}", DeserializeVmState(snapshot::Error::InvalidFileType)),
+            "Failed to deserialize VM state: Invalid snapshot file type."
         );
         assert_eq!(
             format!("{}", MicroVMInvalidState(StateError::MicroVMAlreadyRunning)),
             format!("{}", StateError::MicroVMAlreadyRunning)
         );
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(format!("{}", MissingSnapshot), "Missing snapshot file");
         #[cfg(target_arch = "x86_64")]
         assert_eq!(
             format!("{}", OpenSnapshotFile(snapshot::Error::InvalidFileType)),
@@ -539,6 +586,20 @@ mod tests {
                 "Cannot open the snapshot image file: {:?}",
                 snapshot::Error::InvalidFileType
             )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                RestoreVirtioDeviceState(SpecificVirtioDeviceStateError::InvalidDeviceType)
+            ),
+            "Failed to restore MMIO device state: InvalidDeviceType"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                ReregisterMmioDevice(device_manager::mmio::Error::ActivationFailed)
+            ),
+            "Failed to reregister MMIO device: ActivationFailed"
         );
         assert_eq!(
             format!("{}", RestoreVcpuState),
