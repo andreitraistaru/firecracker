@@ -2261,14 +2261,6 @@ impl Vmm {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn save_mmio_devices(&mut self) -> std::result::Result<(), MmioDeviceStateError> {
-        // TODO: save devices to file
-        self.mmio_device_states()?;
-
-        Ok(())
-    }
-
-    #[cfg(target_arch = "x86_64")]
     fn restore_virtio_device(
         &mut self,
         device_state: &MmioDeviceState,
@@ -2356,13 +2348,14 @@ impl Vmm {
             .save_state()
             .map_err(PauseMicrovmError::SaveVmState)?;
 
-        // Serialize devices
-        // TODO
+        let device_states = self
+            .mmio_device_states()
+            .map_err(PauseMicrovmError::SaveMmioDeviceState)?;
 
         self.snapshot_image
             .as_mut()
             .ok_or(PauseMicrovmError::InvalidSnapshot)?
-            .serialize_microvm(header, vm_state, vcpu_states)
+            .serialize_microvm(header, vm_state, vcpu_states, device_states)
             .map_err(PauseMicrovmError::SerializeVmState)?;
 
         // Sync guest memory.
@@ -2479,7 +2472,7 @@ impl Vmm {
         }
         self.register_events()?;
 
-        self.restore_mmio_devices(&vec![])?;
+        self.restore_mmio_devices(snapshot_image.microvm_state.device_states.as_slice())?;
 
         self.create_vcpus(request_ts.clone())?;
 
@@ -2763,9 +2756,7 @@ mod tests {
 
     use self::tempfile::NamedTempFile;
     use arch::DeviceType;
-    use devices::virtio::{
-        ActivateResult, BlockEpollHandler, MmioDevice, MmioDeviceStates, NetEpollHandler, Queue,
-    };
+    use devices::virtio::{ActivateResult, BlockEpollHandler, MmioDevice, NetEpollHandler, Queue};
     use devices::BusDevice;
     use net_util::MacAddr;
     use std::path::Path;
@@ -2995,6 +2986,9 @@ mod tests {
 
         assert!(mmio_device.activate());
     }
+
+    #[derive(Deserialize, Serialize)]
+    struct MmioDeviceStates(Vec<MmioDeviceState>);
 
     #[test]
     fn test_device_handler() {

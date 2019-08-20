@@ -606,15 +606,6 @@ impl MmioDeviceState {
     }
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct MmioDeviceStates(pub Vec<MmioDeviceState>);
-
-impl MmioDeviceStates {
-    pub fn new() -> Self {
-        MmioDeviceStates(vec![])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use byteorder::{ByteOrder, LittleEndian};

@@ -17,6 +17,7 @@ use std::path::Path;
 
 use bincode::Error as SerializationError;
 
+use devices::virtio::MmioDeviceState;
 use serialize::SnapshotReaderWriter;
 use vmm_config::machine_config::VmConfig;
 use vstate::{VcpuState, VmState};
@@ -109,6 +110,7 @@ pub struct MicrovmState {
     pub header: SnapshotHdr,
     pub vm_state: Option<VmState>,
     pub vcpu_states: Vec<VcpuState>,
+    pub device_states: Vec<MmioDeviceState>,
 }
 
 pub struct SnapshotImage {
@@ -136,6 +138,7 @@ impl SnapshotImage {
             header,
             vm_state: None,
             vcpu_states: vec![],
+            device_states: vec![],
         };
         Ok(SnapshotImage {
             file,
@@ -175,11 +178,13 @@ impl SnapshotImage {
         header: SnapshotHdr,
         vm_state: VmState,
         vcpu_states: Vec<VcpuState>,
+        device_states: Vec<MmioDeviceState>,
     ) -> Result<()> {
         self.microvm_state = MicrovmState {
             header,
             vm_state: Some(vm_state),
             vcpu_states,
+            device_states,
         };
         let serialized_microvm =
             bincode::serialize(&self.microvm_state).map_err(Error::Serialize)?;
@@ -444,6 +449,7 @@ mod tests {
             header: header,
             vm_state: None,
             vcpu_states: vec![vcpu_state],
+            device_states: vec![],
         };
         let file = NamedTempFile::new().unwrap().into_file();
         let fd = file.as_raw_fd();
@@ -468,7 +474,7 @@ mod tests {
         let snapshot_path = tmp_snapshot_path.to_str().unwrap();
         let mut image = SnapshotImage::create_new(snapshot_path, vm_config).unwrap();
         image
-            .serialize_microvm(header, vm_state, vec![vcpu_state])
+            .serialize_microvm(header, vm_state, vec![vcpu_state], vec![])
             .unwrap();
         snapshot_path.to_string()
     }
@@ -552,7 +558,12 @@ mod tests {
             let mut image = ret.unwrap();
 
             assert!(image
-                .serialize_microvm(header.clone(), vm_state.clone(), vec![vcpu_state.clone()])
+                .serialize_microvm(
+                    header.clone(),
+                    vm_state.clone(),
+                    vec![vcpu_state.clone()],
+                    vec![]
+                )
                 .is_ok());
         }
 
