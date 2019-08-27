@@ -308,20 +308,23 @@ class Tap:
         """
         run(
             'ip tuntap add mode tap name ' + name,
-            shell=True,
-            check=True
+            shell=True, check=True
         )
-        run(
-            'ip link set {} netns {}'.format(name, netns),
-            shell=True,
-            check=True
-        )
-        if ip:
-            run('ip netns exec {} ifconfig {} {} up'.format(
-                netns,
-                name,
-                ip
-            ), shell=True, check=True)
+        if netns:
+            run(
+                'ip link set {} netns {}'.format(name, netns),
+                shell=True, check=True
+            )
+            if ip:
+                run('ip netns exec {} ifconfig {} {} up'.format(
+                    netns,
+                    name,
+                    ip
+                ), shell=True, check=True)
+        else:
+            if ip:
+                run('ifconfig {} {} up'.format(name, ip),
+                    shell=True, check=True)
         self._name = name
         self._netns = netns
 
@@ -337,24 +340,44 @@ class Tap:
 
     def __del__(self):
         """Destructor doing tap interface clean up."""
-        _ = run(
-            'ip netns exec {} ip link set {} down'.format(
-                self.netns,
-                self.name
-            ),
-            shell=True,
-            stderr=PIPE
-        )
-        _ = run(
-            'ip netns exec {} ip link delete {}'.format(self.netns, self.name),
-            shell=True,
-            stderr=PIPE
-        )
-        _ = run(
-            'ip netns exec {} ip tuntap del mode tap name {}'.format(
-                self.netns,
-                self.name
-            ),
-            shell=True,
-            stderr=PIPE
-        )
+        if self.netns:
+            _ = run(
+                'ip netns exec {} ip link set {} down'.format(
+                    self.netns,
+                    self.name
+                ),
+                shell=True,
+                stderr=PIPE
+            )
+            _ = run(
+                'ip netns exec {} ip link delete {}'.format(
+                    self.netns,
+                    self.name
+                ),
+                shell=True,
+                stderr=PIPE
+            )
+            _ = run(
+                'ip netns exec {} ip tuntap del mode tap name {}'.format(
+                    self.netns,
+                    self.name
+                ),
+                shell=True,
+                stderr=PIPE
+            )
+        else:
+            _ = run(
+                'ip link set {} down'.format(self.name),
+                shell=True,
+                stderr=PIPE
+            )
+            _ = run(
+                'ip link delete {}'.format(self.name),
+                shell=True,
+                stderr=PIPE
+            )
+            _ = run(
+                'ip tuntap del mode tap name {}'.format(self.name),
+                shell=True,
+                stderr=PIPE
+            )

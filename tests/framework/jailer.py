@@ -157,12 +157,12 @@ class JailerContext:
         if self.netns:
             run('ip netns add {}'.format(self.netns), shell=True)
 
-    def cleanup(self, force=True):
+    def cleanup(self, reuse_jail=False):
         """Clean up this jailer context."""
         # When force is false, the only resources that get removed
-        # are the one that firecracker creates (i.e api socked and dev folder).
+        # are the one that firecracker creates (i.e api socket and dev folder).
         # This way, the chroot folder can be reused.
-        if force:
+        if not reuse_jail:
             shutil.rmtree(self.chroot_path(), ignore_errors=True)
         else:
             os.remove(self.api_socket_path())
