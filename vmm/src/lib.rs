@@ -1635,6 +1635,12 @@ impl Vmm {
             error!("Failed to log metrics while stopping: {}", e);
         }
 
+        // Sync the guest memory.
+        if let Some(ref guest_memory) = self.guest_memory {
+            // The msync should fail if the guest memory is not file backed.
+            let _ = guest_memory.sync();
+        }
+
         // Exit from Firecracker using the provided exit code. Safe because we're terminating
         // the process anyway.
         unsafe {
