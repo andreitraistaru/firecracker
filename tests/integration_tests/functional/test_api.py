@@ -100,13 +100,15 @@ def test_api_put_update_pre_boot(test_microvm_with_api):
         'vcpu_count': 4,
         'ht_enabled': True,
         'mem_size_mib': 256,
-        'cpu_template': 'C3'
+        'cpu_template': 'C3',
+        'memfile': 'mem.file'
     }
     response = test_microvm.machine_cfg.put(
         vcpu_count=microvm_config_json['vcpu_count'],
         ht_enabled=microvm_config_json['ht_enabled'],
         mem_size_mib=microvm_config_json['mem_size_mib'],
-        cpu_template=microvm_config_json['cpu_template']
+        cpu_template=microvm_config_json['cpu_template'],
+        memfile=microvm_config_json['memfile']
     )
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
@@ -125,6 +127,9 @@ def test_api_put_update_pre_boot(test_microvm_with_api):
 
     cpu_template = str(microvm_config_json['cpu_template'])
     assert response_json['cpu_template'] == cpu_template
+
+    memfile = str(microvm_config_json['memfile'])
+    assert response_json['memfile'] == memfile
 
 
 def test_net_api_put_update_pre_boot(test_microvm_with_api):
@@ -767,3 +772,22 @@ def test_api_vsock(test_microvm_with_api):
         guest_cid=18
     )
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
+
+
+def test_api_file_backed_memory(test_microvm_with_api):
+    """Test file backed guest memory configuration."""
+    test_microvm = test_microvm_with_api
+    test_microvm.spawn()
+
+    mem_size_mib = 256
+    memfile = os.path.basename(test_microvm.tmp_path())
+    test_microvm.basic_config(mem_size_mib=mem_size_mib, memfile=memfile)
+    memfile_path = os.path.join(test_microvm.jailer.chroot_path(), memfile)
+
+    test_microvm.start()
+
+    time.sleep(0.3)
+
+    assert os.path.exists(memfile_path)
+    assert os.path.isfile(memfile_path)
+    assert os.path.getsize(memfile_path) == mem_size_mib * 1024 * 1024

@@ -269,7 +269,8 @@ class MachineConfigure:
             vcpu_count=None,
             mem_size_mib=None,
             ht_enabled=None,
-            cpu_template=None
+            cpu_template=None,
+            memfile=None
     ):
         """Compose the json associated to this type of API request."""
         datax = {}
@@ -281,6 +282,8 @@ class MachineConfigure:
             datax['ht_enabled'] = ht_enabled
         if cpu_template is not None:
             datax['cpu_template'] = cpu_template
+        if memfile is not None:
+            datax['memfile'] = memfile
         return datax
 
 

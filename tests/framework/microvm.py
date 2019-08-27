@@ -62,6 +62,7 @@ class Microvm:
         self._fsfiles_path = os.path.join(self._path, MICROVM_FSFILES_RELPATH)
         self._kernel_file = ''
         self._rootfs_file = ''
+        self._memfile = ''
 
         # The binaries this microvm will use to start.
         self._fc_binary_path = fc_binary_path
@@ -208,6 +209,16 @@ class Microvm:
         """Set the memory usage events queue."""
         self._memory_events_queue = queue
 
+    @property
+    def memfile(self):
+        """Return the path of file backing the guest memory."""
+        return self._memfile
+
+    @memfile.setter
+    def memfile(self, path):
+        """Set the path of file backing the guest memory."""
+        self._memfile = path
+
     def create_jailed_resource(self, path):
         """Create a hard link to some resource inside this microvm."""
         return self.jailer.jailed_path(path, create=True)
@@ -216,8 +227,8 @@ class Microvm:
         """Get the jailed path to a resource."""
         return self.jailer.jailed_path(path, create=False)
 
-    def snapshot_filename(self):
-        """Generate a file name for the snapshot."""
+    def tmp_path(self):
+        """Generate a temporary file name inside the jail."""
         snap_file = NamedTemporaryFile()
         snap_path = self.get_jailed_resource(
             os.path.basename(snap_file.name))
@@ -351,7 +362,8 @@ class Microvm:
         vcpu_count: int = 2,
         ht_enabled: bool = False,
         mem_size_mib: int = 256,
-        add_root_device: bool = True
+        add_root_device: bool = True,
+        memfile: str = None
     ):
         """Shortcut for quickly configuring a microVM.
 
@@ -364,10 +376,12 @@ class Microvm:
         The function checks the response status code and asserts that
         the response is within the interval [200, 300).
         """
+        self.memfile = memfile
         response = self.machine_cfg.put(
             vcpu_count=vcpu_count,
             ht_enabled=ht_enabled,
-            mem_size_mib=mem_size_mib
+            mem_size_mib=mem_size_mib,
+            memfile=self.get_jailed_resource(memfile) if memfile else None
         )
         assert self._api_session.is_status_no_content(response.status_code)
 

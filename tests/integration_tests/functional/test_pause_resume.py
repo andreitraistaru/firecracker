@@ -80,7 +80,7 @@ def test_snapshot_without_devices(test_microvm_with_api):
     assert "Microvm is not running." in response.text
 
     # Start microVM.
-    snapshot_filename = test_microvm.snapshot_filename()
+    snapshot_filename = test_microvm.tmp_path()
     test_microvm.start(snapshot_path=snapshot_filename)
     time.sleep(0.3)
 
