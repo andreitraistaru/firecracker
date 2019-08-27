@@ -34,14 +34,12 @@ pub enum Error {
     BadVcpuCount,
     CreateNew(io::Error),
     Deserialize(SerializationError),
-    InvalidVcpuIndex,
     InvalidFileType,
     IO(io::Error),
     Memfile(io::Error),
     MemfileSize,
     MissingMemFile,
     MissingMemSize,
-    MissingReaderWriter,
     MissingVcpuNum,
     Mmap(io::Error),
     OpenExisting(io::Error),
@@ -58,14 +56,12 @@ impl Display for Error {
             BadVcpuCount => write!(f, "The vCPU count in the snapshot header does not match the number of vCPUs serialized in the snapshot."),
             CreateNew(ref e) => write!(f, "Failed to create new snapshot file: {}", e),
             Deserialize(ref e) => write!(f, "Failed to deserialize: {}", e),
-            InvalidVcpuIndex => write!(f, "Invalid vCPU index."),
             InvalidFileType => write!(f, "Invalid snapshot file type."),
             IO(ref e) => write!(f, "Input/output error. {}", e),
             Memfile(ref e) => write!(f, "Cannot access guest memory file. {}", e),
             MemfileSize => write!(f, "The memory file size saved in the snapshot header does not match the size of the memory file."),
             MissingMemFile => write!(f, "Missing guest memory file."),
             MissingMemSize => write!(f, "Missing guest memory size."),
-            MissingReaderWriter => write!(f, "Missing snapshot reader/writer."),
             MissingVcpuNum => write!(f, "Missing number of vCPUs."),
             Mmap(ref e) => write!(f, "Failed to map memory: {}", e),
             OpenExisting(ref e) => write!(f, "Failed to open snapshot file: {}", e),
@@ -243,10 +239,9 @@ impl AsRawFd for SnapshotImage {
 mod tests {
     extern crate tempfile;
 
-    use self::tempfile::{tempfile, NamedTempFile, TempPath};
+    use self::tempfile::{NamedTempFile, TempPath};
 
     use std::fmt;
-    use std::io::Write;
     use std::sync::mpsc::channel;
 
     use super::super::{KvmContext, Vcpu, Vm};
@@ -275,7 +270,6 @@ mod tests {
                 | Error::BadVcpuCount
                 | Error::CreateNew(_)
                 | Error::Deserialize(_)
-                | Error::InvalidVcpuIndex
                 | Error::InvalidFileType
                 | Error::IO(_)
                 | Error::Memfile(_)
@@ -283,7 +277,6 @@ mod tests {
                 | Error::MissingVcpuNum
                 | Error::MissingMemFile
                 | Error::MissingMemSize
-                | Error::MissingReaderWriter
                 | Error::Mmap(_)
                 | Error::OpenExisting(_)
                 | Error::Serialize(_)
@@ -295,7 +288,6 @@ mod tests {
                 (Error::BadVcpuCount, Error::BadVcpuCount) => true,
                 (Error::CreateNew(_), Error::CreateNew(_)) => true,
                 (Error::Deserialize(_), Error::Deserialize(_)) => true,
-                (Error::InvalidVcpuIndex, Error::InvalidVcpuIndex) => true,
                 (Error::InvalidFileType, Error::InvalidFileType) => true,
                 (Error::IO(_), Error::IO(_)) => true,
                 (Error::Memfile(_), Error::Memfile(_)) => true,
@@ -303,7 +295,6 @@ mod tests {
                 (Error::MemfileSize, Error::MemfileSize) => true,
                 (Error::MissingMemFile, Error::MissingMemFile) => true,
                 (Error::MissingMemSize, Error::MissingMemSize) => true,
-                (Error::MissingReaderWriter, Error::MissingReaderWriter) => true,
                 (Error::Mmap(_), Error::Mmap(_)) => true,
                 (Error::OpenExisting(_), Error::OpenExisting(_)) => true,
                 (Error::Serialize(_), Error::Serialize(_)) => true,
@@ -341,14 +332,14 @@ mod tests {
             VcpuState {
                 cpuid: self.cpuid.clone(),
                 msrs: self.msrs.clone(),
-                debug_regs: self.debug_regs.clone(),
-                lapic: self.lapic.clone(),
-                mp_state: self.mp_state.clone(),
-                regs: self.regs.clone(),
-                sregs: self.sregs.clone(),
-                vcpu_events: self.vcpu_events.clone(),
-                xcrs: self.xcrs.clone(),
-                xsave: self.xsave.clone(),
+                debug_regs: self.debug_regs,
+                lapic: self.lapic,
+                mp_state: self.mp_state,
+                regs: self.regs,
+                sregs: self.sregs,
+                vcpu_events: self.vcpu_events,
+                xcrs: self.xcrs,
+                xsave: self.xsave,
             }
         }
     }
@@ -393,31 +384,6 @@ mod tests {
         (vm, vcpu)
     }
 
-    #[test]
-    fn test_mmap() {
-        let mut f = tempfile().expect("failed to create temp file");
-
-        // Verify mmap errors.
-        SnapshotReaderWriter::mmap_region(&f, 0, 0, true)
-            .expect_err("mmap_region should have failed because size is 0");
-
-        let control_slice = [1, 2, 3, 4];
-        // Write some data in the file.
-        f.write_all(&control_slice)
-            .expect("failed to write to temp file");
-
-        // Do the correct mapping this time.
-        let mapping = SnapshotReaderWriter::mmap_region(&f, 0, control_slice.len() as u64, false)
-            .expect("failed to mmap_region") as *mut u8;
-        // Build a slice from the mmap'ed memory.
-        let slice = unsafe { std::slice::from_raw_parts_mut(mapping, control_slice.len()) };
-        // Verify the mmap'ed contents match the contents written in the file.
-        assert_eq!(slice, control_slice);
-
-        // Clean up.
-        unsafe { libc::munmap(mapping as *mut libc::c_void, control_slice.len()) };
-    }
-
     fn build_valid_header(mem_size_mib: u64, vcpu_count: u8) -> SnapshotHdr {
         SnapshotHdr {
             magic_id: SNAPSHOT_MAGIC,
@@ -446,7 +412,7 @@ mod tests {
 
         let header = build_valid_header(mem_size_mib, vcpu_count);
         let microvm_state = MicrovmState {
-            header: header,
+            header,
             vm_state: None,
             vcpu_states: vec![vcpu_state],
             device_states: vec![],
@@ -480,6 +446,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cyclomatic_complexity)]
     fn test_snapshot_ser_deser() {
         let tmp_snapshot_path = NamedTempFile::new().unwrap().into_temp_path();
         let snapshot_path = tmp_snapshot_path.to_str().unwrap();
@@ -523,7 +490,7 @@ mod tests {
             );
 
             // Test error case: missing guest memory size.
-            let ret = SnapshotImage::create_new(snapshot_path.clone(), vm_config.clone());
+            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone());
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
@@ -533,7 +500,7 @@ mod tests {
             vm_config.mem_size_mib = Some(mem_size_mib);
 
             // Test error case: missing vCPU count.
-            let ret = SnapshotImage::create_new(snapshot_path.clone(), vm_config.clone());
+            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone());
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
@@ -543,7 +510,7 @@ mod tests {
             vm_config.vcpu_count = Some(vcpu_count);
 
             // Test error case: missing memory file.
-            let ret = SnapshotImage::create_new(snapshot_path.clone(), vm_config.clone());
+            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone());
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
@@ -553,7 +520,7 @@ mod tests {
             vm_config.memfile = Some(memfile.clone());
 
             // Good case: snapshot is created.
-            let ret = SnapshotImage::create_new(snapshot_path.clone(), vm_config.clone());
+            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone());
             assert!(ret.is_ok());
             let mut image = ret.unwrap();
 
@@ -684,7 +651,7 @@ mod tests {
                 let bad_snap = NamedTempFile::new().unwrap();
                 let bad_snap_path = bad_snap.into_temp_path();
                 let mut bad_header = header.clone();
-                bad_header.mem_size_mib = vm_config.mem_size_mib.clone().unwrap() as u64 + 1;
+                bad_header.mem_size_mib = vm_config.mem_size_mib.unwrap() as u64 + 1;
                 let bad_image_path = make_snapshot(
                     &bad_snap_path,
                     vm_config.clone(),
@@ -741,10 +708,6 @@ mod tests {
             format!("Failed to deserialize: io error: {}", err0_str)
         );
         assert_eq!(
-            format!("{}", Error::InvalidVcpuIndex),
-            "Invalid vCPU index."
-        );
-        assert_eq!(
             format!("{}", Error::InvalidFileType),
             "Invalid snapshot file type."
         );
@@ -771,10 +734,6 @@ mod tests {
         assert_eq!(
             format!("{}", Error::MissingMemSize),
             "Missing guest memory size."
-        );
-        assert_eq!(
-            format!("{}", Error::MissingReaderWriter),
-            "Missing snapshot reader/writer."
         );
         assert_eq!(
             format!("{}", Error::Mmap(io::Error::from_raw_os_error(0))),

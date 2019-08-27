@@ -329,20 +329,15 @@ impl std::convert::From<PauseMicrovmError> for VmmActionError {
                 MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
                 VcpusInvalidState => ErrorKind::Internal,
             },
-            #[cfg(target_arch = "x86_64")]
-            OpenSnapshotFile(_) => ErrorKind::User,
             VcpuPause => ErrorKind::User,
-            InvalidSnapshot
-            | SaveMmioDeviceState(_)
+            SaveMmioDeviceState(_)
             | SaveVmState(_)
             | SaveVcpuState(_)
             | StopVcpus(_)
             | SyncMemory(_)
             | SignalVcpu(_) => ErrorKind::Internal,
             #[cfg(target_arch = "x86_64")]
-            SerializeHeader(_) | SerializeVcpu(_) | SerializeVmState(_) | SyncHeader(_) => {
-                ErrorKind::Internal
-            }
+            MissingSnapshot | SerializeMicrovmState(_) | InvalidHeader(_) => ErrorKind::Internal,
         };
         VmmActionError::PauseMicrovm(kind, e)
     }
@@ -359,10 +354,10 @@ impl std::convert::From<ResumeMicrovmError> for VmmActionError {
                 VcpusInvalidState => ErrorKind::Internal,
             },
             #[cfg(target_arch = "x86_64")]
-            MissingSnapshot | OpenSnapshotFile(_) => ErrorKind::User,
-            VcpuResume => ErrorKind::User,
+            MissingVmState => ErrorKind::Internal,
             #[cfg(target_arch = "x86_64")]
-            DeserializeVcpu(_) | DeserializeVmState(_) | MissingVmState => ErrorKind::Internal,
+            OpenSnapshotFile(_) => ErrorKind::User,
+            VcpuResume => ErrorKind::User,
             RestoreVirtioDeviceState(_)
             | ReregisterMmioDevice(_)
             | RestoreVmState(_)
@@ -1188,10 +1183,7 @@ impl Vmm {
                 let is_clone = match std::fs::metadata(image) {
                     Ok(metadata) => {
                         if metadata.len() != mem_size as u64 {
-                            // TODO appropriate error
-                            Err(StartMicrovmError::SnapshotBackingFile(
-                                snapshot::Error::InvalidFileType,
-                            ))?;
+                            Err(StartMicrovmError::GuestMemory(GuestMemoryError::FileSize))?;
                             false
                         } else {
                             true
@@ -2354,9 +2346,9 @@ impl Vmm {
 
         self.snapshot_image
             .as_mut()
-            .ok_or(PauseMicrovmError::InvalidSnapshot)?
+            .ok_or(PauseMicrovmError::MissingSnapshot)?
             .serialize_microvm(header, vm_state, vcpu_states, device_states)
-            .map_err(PauseMicrovmError::SerializeVmState)?;
+            .map_err(PauseMicrovmError::SerializeMicrovmState)?;
 
         // Sync guest memory.
         self.guest_memory
@@ -2383,22 +2375,21 @@ impl Vmm {
         let mem_size_mib = self
             .vm_config
             .mem_size_mib
-            .ok_or(PauseMicrovmError::SyncHeader(
+            .ok_or(PauseMicrovmError::InvalidHeader(
                 snapshot::Error::MissingMemSize,
             ))? as u64;
         let vcpu_count = self
             .vm_config
             .vcpu_count
-            .ok_or(PauseMicrovmError::SyncHeader(
+            .ok_or(PauseMicrovmError::InvalidHeader(
                 snapshot::Error::MissingVcpuNum,
             ))?;
         let memfile = self
             .vm_config
             .memfile
             .clone()
-            .ok_or(PauseMicrovmError::SyncHeader(
-                // TODO specific error
-                snapshot::Error::MissingVcpuNum,
+            .ok_or(PauseMicrovmError::InvalidHeader(
+                snapshot::Error::MissingMemFile,
             ))?;
 
         self.do_pause_to_snapshot(SnapshotHdr::new(mem_size_mib, vcpu_count, memfile))
@@ -4414,6 +4405,13 @@ mod tests {
             )),
             ErrorKind::Internal
         );
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            error_kind(StartMicrovmError::SnapshotBackingFile(
+                snapshot::Error::MissingMemFile
+            )),
+            ErrorKind::Internal
+        );
         assert_eq!(
             error_kind(StartMicrovmError::Vcpu(vstate::Error::VcpuUnhandledKvmExit)),
             ErrorKind::Internal
@@ -4464,12 +4462,6 @@ mod tests {
             ErrorKind::Internal
         );
         assert_eq!(
-            error_kind(PauseMicrovmError::SerializeVcpu(
-                snapshot::Error::InvalidFileType
-            )),
-            ErrorKind::Internal
-        );
-        assert_eq!(
             error_kind(PauseMicrovmError::SignalVcpu(vstate::Error::SignalVcpu(
                 io::Error::from_raw_os_error(0)
             ))),
@@ -4482,7 +4474,7 @@ mod tests {
             ErrorKind::Internal
         );
         assert_eq!(
-            error_kind(PauseMicrovmError::SyncHeader(
+            error_kind(PauseMicrovmError::InvalidHeader(
                 snapshot::Error::InvalidFileType
             )),
             ErrorKind::Internal
@@ -4496,12 +4488,6 @@ mod tests {
         assert_eq!(error_kind(PauseMicrovmError::VcpuPause), ErrorKind::User);
 
         // Test `ResumeMicrovmError` conversion.
-        assert_eq!(
-            error_kind(ResumeMicrovmError::DeserializeVcpu(
-                snapshot::Error::InvalidFileType
-            )),
-            ErrorKind::Internal
-        );
         assert_eq!(
             error_kind(ResumeMicrovmError::MicroVMInvalidState(
                 StateError::MicroVMAlreadyRunning
@@ -4520,11 +4506,16 @@ mod tests {
             )),
             ErrorKind::Internal
         );
+        #[cfg(target_arch = "x86_64")]
         assert_eq!(
             error_kind(ResumeMicrovmError::OpenSnapshotFile(
                 snapshot::Error::InvalidFileType
             )),
             ErrorKind::User
+        );
+        assert_eq!(
+            error_kind(ResumeMicrovmError::MissingVmState),
+            ErrorKind::Internal
         );
         assert_eq!(
             error_kind(ResumeMicrovmError::RestoreVmState(

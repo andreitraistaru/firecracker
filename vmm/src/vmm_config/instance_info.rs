@@ -89,35 +89,27 @@ impl Display for KillVcpusError {
 /// Errors associated with pausing the microVM.
 #[derive(Debug)]
 pub enum PauseMicrovmError {
-    /// Invalid snapshot file.
-    InvalidSnapshot,
+    /// Invalid snapshot header.
+    #[cfg(target_arch = "x86_64")]
+    InvalidHeader(snapshot::Error),
     /// Sanity checks failed.
     MicroVMInvalidState(StateError),
-    /// Cannot open the snapshot image file.
+    /// Missing snapshot file.
     #[cfg(target_arch = "x86_64")]
-    OpenSnapshotFile(snapshot::Error),
+    MissingSnapshot,
     /// Failed to save MMIO device state.
     SaveMmioDeviceState(MmioDeviceStateError),
     /// Failed to save vCPU state.
     SaveVcpuState(Option<vstate::Error>),
     /// Failed to save VM state.
     SaveVmState(vstate::Error),
-    /// Failed to serialize header.
+    /// Failed to serialize microVM state.
     #[cfg(target_arch = "x86_64")]
-    SerializeHeader(snapshot::Error),
-    /// Failed to serialize vCPU state.
-    #[cfg(target_arch = "x86_64")]
-    SerializeVcpu(snapshot::Error),
-    /// Failed to serialize VM state.
-    #[cfg(target_arch = "x86_64")]
-    SerializeVmState(snapshot::Error),
+    SerializeMicrovmState(snapshot::Error),
     /// Failed to send event.
     SignalVcpu(vstate::Error),
     /// Failed to stop vcpus.
     StopVcpus(KillVcpusError),
-    /// Failed to sync snapshot.
-    #[cfg(target_arch = "x86_64")]
-    SyncHeader(snapshot::Error),
     /// Failed to sync memory to snapshot.
     SyncMemory(GuestMemoryError),
     /// vCPU pause failed.
@@ -128,10 +120,10 @@ impl Display for PauseMicrovmError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::PauseMicrovmError::*;
         match *self {
-            InvalidSnapshot => write!(f, "Invalid snapshot file."),
-            MicroVMInvalidState(ref e) => write!(f, "{}", e),
             #[cfg(target_arch = "x86_64")]
-            OpenSnapshotFile(ref e) => write!(f, "Cannot open the snapshot image file. {:?}", e),
+            InvalidHeader(ref e) => write!(f, "Failed to sync snapshot: {:?}", e),
+            MicroVMInvalidState(ref e) => write!(f, "{}", e),
+            MissingSnapshot => write!(f, "Missing snapshot file"),
             SaveMmioDeviceState(ref e) => write!(f, "Cannot save a mmio device. {:?}", e),
             SaveVcpuState(ref e) => match e {
                 None => write!(f, "Failed to save vCPU state."),
@@ -139,15 +131,9 @@ impl Display for PauseMicrovmError {
             },
             SaveVmState(ref e) => write!(f, "Failed to save VM state: {:?}", e),
             #[cfg(target_arch = "x86_64")]
-            SerializeHeader(ref e) => write!(f, "Failed to serialize header: {:?}", e),
-            #[cfg(target_arch = "x86_64")]
-            SerializeVcpu(ref e) => write!(f, "Failed to serialize vCPU state: {:?}", e),
-            #[cfg(target_arch = "x86_64")]
-            SerializeVmState(ref e) => write!(f, "Failed to serialize VM state: {}", e),
+            SerializeMicrovmState(ref e) => write!(f, "Failed to serialize VM state: {}", e),
             SignalVcpu(ref e) => write!(f, "Failed to signal vCPU: {:?}", e),
             StopVcpus(ref e) => write!(f, "Failed to stop vcpus: {}", e),
-            #[cfg(target_arch = "x86_64")]
-            SyncHeader(ref e) => write!(f, "Failed to sync snapshot: {:?}", e),
             SyncMemory(ref e) => write!(f, "Failed to sync memory to snapshot: {:?}", e),
             VcpuPause => write!(f, "vCPUs pause failed."),
         }
@@ -157,20 +143,11 @@ impl Display for PauseMicrovmError {
 /// Errors associated with resuming the microVM.
 #[derive(Debug)]
 pub enum ResumeMicrovmError {
-    /// Failed to deserialize vCPU state.
-    #[cfg(target_arch = "x86_64")]
-    DeserializeVcpu(snapshot::Error),
-    /// Failed to deserialize VM state.
-    #[cfg(target_arch = "x86_64")]
-    DeserializeVmState(snapshot::Error),
     /// Sanity checks failed.
     MicroVMInvalidState(StateError),
+    /// VM state is missing from the snapshot file.
     #[cfg(target_arch = "x86_64")]
-    /// Missing VM state in snapshot file.
     MissingVmState,
-    #[cfg(target_arch = "x86_64")]
-    /// Missing snapshot file.
-    MissingSnapshot,
     /// Cannot open the snapshot image file.
     #[cfg(target_arch = "x86_64")]
     OpenSnapshotFile(snapshot::Error),
@@ -194,15 +171,9 @@ impl Display for ResumeMicrovmError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::ResumeMicrovmError::*;
         match *self {
-            #[cfg(target_arch = "x86_64")]
-            DeserializeVcpu(ref e) => write!(f, "Failed to deserialize vCPU state: {}", e),
-            #[cfg(target_arch = "x86_64")]
-            DeserializeVmState(ref e) => write!(f, "Failed to deserialize VM state: {}", e),
             MicroVMInvalidState(ref e) => write!(f, "{}", e),
             #[cfg(target_arch = "x86_64")]
-            MissingVmState => write!(f, "Missing VM state in snapshot file"),
-            #[cfg(target_arch = "x86_64")]
-            MissingSnapshot => write!(f, "Missing snapshot file"),
+            MissingVmState => write!(f, "Missing VM state"),
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(ref err) => {
                 write!(f, "Cannot open the snapshot image file: {:?}", err)
@@ -464,20 +435,8 @@ mod tests {
     fn test_pause_microvm_error_messages() {
         use self::PauseMicrovmError::*;
         assert_eq!(
-            format!("{}", InvalidSnapshot),
-            "Invalid snapshot file.".to_string()
-        );
-        assert_eq!(
             format!("{}", MicroVMInvalidState(StateError::VcpusInvalidState)),
             format!("{}", StateError::VcpusInvalidState)
-        );
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(
-            format!("{}", OpenSnapshotFile(snapshot::Error::InvalidFileType)),
-            format!(
-                "Cannot open the snapshot image file. {:?}",
-                snapshot::Error::InvalidFileType
-            )
         );
         assert_eq!(
             format!(
@@ -507,19 +466,6 @@ mod tests {
                 vstate::Error::NotEnoughMemorySlots
             )
         );
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(
-            format!("{}", SerializeVcpu(snapshot::Error::InvalidFileType)),
-            format!(
-                "Failed to serialize vCPU state: {:?}",
-                snapshot::Error::InvalidFileType
-            )
-        );
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(
-            format!("{}", SerializeVmState(snapshot::Error::InvalidFileType)),
-            "Failed to serialize VM state: Invalid snapshot file type."
-        );
         assert_eq!(
             format!("{}", SignalVcpu(vstate::Error::NotEnoughMemorySlots)),
             format!(
@@ -539,14 +485,6 @@ mod tests {
                 KillVcpusError::MicroVMInvalidState(StateError::VcpusInvalidState)
             )
         );
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(
-            format!("{}", SyncHeader(snapshot::Error::InvalidFileType)),
-            format!(
-                "Failed to sync snapshot: {:?}",
-                snapshot::Error::InvalidFileType
-            )
-        );
         assert_eq!(
             format!("{}", SyncMemory(GuestMemoryError::MemoryRegionOverlap)),
             format!(
@@ -560,32 +498,16 @@ mod tests {
     #[test]
     fn test_resume_microvm_error_messages() {
         use self::ResumeMicrovmError::*;
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(
-            format!("{}", DeserializeVcpu(snapshot::Error::InvalidFileType)),
-            format!(
-                "Failed to deserialize vCPU state: {}",
-                snapshot::Error::InvalidFileType
-            )
-        );
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(
-            format!("{}", DeserializeVmState(snapshot::Error::InvalidFileType)),
-            "Failed to deserialize VM state: Invalid snapshot file type."
-        );
         assert_eq!(
             format!("{}", MicroVMInvalidState(StateError::MicroVMAlreadyRunning)),
             format!("{}", StateError::MicroVMAlreadyRunning)
         );
         #[cfg(target_arch = "x86_64")]
-        assert_eq!(format!("{}", MissingSnapshot), "Missing snapshot file");
+        assert_eq!(format!("{}", MissingVmState), "Missing VM state");
         #[cfg(target_arch = "x86_64")]
         assert_eq!(
-            format!("{}", OpenSnapshotFile(snapshot::Error::InvalidFileType)),
-            format!(
-                "Cannot open the snapshot image file: {:?}",
-                snapshot::Error::InvalidFileType
-            )
+            format!("{}", OpenSnapshotFile(snapshot::Error::MissingMemFile)),
+            "Cannot open the snapshot image file: MissingMemFile"
         );
         assert_eq!(
             format!(
@@ -637,6 +559,18 @@ mod tests {
             format!(
                 "Cannot configure virtual machine. {:?}",
                 vstate::Error::NotEnoughMemorySlots
+            )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                CreateBlockDevice(devices::virtio::block::BlockError::OpenFile(
+                    std::io::Error::from_raw_os_error(0)
+                ))
+            ),
+            format!(
+                "Unable to Create block device. OpenFile({:?})",
+                std::io::Error::from_raw_os_error(0)
             )
         );
         assert_eq!(

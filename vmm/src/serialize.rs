@@ -6,6 +6,9 @@
 // Currently only supports X86_64.
 #![cfg(target_arch = "x86_64")]
 
+// Allow pointer arithmetic with casts.
+#![allow(clippy::ptr_offset_with_cast)]
+
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::io::AsRawFd;
@@ -35,28 +38,8 @@ impl SnapshotReaderWriter {
         })
     }
 
-    /// Address that corresponds to offset 0 in a memory mapped snapshot file.
-    pub fn origin(&self) -> *const libc::c_void {
-        self.base_addr
-    }
-
-    /// Current position of cursor in memory mapped file.
-    pub fn cursor(&self) -> *const libc::c_void {
-        self.cursor
-    }
-
-    /// Manually advance cursor, relative to the starting point.
-    pub fn seek_start(&mut self, offset: u64) {
-        self.cursor = (self.base_addr as u64 + offset) as *mut libc::c_void
-    }
-
-    /// Manually advance cursor, relative to the current position.
-    pub fn seek_current(&mut self, offset: u64) {
-        self.cursor = (self.cursor as u64 + offset) as *mut libc::c_void
-    }
-
     /// Maps a file into memory.
-    pub fn mmap_region(
+    fn mmap_region(
         file: &File,
         offset: u64,
         size: u64,
@@ -91,7 +74,7 @@ impl SnapshotReaderWriter {
 
     fn check_offset(&self, num_bytes: usize) -> std::result::Result<(), io::Error> {
         if self.cursor_offset() + num_bytes > self.mapping_size {
-            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+            Err(io::Error::from_raw_os_error(libc::EINVAL))
         } else {
             Ok(())
         }
@@ -152,21 +135,20 @@ mod tests {
         let tmp_file = NamedTempFile::new().unwrap();
         let fsize = 4;
         let mut buf: Vec<u8> = vec![42u8; fsize];
+        let mut long_buf: Vec<u8> = vec![0u8; fsize + 1];
 
         // Make it a sparse empty file.
         tmp_file.as_file().set_len(fsize as u64).unwrap();
-
         {
             // Error case: bad memory mapping.
-            let ret = SnapshotReaderWriter::new(tmp_file.as_file(), 0, 0, true);
+            let ret = SnapshotReaderWriter::new(tmp_file.as_file(), 0, 0, false);
             assert!(ret.is_err());
 
-            let ret = SnapshotReaderWriter::new(tmp_file.as_file(), 0, fsize as u64, true);
+            let ret = SnapshotReaderWriter::new(tmp_file.as_file(), 0, fsize as u64, false);
             assert!(ret.is_ok());
             let mut reader_writer = ret.unwrap();
 
             // Error case: try to read more than the mapping size.
-            let mut long_buf: Vec<u8> = vec![0u8; fsize + 1];
             let ret = reader_writer.read(&mut long_buf.as_mut_slice());
             assert!(ret.is_err());
 
@@ -175,9 +157,12 @@ mod tests {
             assert!(ret.is_ok());
             assert_eq!(ret.unwrap(), fsize);
             assert_eq!(buf, vec![0u8; fsize]);
+        }
 
-            // Write something in the beginning.
-            reader_writer.seek_start(0);
+        {
+            let ret = SnapshotReaderWriter::new(tmp_file.as_file(), 0, fsize as u64, true);
+            assert!(ret.is_ok());
+            let mut reader_writer = ret.unwrap();
 
             // Error case: try to write more than the mapping size.
             let ret = reader_writer.write(long_buf.as_slice());
@@ -187,6 +172,7 @@ mod tests {
             let ret = reader_writer.write(&42u32.to_le_bytes());
             assert!(ret.is_ok());
             assert_eq!(ret.unwrap(), fsize);
+            assert!(reader_writer.flush().is_ok());
         }
 
         // Save the path. This also closes the file.
@@ -199,7 +185,8 @@ mod tests {
             .open(tmp_path)
             .unwrap();
         buf = vec![0u8; 4];
-        file.read(&mut buf).unwrap();
+        let len_read = file.read(&mut buf).unwrap();
+        assert_eq!(len_read, 4);
         let mut num_buf = [0u8; 4];
         num_buf.copy_from_slice(buf.as_slice());
         assert_eq!(u32::from_le_bytes(num_buf), 42);
