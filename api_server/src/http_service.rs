@@ -876,24 +876,7 @@ mod tests {
             Ok(pr) => {
                 let (sender, receiver) = oneshot::channel();
                 assert!(pr.eq(&ParsedRequest::Sync(
-                    VmmAction::StartMicroVm(None, sender),
-                    receiver
-                )));
-            }
-            _ => assert!(false),
-        }
-
-        let json = "{
-                \"action_type\": \"InstanceStart\",
-                \"payload\": \"/tmp/foo\"
-              }";
-        let body: Chunk = Chunk::from(json);
-
-        match parse_actions_req(path, Method::Put, &body) {
-            Ok(pr) => {
-                let (sender, receiver) = oneshot::channel();
-                assert!(pr.eq(&ParsedRequest::Sync(
-                    VmmAction::StartMicroVm(Some("/tmp/foo".to_string()), sender),
+                    VmmAction::StartMicroVm(sender),
                     receiver
                 )));
             }
@@ -918,6 +901,27 @@ mod tests {
             _ => assert!(false),
         }
 
+        #[cfg(target_arch = "x86_64")]
+        {
+            // PUT PauseToSnapshot
+            let json = r#"{
+                "action_type": "PauseToSnapshot",
+                "payload": "/foo/bar"
+              }"#;
+            let body: Chunk = Chunk::from(json);
+            let path = "/foo";
+            match parse_actions_req(path, Method::Put, &body) {
+                Ok(pr) => {
+                    let (sender, receiver) = oneshot::channel();
+                    assert!(pr.eq(&ParsedRequest::Sync(
+                        VmmAction::PauseToSnapshot("/foo/bar".to_string(), sender),
+                        receiver
+                    )));
+                }
+                _ => assert!(false),
+            }
+        }
+
         // Error cases
 
         // Test PUT with invalid path.
@@ -938,7 +942,7 @@ mod tests {
             "Invalid payload type. Expected a string representing the snapshot path".to_string(),
         );
         let body = r#"{
-            "action_type": "InstanceStart",
+            "action_type": "PauseToSnapshot",
             "payload": {
                 "foo": "bar"
             }

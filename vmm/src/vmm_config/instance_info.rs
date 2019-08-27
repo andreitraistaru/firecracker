@@ -108,6 +108,9 @@ pub enum PauseMicrovmError {
     SerializeMicrovmState(snapshot::Error),
     /// Failed to send event.
     SignalVcpu(vstate::Error),
+    /// Cannot create snapshot backing file.
+    #[cfg(target_arch = "x86_64")]
+    SnapshotBackingFile(snapshot::Error),
     /// Failed to stop vcpus.
     StopVcpus(KillVcpusError),
     /// Failed to sync memory to snapshot.
@@ -132,6 +135,10 @@ impl Display for PauseMicrovmError {
             SaveVmState(ref e) => write!(f, "Failed to save VM state: {:?}", e),
             #[cfg(target_arch = "x86_64")]
             SerializeMicrovmState(ref e) => write!(f, "Failed to serialize VM state: {}", e),
+            #[cfg(target_arch = "x86_64")]
+            SnapshotBackingFile(ref err) => {
+                write!(f, "Cannot create snapshot backing file: {}", err)
+            }
             SignalVcpu(ref e) => write!(f, "Failed to signal vCPU: {:?}", e),
             StopVcpus(ref e) => write!(f, "Failed to stop vcpus: {}", e),
             SyncMemory(ref e) => write!(f, "Failed to sync memory to snapshot: {:?}", e),
@@ -250,9 +257,6 @@ pub enum StartMicrovmError {
     SeccompFilters(seccomp::Error),
     /// Failed to signal vCPU.
     SignalVcpu(vstate::Error),
-    /// Cannot create snapshot backing file
-    #[cfg(target_arch = "x86_64")]
-    SnapshotBackingFile(snapshot::Error),
     /// Cannot create a new vCPU file descriptor.
     Vcpu(vstate::Error),
     /// vCPU configuration failed.
@@ -383,10 +387,6 @@ impl Display for StartMicrovmError {
                 write!(f, "Cannot build seccomp filters. {}", err_msg)
             }
             SignalVcpu(ref err) => write!(f, "Failed to signal vCPU. {:?}", err),
-            #[cfg(target_arch = "x86_64")]
-            SnapshotBackingFile(ref err) => {
-                write!(f, "Cannot create snapshot backing file: {}", err)
-            }
             Vcpu(ref err) => {
                 let mut err_msg = format!("{:?}", err);
                 err_msg = err_msg.replace("\"", "");
@@ -471,6 +471,20 @@ mod tests {
             format!(
                 "Failed to signal vCPU: {:?}",
                 vstate::Error::NotEnoughMemorySlots
+            )
+        );
+
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            format!(
+                "{}",
+                SnapshotBackingFile(snapshot::Error::Truncate(
+                    std::io::Error::from_raw_os_error(0)
+                ))
+            ),
+            format!(
+                "Cannot create snapshot backing file: {}",
+                snapshot::Error::Truncate(std::io::Error::from_raw_os_error(0))
             )
         );
         assert_eq!(
@@ -709,19 +723,6 @@ mod tests {
             format!(
                 "Cannot spawn vCPU thread. {:?}",
                 vstate::Error::NotEnoughMemorySlots
-            )
-        );
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(
-            format!(
-                "{}",
-                SnapshotBackingFile(snapshot::Error::Truncate(
-                    std::io::Error::from_raw_os_error(0)
-                ))
-            ),
-            format!(
-                "Cannot create snapshot backing file: {}",
-                snapshot::Error::Truncate(std::io::Error::from_raw_os_error(0))
             )
         );
     }

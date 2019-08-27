@@ -18,6 +18,8 @@ use DataInit;
 /// Errors associated with handling guest memory regions.
 #[derive(Debug)]
 pub enum Error {
+    /// Failure in creating guest memory backing file.
+    CreateFile(std::io::Error),
     /// Invalid size for guest memory backing file.
     FileSize,
     /// Failure in finding a guest address in any memory regions mapped by this guest.
@@ -36,6 +38,8 @@ pub enum Error {
     MemorySync(std::io::Error),
     /// No memory regions were provided for initializing the guest memory.
     NoMemoryRegions,
+    /// Failure in setting the size of the guest memory backing file.
+    Truncate(std::io::Error),
 }
 type Result<T> = result::Result<T, Error>;
 

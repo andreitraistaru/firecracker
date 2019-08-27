@@ -58,6 +58,7 @@ fn validate_payload(action_body: &ActionBody) -> Result<(), String> {
             }
         }
         ActionType::FlushMetrics
+        | ActionType::InstanceStart
         | ActionType::SendCtrlAltDel
         | ActionType::PauseVCPUs
         | ActionType::ResumeVCPUs => {
@@ -72,13 +73,22 @@ fn validate_payload(action_body: &ActionBody) -> Result<(), String> {
         }
         #[cfg(target_arch = "x86_64")]
         ActionType::PauseToSnapshot => {
-            if action_body.payload.is_some() {
-                return Err(format!(
-                    "{:?} does not support a payload.",
+            match action_body.payload {
+                Some(ref payload) => {
+                    // Expecting to have a String in the payload.
+                    if !payload.is_string() {
+                        return Err(
+                            "Invalid payload type. Expected a string representing the snapshot path"
+                                .to_string(),
+                        );
+                    }
+                    Ok(())
+                }
+                None => Err(format!(
+                    "Payload is required for {:?}.",
                     action_body.action_type
-                ));
+                )),
             }
-            Ok(())
         }
         #[cfg(target_arch = "x86_64")]
         ActionType::ResumeFromSnapshot => {
@@ -96,22 +106,6 @@ fn validate_payload(action_body: &ActionBody) -> Result<(), String> {
                     "Payload is required for {:?}.",
                     action_body.action_type
                 )),
-            }
-        }
-        ActionType::InstanceStart => {
-            match action_body.payload {
-                Some(ref payload) => {
-                    {
-                        // Expecting to have a String in the payload.
-                        if !payload.is_string() {
-                            return Err(
-                            "Invalid payload type. Expected a string representing the snapshot path".to_string(),
-                        );
-                        }
-                        Ok(())
-                    }
-                }
-                None => Ok(()),
             }
         }
     }
@@ -142,21 +136,19 @@ impl IntoParsedRequest for ActionBody {
                 ))
             }
             ActionType::InstanceStart => {
-                // Safe to unwrap because we validated the payload in the validate_payload func.
-                let snapshot_path = self
-                    .payload
-                    .map(|value| value.as_str().unwrap().to_string());
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
-                    VmmAction::StartMicroVm(snapshot_path, sync_sender),
+                    VmmAction::StartMicroVm(sync_sender),
                     sync_receiver,
                 ))
             }
             #[cfg(target_arch = "x86_64")]
             ActionType::PauseToSnapshot => {
+                // Safe to unwrap because we validated the payload in the validate_payload func.
+                let snapshot_path = self.payload.unwrap().as_str().unwrap().to_string();
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
-                    VmmAction::PauseToSnapshot(sync_sender),
+                    VmmAction::PauseToSnapshot(snapshot_path, sync_sender),
                     sync_receiver,
                 ))
             }
@@ -240,14 +232,14 @@ mod tests {
         // Test InstanceStart.
         assert!(validate_payload(&action_body_no_payload(InstanceStart)).is_ok());
         // Error case: InstanceStart with payload.
-        assert!(validate_payload(&action_body_string_payload(InstanceStart)).is_ok());
+        assert!(validate_payload(&action_body_string_payload(InstanceStart)).is_err());
 
         // Test PauseToSnapshot.
         #[cfg(target_arch = "x86_64")]
-        assert!(validate_payload(&action_body_no_payload(PauseToSnapshot)).is_ok());
-        // Error case: PauseToSnapshot with payload.
+        assert!(validate_payload(&action_body_string_payload(PauseToSnapshot)).is_ok());
+        // Error case: PauseToSnapshot without payload.
         #[cfg(target_arch = "x86_64")]
-        assert!(validate_payload(&action_body_string_payload(PauseToSnapshot)).is_err());
+        assert!(validate_payload(&action_body_no_payload(PauseToSnapshot)).is_err());
 
         // Test PauseVCPUs.
         assert!(validate_payload(&action_body_no_payload(PauseVCPUs)).is_ok());
@@ -329,8 +321,7 @@ mod tests {
             }"#;
 
             let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest =
-                ParsedRequest::Sync(VmmAction::StartMicroVm(None, sender), receiver);
+            let req: ParsedRequest = ParsedRequest::Sync(VmmAction::StartMicroVm(sender), receiver);
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
             assert!(result
@@ -338,36 +329,31 @@ mod tests {
                 .into_parsed_request(None, Method::Put)
                 .unwrap()
                 .eq(&req));
-        }
-        {
+
             let json = r#"{
                 "action_type": "InstanceStart",
-                "payload": "/tmp/foo"
+                "payload": "dummy-payload"
             }"#;
 
-            let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest = ParsedRequest::Sync(
-                VmmAction::StartMicroVm(Some("/tmp/foo".to_string()), sender),
-                receiver,
-            );
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
-            assert!(result
-                .unwrap()
-                .into_parsed_request(None, Method::Put)
-                .unwrap()
-                .eq(&req));
+            let res = result.unwrap().into_parsed_request(None, Method::Put);
+            assert!(res.is_err());
+            assert!(res == Err("InstanceStart does not support a payload.".to_string()));
         }
 
         // Test PauseToSnapshot.
         {
             let json = r#"{
-                "action_type": "PauseToSnapshot"
+                "action_type": "PauseToSnapshot",
+                "payload": "/foo/bar"
             }"#;
 
             let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest =
-                ParsedRequest::Sync(VmmAction::PauseToSnapshot(sender), receiver);
+            let req: ParsedRequest = ParsedRequest::Sync(
+                VmmAction::PauseToSnapshot("/foo/bar".to_string(), sender),
+                receiver,
+            );
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
             assert!(result
