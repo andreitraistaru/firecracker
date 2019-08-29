@@ -97,15 +97,11 @@ pub struct TokenBucket {
     refill_time: u64,
 
     // Internal state descriptors.
-    #[serde(skip)]
     budget: u64,
-    #[serde(skip)]
     last_update: u64,
 
     // Fields used for pre-processing optimizations.
-    #[serde(skip)]
     processed_capacity: u64,
-    #[serde(skip)]
     processed_refill_time: u64,
 }
 
