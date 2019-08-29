@@ -36,7 +36,6 @@ pub enum Error {
     Deserialize(SerializationError),
     InvalidFileType,
     IO(io::Error),
-    Memfile(io::Error),
     MemfileSize,
     MissingMemFile,
     MissingMemSize,
@@ -58,8 +57,7 @@ impl Display for Error {
             Deserialize(ref e) => write!(f, "Failed to deserialize: {}", e),
             InvalidFileType => write!(f, "Invalid snapshot file type."),
             IO(ref e) => write!(f, "Input/output error. {}", e),
-            Memfile(ref e) => write!(f, "Cannot access guest memory file. {}", e),
-            MemfileSize => write!(f, "The memory file size saved in the snapshot header does not match the size of the memory file."),
+            MemfileSize => write!(f, "The memory size defined in the snapshot header does not match the size of the memory file."),
             MissingMemFile => write!(f, "Missing guest memory file."),
             MissingMemSize => write!(f, "Missing guest memory size."),
             MissingVcpuNum => write!(f, "Missing number of vCPUs."),
@@ -85,18 +83,15 @@ pub struct SnapshotHdr {
     mem_size_mib: u64,
     /** Number of vCPUs. */
     vcpu_count: u8,
-    /** Memory file path. */
-    memfile: String,
 }
 
 impl SnapshotHdr {
-    pub fn new(mem_size_mib: u64, vcpu_count: u8, memfile: String) -> Self {
+    pub fn new(mem_size_mib: u64, vcpu_count: u8) -> Self {
         SnapshotHdr {
             magic_id: SNAPSHOT_MAGIC,
             version: SNAPSHOT_VERSION,
             mem_size_mib,
             vcpu_count,
-            memfile,
         }
     }
 }
@@ -128,7 +123,6 @@ impl SnapshotImage {
             version: SNAPSHOT_VERSION,
             mem_size_mib: vm_cfg.mem_size_mib.ok_or(Error::MissingMemSize)? as u64,
             vcpu_count: vm_cfg.vcpu_count.ok_or(Error::MissingVcpuNum)?,
-            memfile: vm_cfg.memfile.ok_or(Error::MissingMemFile)?,
         };
         let microvm_state = MicrovmState {
             header,
@@ -204,8 +198,13 @@ impl SnapshotImage {
         self.microvm_state.header.mem_size_mib as usize
     }
 
-    pub fn memfile(&self) -> String {
-        self.microvm_state.header.memfile.clone()
+    pub fn validate_mem_file_size(&self, mem_file_path: &str) -> Result<()> {
+        let metadata = std::fs::metadata(mem_file_path).map_err(|_| Error::MissingMemFile)?;
+        if self.microvm_state.header.mem_size_mib << 20 != metadata.len() {
+            Err(Error::MemfileSize)
+        } else {
+            Ok(())
+        }
     }
 
     fn validate_header(microvm_state: &MicrovmState) -> Result<()> {
@@ -218,11 +217,6 @@ impl SnapshotImage {
         }
         if microvm_state.header.vcpu_count != microvm_state.vcpu_states.len() as u8 {
             return Err(Error::BadVcpuCount);
-        }
-        let metadata =
-            std::fs::metadata(microvm_state.header.memfile.as_str()).map_err(Error::Memfile)?;
-        if microvm_state.header.mem_size_mib << 20 != metadata.len() {
-            return Err(Error::MemfileSize);
         }
 
         Ok(())
@@ -272,7 +266,6 @@ mod tests {
                 | Error::Deserialize(_)
                 | Error::InvalidFileType
                 | Error::IO(_)
-                | Error::Memfile(_)
                 | Error::MemfileSize
                 | Error::MissingVcpuNum
                 | Error::MissingMemFile
@@ -290,7 +283,6 @@ mod tests {
                 (Error::Deserialize(_), Error::Deserialize(_)) => true,
                 (Error::InvalidFileType, Error::InvalidFileType) => true,
                 (Error::IO(_), Error::IO(_)) => true,
-                (Error::Memfile(_), Error::Memfile(_)) => true,
                 (Error::MissingVcpuNum, Error::MissingVcpuNum) => true,
                 (Error::MemfileSize, Error::MemfileSize) => true,
                 (Error::MissingMemFile, Error::MissingMemFile) => true,
@@ -311,7 +303,6 @@ mod tests {
                 && self.version == other.version
                 && self.mem_size_mib == other.mem_size_mib
                 && self.vcpu_count == other.vcpu_count
-                && self.memfile == other.memfile
         }
     }
 
@@ -390,7 +381,6 @@ mod tests {
             version: SNAPSHOT_VERSION,
             mem_size_mib,
             vcpu_count,
-            memfile: "foo".to_string(),
         }
     }
 
@@ -427,7 +417,6 @@ mod tests {
         assert_eq!(image.vcpu_count(), vcpu_count);
         assert_eq!(image.mem_size_mib(), mem_size_mib as usize);
         assert_eq!(image.as_raw_fd(), fd);
-        assert_eq!(image.memfile(), "foo".to_string());
     }
 
     fn make_snapshot(
@@ -454,23 +443,15 @@ mod tests {
         let mem_size_mib: usize = 10;
         let vcpu_count: u8 = 1;
 
-        let tmp_memfile = NamedTempFile::new().unwrap();
-        tmp_memfile
-            .as_file()
-            .set_len(mem_size_mib as u64 * 1024 * 1024)
-            .unwrap();
-        let tmp_memfile_path = tmp_memfile.into_temp_path();
-        let memfile = tmp_memfile_path.to_str().unwrap().to_string();
-
-        let mut header = build_valid_header(mem_size_mib as u64, vcpu_count);
-        header.memfile = memfile.clone();
+        let header = build_valid_header(mem_size_mib as u64, vcpu_count);
 
         let mut vm_config = VmConfig {
             vcpu_count: None,
             mem_size_mib: None,
-            memfile: None,
+            mem_file_path: None,
             cpu_template: None,
             ht_enabled: None,
+            shared_mem: false,
         };
 
         let (vm, vcpu) = setup_vcpu();
@@ -508,16 +489,6 @@ mod tests {
             );
 
             vm_config.vcpu_count = Some(vcpu_count);
-
-            // Test error case: missing memory file.
-            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone());
-            assert!(ret.is_err());
-            assert_eq!(
-                format!("{}", ret.err().unwrap()),
-                "Missing guest memory file."
-            );
-
-            vm_config.memfile = Some(memfile.clone());
 
             // Good case: snapshot is created.
             let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone());
@@ -625,52 +596,39 @@ mod tests {
                 );
             }
 
-            {
-                // Test error case: incorrect memory file path in header.
-                let bad_snap = NamedTempFile::new().unwrap();
-                let bad_snap_path = bad_snap.into_temp_path();
-                let mut bad_header = header.clone();
-                bad_header.memfile = "/foo/bar".to_string();
-                let bad_image_path = make_snapshot(
-                    &bad_snap_path,
-                    vm_config.clone(),
-                    vm_state.clone(),
-                    vcpu_state.clone(),
-                    bad_header.clone(),
-                );
-                let ret = SnapshotImage::open_existing(bad_image_path.as_str());
-                assert!(ret.is_err());
-                assert_eq!(
-                    format!("{}", ret.err().unwrap()),
-                    "Cannot access guest memory file. No such file or directory (os error 2)"
-                );
-            }
-
-            {
-                // Test error case: incorrect guest memory size in header.
-                let bad_snap = NamedTempFile::new().unwrap();
-                let bad_snap_path = bad_snap.into_temp_path();
-                let mut bad_header = header.clone();
-                bad_header.mem_size_mib = vm_config.mem_size_mib.unwrap() as u64 + 1;
-                let bad_image_path = make_snapshot(
-                    &bad_snap_path,
-                    vm_config.clone(),
-                    vm_state.clone(),
-                    vcpu_state.clone(),
-                    bad_header.clone(),
-                );
-                let ret = SnapshotImage::open_existing(bad_image_path.as_str());
-                assert!(ret.is_err());
-                assert_eq!(
-                    format!("{}", ret.err().unwrap()),
-                    "The memory file size saved in the snapshot header does not match the size of the memory file."
-                );
-            }
-
             // Good case: valid snapshot.
             let ret = SnapshotImage::open_existing(snapshot_path);
             assert!(ret.is_ok());
             let image = ret.unwrap();
+
+            // Test memory file validation on snapshot loading.
+            {
+                // Test error case: incorrect memory file path in header.
+                let ret = image.validate_mem_file_size("/foo/bar");
+                assert_eq!(
+                    format!("{}", ret.unwrap_err()),
+                    "Missing guest memory file."
+                );
+
+                // Test error case: incorrect guest memory size in header.
+                let tmp_memfile = NamedTempFile::new().unwrap();
+                let tmp_memfile_path = tmp_memfile.path();
+                let memfile_path = tmp_memfile_path.to_str().unwrap();
+
+                let ret = image.validate_mem_file_size(memfile_path);
+                assert_eq!(
+                    format!("{}", ret.unwrap_err()),
+                    "The memory size defined in the snapshot header does not match the size of the memory file."
+                );
+
+                // Test memory file size validation success.
+                tmp_memfile
+                    .as_file()
+                    .set_len(mem_size_mib as u64 * 1024 * 1024)
+                    .unwrap();
+                let ret = image.validate_mem_file_size(memfile_path);
+                assert!(ret.is_ok());
+            }
 
             // Verify header deserialization.
             assert!(header.eq(&image.microvm_state.header));
@@ -716,12 +674,8 @@ mod tests {
             format!("Input/output error. {}", err0_str)
         );
         assert_eq!(
-            format!("{}", Error::Memfile(io::Error::from_raw_os_error(0))),
-            format!("Cannot access guest memory file. {}", err0_str)
-        );
-        assert_eq!(
             format!("{}", Error::MemfileSize),
-            "The memory file size saved in the snapshot header does not match the size of the memory file."
+            "The memory size defined in the snapshot header does not match the size of the memory file."
         );
         assert_eq!(
             format!("{}", Error::MissingVcpuNum),

@@ -352,6 +352,52 @@ paths:
           schema:
             $ref: "#/definitions/Error"
 
+  /snapshot/create:
+    put:
+      summary: Pauses the microVM and creates a snapshot at the specified path.
+      operationId: createSnapshot
+      parameters:
+      - name: body
+        in: body
+        description: Resulting snapshot file path.
+        required: true
+        schema:
+          $ref: "#/definitions/SnapshotCreateConfig"
+      responses:
+        204:
+          description: Snapshot created.
+        400:
+          description: Snapshot cannot be created due to bad input.
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: Internal server error.
+          schema:
+            $ref: "#/definitions/Error"
+
+  /snapshot/load:
+    put:
+      summary: Loads the microVM from snapshot and resumes it.
+      operationId: loadSnapshot
+      parameters:
+      - name: body
+        in: body
+        description: Configuration for loading from snapshot.
+        required: true
+        schema:
+          $ref: "#/definitions/SnapshotLoadConfig"
+      responses:
+        204:
+          description: Snapshot loaded, microVM resumed.
+        400:
+          description: Snapshot cannot be loaded due to bad input.
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: Internal server error.
+          schema:
+            $ref: "#/definitions/Error"
+
 definitions:
   BootSource:
     type: object
@@ -424,9 +470,7 @@ definitions:
         - BlockDeviceRescan
         - FlushMetrics
         - InstanceStart
-        - PauseToSnapshot
         - PauseVCPUs
-        - ResumeFromSnapshot
         - ResumeVCPUs
         - SendCtrlAltDel
       payload:
@@ -516,7 +560,7 @@ definitions:
         description: Flag for enabling/disabling Hyperthreading
       cpu_template:
         $ref: "#/definitions/CpuTemplate"
-      memfile:
+      mem_file_path:
         type: string
         description: Optional path to guest memory backing file.
 
@@ -587,6 +631,25 @@ definitions:
       ops:
         $ref: "#/definitions/TokenBucket"
         description: Token bucket with operations as tokens
+
+  SnapshotCreateConfig:
+    type: object
+    required:
+      - snapshot_path
+    properties:
+      snapshot_path:
+        type: string
+
+  SnapshotLoadConfig:
+    type: object
+    required:
+      - snapshot_path
+      - mem_file_path
+    properties:
+      snapshot_path:
+        type: string
+      mem_file_path:
+        type: string
 
   TokenBucket:
     type: object

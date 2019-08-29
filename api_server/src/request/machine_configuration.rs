@@ -19,16 +19,16 @@ impl GenerateHyperResponse for VmConfig {
         let cpu_template = self
             .cpu_template
             .map_or("Uninitialized".to_string(), |c| c.to_string());
-        let memfile = self
-            .memfile
+        let mem_file_path = self
+            .mem_file_path
             .clone()
             .unwrap_or_else(|| "Uninitialized".to_string());
 
         json_response(
             StatusCode::Ok,
             format!(
-                "{{ \"vcpu_count\": {:?}, \"mem_size_mib\": {:?},  \"ht_enabled\": {:?},  \"cpu_template\": {:?}, \"memfile\": {:?} }}",
-                vcpu_count, mem_size, ht_enabled, cpu_template, memfile
+                "{{ \"vcpu_count\": {:?}, \"mem_size_mib\": {:?},  \"ht_enabled\": {:?},  \"cpu_template\": {:?}, \"mem_file_path\": {:?} }}",
+                vcpu_count, mem_size, ht_enabled, cpu_template, mem_file_path
             ),
         )
     }
@@ -51,7 +51,7 @@ impl IntoParsedRequest for VmConfig {
                     && self.mem_size_mib.is_none()
                     && self.cpu_template.is_none()
                     && self.ht_enabled.is_none()
-                    && self.memfile.is_none()
+                    && self.mem_file_path.is_none()
                 {
                     return Err(String::from("Empty PATCH request."));
                 }
@@ -89,7 +89,8 @@ mod tests {
             mem_size_mib: Some(1024),
             ht_enabled: Some(true),
             cpu_template: Some(CpuFeaturesTemplate::T2),
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
         let (sender, receiver) = oneshot::channel();
         assert!(body
@@ -105,7 +106,8 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: None,
             cpu_template: None,
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
         assert!(uninitialized
             .clone()
@@ -124,11 +126,18 @@ mod tests {
             mem_size_mib: Some(1024),
             ht_enabled: None,
             cpu_template: Some(CpuFeaturesTemplate::T2),
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
-        match body.into_parsed_request(None, Method::Put) {
+        match body.clone().into_parsed_request(None, Method::Put) {
             Ok(_) => assert!(false),
             Err(e) => assert_eq!(e, String::from("Missing mandatory fields.")),
+        };
+
+        // Invalid method
+        match body.into_parsed_request(None, Method::Delete) {
+            Ok(_) => assert!(false),
+            Err(e) => assert_eq!(e, String::from("Invalid method.")),
         };
     }
 }

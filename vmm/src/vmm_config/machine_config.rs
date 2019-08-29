@@ -14,6 +14,8 @@ pub enum VmConfigError {
     /// The vcpu count is invalid. When hyperthreading is enabled, the `cpu_count` must be either
     /// 1 or an even number.
     InvalidVcpuCount,
+    /// Cannot create new memory file at specified path. File already exists.
+    MemoryFileAlreadyExists,
     /// The memory size is invalid. The memory can only be an unsigned integer.
     InvalidMemorySize,
     /// Cannot update the configuration of the microvm post boot.
@@ -23,17 +25,22 @@ pub enum VmConfigError {
 impl Display for VmConfigError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::VmConfigError::*;
-        match *self {
-            InvalidVcpuCount => write!(
-                f,
-                "The vCPU number is invalid! The vCPU number can only \
-                 be 1 or an even number when hyperthreading is enabled.",
-            ),
-            InvalidMemorySize => write!(f, "The memory size (MiB) is invalid.",),
-            UpdateNotAllowedPostBoot => {
-                write!(f, "The update operation is not allowed after boot.")
+        write!(
+            f,
+            "{}",
+            match *self {
+                InvalidVcpuCount => {
+                    "The vCPU number is invalid! The vCPU number can only \
+                     be 1 or an even number when hyperthreading is enabled."
+                }
+                MemoryFileAlreadyExists => {
+                    "Cannot create new memory file at specified path. File \
+                     already exists."
+                }
+                InvalidMemorySize => "The memory size (MiB) is invalid.",
+                UpdateNotAllowedPostBoot => "The update operation is not allowed after boot.",
             }
-        }
+        )
     }
 }
 
@@ -60,7 +67,10 @@ pub struct VmConfig {
     pub cpu_template: Option<CpuFeaturesTemplate>,
     /// Guest memory file.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub memfile: Option<String>,
+    pub mem_file_path: Option<String>,
+    /// Specifies if the memory is mapped shared or private.
+    #[serde(skip)]
+    pub shared_mem: bool,
 }
 
 impl Default for VmConfig {
@@ -70,7 +80,8 @@ impl Default for VmConfig {
             mem_size_mib: Some(128),
             ht_enabled: Some(false),
             cpu_template: None,
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         }
     }
 }
@@ -128,6 +139,13 @@ mod tests {
 
         let expected_str = "The memory size (MiB) is invalid.";
         assert_eq!(VmConfigError::InvalidMemorySize.to_string(), expected_str);
+
+        let expected_str = "Cannot create new memory file at specified path. File \
+                            already exists.";
+        assert_eq!(
+            VmConfigError::MemoryFileAlreadyExists.to_string(),
+            expected_str
+        );
 
         let expected_str = "The update operation is not allowed after boot.";
         assert_eq!(

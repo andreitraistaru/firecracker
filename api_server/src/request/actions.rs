@@ -18,11 +18,7 @@ enum ActionType {
     BlockDeviceRescan,
     FlushMetrics,
     InstanceStart,
-    #[cfg(target_arch = "x86_64")]
-    PauseToSnapshot,
     PauseVCPUs,
-    #[cfg(target_arch = "x86_64")]
-    ResumeFromSnapshot,
     ResumeVCPUs,
     SendCtrlAltDel,
 }
@@ -71,43 +67,6 @@ fn validate_payload(action_body: &ActionBody) -> Result<(), String> {
             }
             Ok(())
         }
-        #[cfg(target_arch = "x86_64")]
-        ActionType::PauseToSnapshot => {
-            match action_body.payload {
-                Some(ref payload) => {
-                    // Expecting to have a String in the payload.
-                    if !payload.is_string() {
-                        return Err(
-                            "Invalid payload type. Expected a string representing the snapshot path"
-                                .to_string(),
-                        );
-                    }
-                    Ok(())
-                }
-                None => Err(format!(
-                    "Payload is required for {:?}.",
-                    action_body.action_type
-                )),
-            }
-        }
-        #[cfg(target_arch = "x86_64")]
-        ActionType::ResumeFromSnapshot => {
-            match action_body.payload {
-                Some(ref payload) => {
-                    // Expecting to have a String in the payload.
-                    if !payload.is_string() {
-                        return Err(
-                            "Invalid payload type. Expected a string representing the snapshot path".to_string()
-                        );
-                    }
-                    Ok(())
-                }
-                None => Err(format!(
-                    "Payload is required for {:?}.",
-                    action_body.action_type
-                )),
-            }
-        }
     }
 }
 
@@ -142,30 +101,10 @@ impl IntoParsedRequest for ActionBody {
                     sync_receiver,
                 ))
             }
-            #[cfg(target_arch = "x86_64")]
-            ActionType::PauseToSnapshot => {
-                // Safe to unwrap because we validated the payload in the validate_payload func.
-                let snapshot_path = self.payload.unwrap().as_str().unwrap().to_string();
-                let (sync_sender, sync_receiver) = oneshot::channel();
-                Ok(ParsedRequest::Sync(
-                    VmmAction::PauseToSnapshot(snapshot_path, sync_sender),
-                    sync_receiver,
-                ))
-            }
             ActionType::PauseVCPUs => {
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
                     VmmAction::PauseVCPUs(sync_sender),
-                    sync_receiver,
-                ))
-            }
-            #[cfg(target_arch = "x86_64")]
-            ActionType::ResumeFromSnapshot => {
-                // Safe to unwrap because we validated the payload in the validate_payload func.
-                let snapshot_path = self.payload.unwrap().as_str().unwrap().to_string();
-                let (sync_sender, sync_receiver) = oneshot::channel();
-                Ok(ParsedRequest::Sync(
-                    VmmAction::ResumeFromSnapshot(snapshot_path, sync_sender),
                     sync_receiver,
                 ))
             }
@@ -234,24 +173,10 @@ mod tests {
         // Error case: InstanceStart with payload.
         assert!(validate_payload(&action_body_string_payload(InstanceStart)).is_err());
 
-        // Test PauseToSnapshot.
-        #[cfg(target_arch = "x86_64")]
-        assert!(validate_payload(&action_body_string_payload(PauseToSnapshot)).is_ok());
-        // Error case: PauseToSnapshot without payload.
-        #[cfg(target_arch = "x86_64")]
-        assert!(validate_payload(&action_body_no_payload(PauseToSnapshot)).is_err());
-
         // Test PauseVCPUs.
         assert!(validate_payload(&action_body_no_payload(PauseVCPUs)).is_ok());
         // Error case: PauseVCPUs with payload.
         assert!(validate_payload(&action_body_string_payload(PauseVCPUs)).is_err());
-
-        // Test ResumeFromSnapshot.
-        assert!(validate_payload(&action_body_no_payload(ResumeFromSnapshot)).is_err());
-        // Error case: ResumeFromSnapshot with payload.
-        assert!(validate_payload(&action_body_string_payload(ResumeFromSnapshot)).is_ok());
-        // Error case: payload is not String.
-        assert!(validate_payload(&action_body_bool_payload(ResumeFromSnapshot)).is_err());
 
         // Test ResumeVCPUs.
         assert!(validate_payload(&action_body_no_payload(ResumeVCPUs)).is_ok());
@@ -342,27 +267,6 @@ mod tests {
             assert!(res == Err("InstanceStart does not support a payload.".to_string()));
         }
 
-        // Test PauseToSnapshot.
-        {
-            let json = r#"{
-                "action_type": "PauseToSnapshot",
-                "payload": "/foo/bar"
-            }"#;
-
-            let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest = ParsedRequest::Sync(
-                VmmAction::PauseToSnapshot("/foo/bar".to_string(), sender),
-                receiver,
-            );
-            let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
-            assert!(result.is_ok());
-            assert!(result
-                .unwrap()
-                .into_parsed_request(None, Method::Put)
-                .unwrap()
-                .eq(&req));
-        }
-
         // Test PauseVCPUs.
         {
             let json = r#"{
@@ -371,27 +275,6 @@ mod tests {
 
             let (sender, receiver) = oneshot::channel();
             let req: ParsedRequest = ParsedRequest::Sync(VmmAction::PauseVCPUs(sender), receiver);
-            let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
-            assert!(result.is_ok());
-            assert!(result
-                .unwrap()
-                .into_parsed_request(None, Method::Put)
-                .unwrap()
-                .eq(&req));
-        }
-
-        // Test ResumeFromSnapshot.
-        {
-            let json = r#"{
-                "action_type": "ResumeFromSnapshot",
-                "payload": "/foo/bar"
-            }"#;
-
-            let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest = ParsedRequest::Sync(
-                VmmAction::ResumeFromSnapshot("/foo/bar".to_string(), sender),
-                receiver,
-            );
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
             assert!(result

@@ -17,6 +17,7 @@ use logger::{Metric, METRICS};
 use mmds::data_store::{self, Mmds};
 use request::actions::ActionBody;
 use request::drive::PatchDrivePayload;
+use request::snapshot::{SnapshotCreateConfig, SnapshotLoadConfig};
 use request::{GenerateHyperResponse, IntoParsedRequest, ParsedRequest};
 use sys_util::EventFd;
 use vmm::vmm_config::boot_source::BootSourceConfig;
@@ -200,6 +201,38 @@ fn parse_mmds_request<'a>(
     }
 }
 
+// Turns a GET/PUT /snapshot HTTP request into a ParsedRequest
+fn parse_snapshot_request<'a>(
+    path: &'a str,
+    method: Method,
+    body: &Chunk,
+) -> Result<'a, ParsedRequest> {
+    let path_tokens: Vec<&str> = path[1..].split_terminator('/').collect();
+
+    // It has to be a `PUT` on either `snapshot/create` or `snapshot/load`.
+    if method != Method::Put || path_tokens.len() != 2 {
+        return Err(Error::InvalidPathMethod(path, method));
+    }
+
+    match path_tokens[1] {
+        "create" => {
+            let snapshot_create_cfg =
+                serde_json::from_slice::<SnapshotCreateConfig>(body).map_err(Error::SerdeJson)?;
+            Ok(snapshot_create_cfg
+                .into_parsed_request(None, method)
+                .map_err(|s| Error::Generic(StatusCode::BadRequest, s))?)
+        }
+        "load" => {
+            let snapshot_load_cfg =
+                serde_json::from_slice::<SnapshotLoadConfig>(body).map_err(Error::SerdeJson)?;
+            Ok(snapshot_load_cfg
+                .into_parsed_request(None, method)
+                .map_err(|s| Error::Generic(StatusCode::BadRequest, s))?)
+        }
+        _ => Err(Error::InvalidPathMethod(path, method)),
+    }
+}
+
 // Turns a GET/PUT /drives HTTP request into a ParsedRequest
 fn parse_drives_req<'a>(path: &'a str, method: Method, body: &Chunk) -> Result<'a, ParsedRequest> {
     let path_tokens: Vec<&str> = path[1..].split_terminator('/').collect();
@@ -283,7 +316,8 @@ fn parse_machine_config_req<'a>(
                 mem_size_mib: None,
                 ht_enabled: None,
                 cpu_template: None,
-                memfile: None,
+                mem_file_path: None,
+                shared_mem: false,
             };
             Ok(empty_machine_config
                 .into_parsed_request(None, method)
@@ -433,6 +467,7 @@ fn parse_request<'a>(method: Method, path: &'a str, body: &Chunk) -> Result<'a, 
         "machine-config" => parse_machine_config_req(path, method, body),
         "network-interfaces" => parse_netif_req(path, method, body),
         "mmds" => parse_mmds_request(path, method, body),
+        "snapshot" => parse_snapshot_request(path, method, body),
         #[cfg(feature = "vsock")]
         "vsocks" => parse_vsocks_req(path, method, body),
         _ => Err(Error::InvalidPathMethod(path, method)),
@@ -901,27 +936,6 @@ mod tests {
             _ => assert!(false),
         }
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            // PUT PauseToSnapshot
-            let json = r#"{
-                "action_type": "PauseToSnapshot",
-                "payload": "/foo/bar"
-              }"#;
-            let body: Chunk = Chunk::from(json);
-            let path = "/foo";
-            match parse_actions_req(path, Method::Put, &body) {
-                Ok(pr) => {
-                    let (sender, receiver) = oneshot::channel();
-                    assert!(pr.eq(&ParsedRequest::Sync(
-                        VmmAction::PauseToSnapshot("/foo/bar".to_string(), sender),
-                        receiver
-                    )));
-                }
-                _ => assert!(false),
-            }
-        }
-
         // Error cases
 
         // Test PUT with invalid path.
@@ -936,21 +950,6 @@ mod tests {
                 == Err(Error::SerdeJson(get_dummy_serde_error()))
         );
 
-        // Test PUT BadRequest due to invalid payload.
-        let expected_err = Error::Generic(
-            StatusCode::BadRequest,
-            "Invalid payload type. Expected a string representing the snapshot path".to_string(),
-        );
-        let body = r#"{
-            "action_type": "PauseToSnapshot",
-            "payload": {
-                "foo": "bar"
-            }
-        }"#;
-        assert!(
-            parse_actions_req(actions_path, Method::Put, &Chunk::from(body)) == Err(expected_err)
-        );
-
         // Test invalid method.
         let expected_err = Error::InvalidPathMethod(actions_path, Method::Post);
         assert!(
@@ -960,6 +959,77 @@ mod tests {
                 &Chunk::from("{\"action_type\": \"InstanceStart\"}")
             ) == Err(expected_err)
         );
+    }
+
+    #[test]
+    fn test_parse_snapshot_req() {
+        let snapshot_create_json = Chunk::from(
+            r#"{
+                "snapshot_path": "/foo/img"
+              }"#,
+        );
+        let snapshot_load_json = Chunk::from(
+            r#"{
+                "snapshot_path": "/foo/img",
+                "mem_file_path": "/foo/mem"
+              }"#,
+        );
+
+        // Error cases
+        // Test case for invalid method (GET).
+        let url = "/snapshot/create";
+        let expected_err = Error::InvalidPathMethod(url, Method::Get);
+        assert!(parse_snapshot_request(url, Method::Get, &Chunk::from("{}")) == Err(expected_err));
+
+        // Test case for invalid path.
+        let url = "/snapshot/create/dummy";
+        let expected_err = Error::InvalidPathMethod(url, Method::Put);
+        assert!(
+            parse_snapshot_request(url, Method::Put, &snapshot_create_json) == Err(expected_err)
+        );
+        let url = "/snapshot/load/dummy";
+        let expected_err = Error::InvalidPathMethod(url, Method::Put);
+        assert!(parse_snapshot_request(url, Method::Put, &snapshot_load_json) == Err(expected_err));
+        let url = "/snapshot/something";
+        let expected_err = Error::InvalidPathMethod(url, Method::Put);
+        assert!(parse_snapshot_request(url, Method::Put, &snapshot_load_json) == Err(expected_err));
+
+        // Test case for invalid body (serde  error).
+        let url = "/snapshot/load";
+        assert!(
+            parse_snapshot_request(url, Method::Put, &Chunk::from("foo"))
+                == Err(Error::SerdeJson(get_dummy_serde_error()))
+        );
+
+        // OK Snapshot create
+        let create_url = "/snapshot/create";
+        match parse_snapshot_request(create_url, Method::Put, &snapshot_create_json) {
+            Ok(pr) => {
+                let (sender, receiver) = oneshot::channel();
+                assert!(pr.eq(&ParsedRequest::Sync(
+                    VmmAction::PauseToSnapshot("/foo/img".to_string(), sender),
+                    receiver,
+                )));
+            }
+            _ => assert!(false),
+        }
+
+        // OK Snapshot load
+        let create_url = "/snapshot/load";
+        match parse_snapshot_request(create_url, Method::Put, &snapshot_load_json) {
+            Ok(pr) => {
+                let (sender, receiver) = oneshot::channel();
+                assert!(pr.eq(&ParsedRequest::Sync(
+                    VmmAction::ResumeFromSnapshot(
+                        "/foo/img".to_string(),
+                        "/foo/mem".to_string(),
+                        sender
+                    ),
+                    receiver,
+                )));
+            }
+            _ => assert!(false),
+        }
     }
 
     #[test]
@@ -1195,7 +1265,8 @@ mod tests {
             mem_size_mib: Some(1025),
             ht_enabled: Some(true),
             cpu_template: Some(CpuFeaturesTemplate::T2),
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
 
         match vm_config.into_parsed_request(None, Method::Put) {
@@ -1212,7 +1283,8 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: None,
             cpu_template: None,
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
         let body = r#"{
             "vcpu_count": 32

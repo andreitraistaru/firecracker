@@ -7,6 +7,7 @@ pub mod drive;
 pub mod logger;
 pub mod machine_configuration;
 pub mod net;
+pub mod snapshot;
 #[cfg(feature = "vsock")]
 pub mod vsock;
 
@@ -165,7 +166,7 @@ mod tests {
             "mem_size_mib": 128,
             "ht_enabled": false,
             "cpu_template": "Uninitialized",
-            "memfile": "Uninitialized"
+            "mem_file_path": "Uninitialized"
         }"#;
         let vm_config_json: serde_json::Value = serde_json::from_str(vm_config_json).unwrap();
         assert_eq!(get_body(hyper_resp).unwrap(), vm_config_json);

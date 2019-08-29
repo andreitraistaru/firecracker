@@ -55,7 +55,7 @@ use std::fmt::{Display, Formatter};
 use std::fs::{metadata, File, OpenOptions};
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Barrier, RwLock};
@@ -287,6 +287,7 @@ impl std::convert::From<VmConfigError> for VmmActionError {
             match e {
                 // User errors.
                 VmConfigError::InvalidVcpuCount
+                | VmConfigError::MemoryFileAlreadyExists
                 | VmConfigError::InvalidMemorySize
                 | VmConfigError::UpdateNotAllowedPostBoot => ErrorKind::User,
             },
@@ -504,7 +505,7 @@ pub enum VmmAction {
     RescanBlockDevice(String, OutcomeSender),
     /// Load the microVM state from the snapshot file and resume its operation.
     #[cfg(target_arch = "x86_64")]
-    ResumeFromSnapshot(String, OutcomeSender),
+    ResumeFromSnapshot(String, String, OutcomeSender),
     /// Resume the microVM VCPUs, thus resuming a paused guest.
     ResumeVCPUs(OutcomeSender),
     /// Set the microVM configuration (memory & vcpu) using `VmConfig` as input. This
@@ -1168,51 +1169,36 @@ impl Vmm {
         let guest_memory = GuestMemory::new_anon_from_tuples(&arch_mem_regions)
             .map_err(StartMicrovmError::GuestMemory)?;
         #[cfg(target_arch = "x86_64")]
-        let guest_memory = match self.vm_config.memfile.as_ref() {
+        let guest_memory = match self.vm_config.mem_file_path.as_ref() {
             Some(image) => {
                 let mut ranges = Vec::<FileMemoryDesc>::with_capacity(arch_mem_regions.len());
-                // TODO #91: rework logic so that file-backed memory can _only_ be used on clones.
-                let is_clone = match std::fs::metadata(image) {
-                    Ok(metadata) => {
-                        if metadata.len() != mem_size as u64 {
-                            Err(StartMicrovmError::GuestMemory(GuestMemoryError::FileSize))?;
-                            false
-                        } else {
-                            true
-                        }
-                    }
-                    _ => false,
-                };
 
                 let file = OpenOptions::new()
                     .read(true)
                     .write(true)
-                    .create(!is_clone)
-                    .truncate(!is_clone)
+                    .create(self.vm_config.shared_mem)
+                    .truncate(self.vm_config.shared_mem)
                     .open(image)
                     .map_err(|e| StartMicrovmError::GuestMemory(GuestMemoryError::CreateFile(e)))?;
-                if !is_clone {
-                    file.set_len(mem_size as u64).map_err(|e| {
-                        StartMicrovmError::GuestMemory(GuestMemoryError::Truncate(e))
-                    })?;
-                }
+                file.set_len(mem_size as u64)
+                    .map_err(|e| StartMicrovmError::GuestMemory(GuestMemoryError::Truncate(e)))?;
+
                 let snapshot_fd = file.as_raw_fd();
                 let mut region_offset = 0;
-
                 for (gpa, size) in arch_mem_regions {
                     ranges.push(FileMemoryDesc {
                         gpa,
                         size,
                         fd: snapshot_fd,
                         offset: region_offset,
-                        shared: !is_clone,
+                        shared: self.vm_config.shared_mem,
                     });
                     region_offset += size;
                 }
                 GuestMemory::new_file_backed(&ranges).map_err(StartMicrovmError::GuestMemory)?
             }
             None => {
-                warn!("No snapshot file found, defaulting to using anonymous memory.");
+                info!("No memory file specified, defaulting to using anonymous memory.");
                 GuestMemory::new_anon_from_tuples(&arch_mem_regions)
                     .map_err(StartMicrovmError::GuestMemory)?
             }
@@ -1875,8 +1861,13 @@ impl Vmm {
             self.vm_config.cpu_template = machine_config.cpu_template;
         }
 
-        if machine_config.memfile.is_some() {
-            self.vm_config.memfile = machine_config.memfile;
+        if machine_config.mem_file_path.is_some() {
+            if Path::new(machine_config.mem_file_path.as_ref().unwrap()).exists() {
+                Err(VmConfigError::MemoryFileAlreadyExists)?;
+            }
+            self.vm_config.mem_file_path = machine_config.mem_file_path;
+            // Changes in memory should be reflected on the file.
+            self.vm_config.shared_mem = true;
         }
 
         Ok(VmmData::Empty)
@@ -2363,18 +2354,16 @@ impl Vmm {
             .ok_or(PauseMicrovmError::InvalidHeader(
                 snapshot::Error::MissingVcpuNum,
             ))?;
-        let memfile = self
-            .vm_config
-            .memfile
-            .clone()
-            .ok_or(PauseMicrovmError::InvalidHeader(
+        if self.vm_config.mem_file_path.is_none() {
+            Err(PauseMicrovmError::InvalidHeader(
                 snapshot::Error::MissingMemFile,
             ))?;
+        }
 
         let image = SnapshotImage::create_new(snapshot_path, self.vm_config.clone())
             .map_err(PauseMicrovmError::SnapshotBackingFile)?;
 
-        self.do_pause_to_snapshot(image, SnapshotHdr::new(mem_size_mib, vcpu_count, memfile))
+        self.do_pause_to_snapshot(image, SnapshotHdr::new(mem_size_mib, vcpu_count))
             .map_err(|e| {
                 self.resume_vcpus()
                     .expect("Failed to resume vCPUs after an unsuccessful pause");
@@ -2387,7 +2376,11 @@ impl Vmm {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn resume_from_snapshot(&mut self, snapshot_path: &str) -> VmmRequestOutcome {
+    fn resume_from_snapshot(
+        &mut self,
+        snapshot_path: String,
+        mem_file_path: String,
+    ) -> VmmRequestOutcome {
         let request_ts = TimestampUs {
             time_us: get_time_us(),
             cputime_us: now_cputime_us(),
@@ -2398,7 +2391,11 @@ impl Vmm {
             ))?;
         }
 
-        let mut snapshot_image: SnapshotImage = SnapshotImage::open_existing(snapshot_path)
+        let mut snapshot_image = SnapshotImage::open_existing(snapshot_path)
+            .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
+
+        snapshot_image
+            .validate_mem_file_size(&mem_file_path)
             .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
 
         // Use expect() to crash if the other thread poisoned this lock.
@@ -2409,7 +2406,9 @@ impl Vmm {
 
         self.vm_config.mem_size_mib = Some(snapshot_image.mem_size_mib());
         self.vm_config.vcpu_count = Some(snapshot_image.vcpu_count());
-        self.vm_config.memfile = Some(snapshot_image.memfile());
+        self.vm_config.mem_file_path = Some(mem_file_path);
+        // Hardcoded for cloning - needs to be configurable for other usecases.
+        self.vm_config.shared_mem = false;
 
         self.init_guest_memory()?;
 
@@ -2549,8 +2548,8 @@ impl Vmm {
                 Vmm::send_response(self.resume_vcpus(), sender);
             }
             #[cfg(target_arch = "x86_64")]
-            VmmAction::ResumeFromSnapshot(snapshot_path, sender) => {
-                let result = self.resume_from_snapshot(snapshot_path.as_str());
+            VmmAction::ResumeFromSnapshot(snapshot_path, mem_file_path, sender) => {
+                let result = self.resume_from_snapshot(snapshot_path, mem_file_path);
                 let resume_failed = result.is_err();
                 Vmm::send_response(result, sender);
                 if resume_failed {
@@ -2618,7 +2617,7 @@ impl PartialEq for VmmAction {
             #[cfg(feature = "vsock")]
             VmmAction::InsertVsockDevice(_, _) => (),
             #[cfg(target_arch = "x86_64")]
-            VmmAction::PauseToSnapshot(_, _) | VmmAction::ResumeFromSnapshot(_, _) => (),
+            VmmAction::PauseToSnapshot(_, _) | VmmAction::ResumeFromSnapshot(_, _, _) => (),
         };
         match (self, other) {
             (
@@ -2653,9 +2652,9 @@ impl PartialEq for VmmAction {
             (&VmmAction::SendCtrlAltDel(_), &VmmAction::SendCtrlAltDel(_)) => true,
             #[cfg(target_arch = "x86_64")]
             (
-                &VmmAction::ResumeFromSnapshot(ref snap_path, _),
-                &VmmAction::ResumeFromSnapshot(ref other_snap_path, _),
-            ) => snap_path == other_snap_path,
+                &VmmAction::ResumeFromSnapshot(ref snap_path, ref mem_path, _),
+                &VmmAction::ResumeFromSnapshot(ref other_snap_path, ref other_mem_path, _),
+            ) => snap_path == other_snap_path && mem_path == other_mem_path,
             (&VmmAction::ResumeVCPUs(_), &VmmAction::ResumeVCPUs(_)) => true,
             (
                 &VmmAction::SetVmConfiguration(ref vm_config, _),
@@ -3234,25 +3233,63 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: None,
             cpu_template: None,
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_ok());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
         assert_eq!(vmm.vm_config.mem_size_mib, Some(128));
         assert_eq!(vmm.vm_config.ht_enabled, Some(false));
+        assert_eq!(vmm.vm_config.mem_file_path, None);
+        assert_eq!(vmm.vm_config.shared_mem, false);
 
-        // test put machine configuration for mem size with valid value
+        // Test put machine configuration for mem size with valid value.
         let machine_config = VmConfig {
             vcpu_count: None,
             mem_size_mib: Some(256),
             ht_enabled: None,
             cpu_template: None,
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_ok());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
         assert_eq!(vmm.vm_config.mem_size_mib, Some(256));
         assert_eq!(vmm.vm_config.ht_enabled, Some(false));
+
+        // Test Error case for put machine configuration with pre-existing memory file.
+        {
+            let tmp_file = NamedTempFile::new().unwrap();
+            let tmp_path = tmp_file.path();
+            let machine_config = VmConfig {
+                vcpu_count: None,
+                mem_size_mib: Some(256),
+                ht_enabled: None,
+                cpu_template: None,
+                mem_file_path: Some(tmp_path.to_str().unwrap().to_string()),
+                shared_mem: false,
+            };
+            assert!(vmm.set_vm_configuration(machine_config).is_err());
+            assert_eq!(vmm.vm_config.mem_file_path, None);
+            assert_eq!(vmm.vm_config.shared_mem, false);
+        }
+
+        // Test put machine configuration for file-backed memory.
+        let mem_file_path = tmp_path();
+        let machine_config = VmConfig {
+            vcpu_count: None,
+            mem_size_mib: Some(256),
+            ht_enabled: None,
+            cpu_template: None,
+            mem_file_path: Some(mem_file_path.clone()),
+            shared_mem: false,
+        };
+        assert!(vmm.set_vm_configuration(machine_config).is_ok());
+        assert_eq!(vmm.vm_config.vcpu_count, Some(3));
+        assert_eq!(vmm.vm_config.mem_size_mib, Some(256));
+        assert_eq!(vmm.vm_config.ht_enabled, Some(false));
+        assert_eq!(vmm.vm_config.mem_file_path, Some(mem_file_path));
+        assert_eq!(vmm.vm_config.shared_mem, true);
 
         // Test Error cases for put_machine_configuration with invalid value for vcpu_count
         // Test that the put method return error & that the vcpu value is not changed
@@ -3261,7 +3298,8 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: None,
             cpu_template: None,
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
@@ -3273,7 +3311,8 @@ mod tests {
             mem_size_mib: Some(0),
             ht_enabled: Some(false),
             cpu_template: Some(CpuFeaturesTemplate::T2),
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
@@ -3289,7 +3328,8 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: Some(true),
             cpu_template: None,
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
         assert_eq!(vmm.vm_config.ht_enabled, Some(false));
@@ -3300,7 +3340,8 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: Some(true),
             cpu_template: Some(CpuFeaturesTemplate::T2),
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_ok());
         assert_eq!(vmm.vm_config.vcpu_count, Some(2));
@@ -3314,7 +3355,8 @@ mod tests {
             mem_size_mib: None,
             ht_enabled: Some(true),
             cpu_template: Some(CpuFeaturesTemplate::T2),
-            memfile: None,
+            mem_file_path: None,
+            shared_mem: false,
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
     }
@@ -4068,6 +4110,7 @@ mod tests {
         let mut vmm2 = create_vmm_object(InstanceState::Running);
         // Create microVM and snapshot it.
         let snapshot_filename = tmp_path();
+        let mem_file_path = tmp_path();
 
         {
             // Take it out of the wrapper so it goes out of scope at the end of this block.
@@ -4075,7 +4118,8 @@ mod tests {
             vmm1.shared_info.write().unwrap().id = microvm_id.clone();
 
             vmm1.default_kernel_config(Some(good_kernel_file()));
-            vmm1.vm_config.memfile = Some(tmp_path());
+            vmm1.vm_config.mem_file_path = Some(mem_file_path.clone());
+            vmm1.vm_config.shared_mem = true;
             // The kernel provided contains  "return 0" which will make the
             // advanced seccomp filter return bad syscall so we disable it.
             vmm1.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
@@ -4094,11 +4138,11 @@ mod tests {
             vmm2.shared_info.write().unwrap().id = microvm_id.clone();
             vmm2.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
             assert!(vmm2
-                .resume_from_snapshot(snapshot_filename.as_str())
+                .resume_from_snapshot(snapshot_filename.clone(), mem_file_path.clone())
                 .is_err());
             vmm2.shared_info.write().unwrap().state = InstanceState::Uninitialized;
             assert!(vmm2
-                .resume_from_snapshot(snapshot_filename.as_str())
+                .resume_from_snapshot(snapshot_filename.clone(), mem_file_path.clone())
                 .is_ok());
             let stdin_handle = io::stdin();
             stdin_handle.lock().set_canon_mode().unwrap();
@@ -4106,6 +4150,7 @@ mod tests {
             vmm2.kill_vcpus().expect("failed to kill vcpus");
         }
         std::fs::remove_file(snapshot_filename).expect("failed to delete snapshot");
+        std::fs::remove_file(mem_file_path).expect("failed to delete memfile");
     }
 
     // Helper function to get ErrorKind of error.
