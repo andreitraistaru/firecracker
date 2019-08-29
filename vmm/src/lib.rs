@@ -1643,6 +1643,25 @@ impl Vmm {
         shared_info.state.clone()
     }
 
+    fn app_version(&self) -> Version {
+        // Use expect() to crash if the other thread poisoned this lock.
+        let version_str = {
+            let guard = self.shared_info.read().expect(
+                "Failed to read app version because \
+                 shared info couldn't be read due to poisoned lock",
+            );
+            guard.vmm_version.clone()
+        };
+        let nums = &version_str
+            .split('.')
+            .flat_map(str::parse::<u32>)
+            .collect::<Vec<u32>>()[..3];
+        let major = (nums[0] & 0xFFFF) as u16;
+        let minor = (nums[1] & 0xFFFF) as u16;
+        let build = nums[2];
+        Version::from((major, minor, build))
+    }
+
     fn is_instance_initialized(&self) -> bool {
         match self.instance_state() {
             InstanceState::Uninitialized => false,
@@ -2359,16 +2378,20 @@ impl Vmm {
                 snapshot::Error::MissingMemFile,
             ))?;
         }
+        let app_version = self.app_version();
 
-        let image = SnapshotImage::create_new(snapshot_path, self.vm_config.clone())
+        let image = SnapshotImage::create_new(snapshot_path, self.vm_config.clone(), app_version)
             .map_err(PauseMicrovmError::SnapshotBackingFile)?;
 
-        self.do_pause_to_snapshot(image, SnapshotHdr::new(mem_size_mib, vcpu_count))
-            .map_err(|e| {
-                self.resume_vcpus()
-                    .expect("Failed to resume vCPUs after an unsuccessful pause");
-                e
-            })?;
+        self.do_pause_to_snapshot(
+            image,
+            SnapshotHdr::new(mem_size_mib, vcpu_count, app_version),
+        )
+        .map_err(|e| {
+            self.resume_vcpus()
+                .expect("Failed to resume vCPUs after an unsuccessful pause");
+            e
+        })?;
 
         Self::log_boot_time(&request_ts);
 
@@ -2391,13 +2414,12 @@ impl Vmm {
             ))?;
         }
 
-        let mut snapshot_image = SnapshotImage::open_existing(snapshot_path)
+        let mut snapshot_image = SnapshotImage::open_existing(snapshot_path, self.app_version())
             .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
 
         snapshot_image
             .validate_mem_file_size(&mem_file_path)
             .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
-
         // Use expect() to crash if the other thread poisoned this lock.
         self.shared_info
             .write()
@@ -2903,7 +2925,7 @@ mod tests {
         let shared_info = Arc::new(RwLock::new(InstanceInfo {
             state,
             id: "TEST_ID".to_string(),
-            vmm_version: "1.0".to_string(),
+            vmm_version: env!("CARGO_PKG_VERSION").to_string(),
         }));
 
         let (_to_vmm, from_api) = channel();

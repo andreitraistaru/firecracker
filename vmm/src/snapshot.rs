@@ -9,6 +9,7 @@
 
 extern crate kvm_bindings;
 
+use std::cmp;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -22,10 +23,31 @@ use serialize::SnapshotReaderWriter;
 use vmm_config::machine_config::VmConfig;
 use vstate::{VcpuState, VmState};
 
+/// Magic number, verifies a snapshot file's validity.
 pub(super) const SNAPSHOT_MAGIC: u64 = 0xEDA3_25D9_EDA3_25D9;
-// Major.Minor.BuildHi.BuildLo
-// TODO use CARGO_PKG_VERSION instead
-pub(super) const SNAPSHOT_VERSION: u64 = 0x0000_0001_0000_0000;
+/// Snapshot format version. Can vary independently from Firecracker's version.
+pub(super) const SNAPSHOT_VERSION: u64 = 0x0000_0000_0000_0001;
+
+/// How to deal with deserializing snapshots of different versions.
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub(super) enum SnapshotVersionSupport {
+    /// Any version is allowed through.
+    Any,
+    /// A specific `Major` delta is allowed.
+    Major(u16),
+    /// The same `Major` and a specific `Minor` delta are allowed.
+    Minor(u16),
+    /// The same `Major.Minor` and a specific `Build` delta are allowed.
+    Build(u32),
+    /// Only the same version is allowed.
+    Same,
+}
+
+// Helper enum that signals a generic versioning error. Caller translates it to a specific error.
+enum VersionError {
+    UnsupportedVersion,
+}
 
 /// Snapshot related errors.
 #[derive(Debug)]
@@ -43,7 +65,8 @@ pub enum Error {
     Mmap(io::Error),
     OpenExisting(io::Error),
     Serialize(SerializationError),
-    UnsupportedVersion(u64),
+    UnsupportedAppVersion(u64),
+    UnsupportedSnapshotVersion(u64),
     Truncate(io::Error),
 }
 
@@ -64,7 +87,11 @@ impl Display for Error {
             Mmap(ref e) => write!(f, "Failed to map memory: {}", e),
             OpenExisting(ref e) => write!(f, "Failed to open snapshot file: {}", e),
             Serialize(ref e) => write!(f, "Failed to serialize snapshot content. {}", e),
-            UnsupportedVersion(ref v) => write!(f, "Unsupported snapshot version: {}.", v),
+            UnsupportedAppVersion(v) => {
+                write!(f, "Unsupported app version: {}.", Version::from(v)
+                )
+            },
+            UnsupportedSnapshotVersion(v) => write!(f, "Unsupported snapshot version: {}.", Version::from(v)),
             Truncate(ref e) => write!(f, "Failed to truncate snapshot file: {}", e),
         }
     }
@@ -72,13 +99,69 @@ impl Display for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// Version struct composed of major, minor and build numbers.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Version {
+    major: u16,
+    minor: u16,
+    build: u32,
+}
+
+impl Version {
+    fn major_delta(self, rhs: Version) -> u16 {
+        cmp::max(self.major, rhs.major) - cmp::min(self.major, rhs.major)
+    }
+
+    fn minor_delta(self, rhs: Version) -> u16 {
+        cmp::max(self.minor, rhs.minor) - cmp::min(self.minor, rhs.minor)
+    }
+
+    fn build_delta(self, rhs: Version) -> u32 {
+        cmp::max(self.build, rhs.build) - cmp::min(self.build, rhs.build)
+    }
+}
+
+impl Into<u64> for Version {
+    fn into(self) -> u64 {
+        (u64::from(self.major) << 48) | (u64::from(self.minor) << 32) | u64::from(self.build)
+    }
+}
+
+impl From<u64> for Version {
+    fn from(version: u64) -> Self {
+        Version {
+            major: (version >> 48) as u16,
+            minor: ((version >> 32) & 0xFFFF) as u16,
+            build: (version & 0xFFFF_FFFF) as u32,
+        }
+    }
+}
+
+impl From<(u16, u16, u32)> for Version {
+    fn from(tuple_ver: (u16, u16, u32)) -> Self {
+        Version {
+            major: tuple_ver.0,
+            minor: tuple_ver.1,
+            build: tuple_ver.2,
+        }
+    }
+}
+
+impl Display for Version {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.build)
+    }
+}
+
 /** The header of a Firecracker snapshot image. */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SnapshotHdr {
     /** SNAPSHOT_IMAGE_MAGIC */
     magic_id: u64,
     /** SNAPSHOT_VERSION */
-    version: u64,
+    snapshot_version: Version,
+    /** Firecracker version **/
+    app_version: Version,
     /** Guest memory size */
     mem_size_mib: u64,
     /** Number of vCPUs. */
@@ -86,10 +169,11 @@ pub struct SnapshotHdr {
 }
 
 impl SnapshotHdr {
-    pub fn new(mem_size_mib: u64, vcpu_count: u8) -> Self {
+    pub fn new(mem_size_mib: u64, vcpu_count: u8, app_version: Version) -> Self {
         SnapshotHdr {
             magic_id: SNAPSHOT_MAGIC,
-            version: SNAPSHOT_VERSION,
+            snapshot_version: SNAPSHOT_VERSION.into(),
+            app_version,
             mem_size_mib,
             vcpu_count,
         }
@@ -110,7 +194,11 @@ pub struct SnapshotImage {
 }
 
 impl SnapshotImage {
-    pub fn create_new<P: AsRef<Path>>(path: P, vm_cfg: VmConfig) -> Result<SnapshotImage> {
+    pub fn create_new<P: AsRef<Path>>(
+        path: P,
+        vm_cfg: VmConfig,
+        app_version: Version,
+    ) -> Result<SnapshotImage> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -120,7 +208,8 @@ impl SnapshotImage {
             .map_err(Error::CreateNew)?;
         let header = SnapshotHdr {
             magic_id: SNAPSHOT_MAGIC,
-            version: SNAPSHOT_VERSION,
+            snapshot_version: SNAPSHOT_VERSION.into(),
+            app_version,
             mem_size_mib: vm_cfg.mem_size_mib.ok_or(Error::MissingMemSize)? as u64,
             vcpu_count: vm_cfg.vcpu_count.ok_or(Error::MissingVcpuNum)?,
         };
@@ -136,7 +225,7 @@ impl SnapshotImage {
         })
     }
 
-    pub fn open_existing<P: AsRef<Path>>(path: P) -> Result<SnapshotImage> {
+    pub fn open_existing<P: AsRef<Path>>(path: P, app_version: Version) -> Result<SnapshotImage> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -155,7 +244,8 @@ impl SnapshotImage {
             bincode::deserialize_from::<SnapshotReaderWriter, MicrovmState>(reader_writer)
                 .map_err(Error::Deserialize)?;
 
-        Self::validate_header(&microvm_state)?;
+        // Cross-version deserialization is not supported yet.
+        Self::validate_header(&microvm_state, app_version, SnapshotVersionSupport::Same)?;
 
         Ok(SnapshotImage {
             file,
@@ -207,14 +297,86 @@ impl SnapshotImage {
         }
     }
 
-    fn validate_header(microvm_state: &MicrovmState) -> Result<()> {
+    /// Checks that two versions are compatible.
+    fn validate_version(
+        version: Version,
+        other_version: Version,
+        support: SnapshotVersionSupport,
+    ) -> std::result::Result<(), VersionError> {
+        use SnapshotVersionSupport::*;
+
+        match support {
+            // Anything works.
+            Any => Ok(()),
+
+            // The major numbers must not differ by more than `delta`.
+            Major(delta) => {
+                if version.major_delta(other_version) > delta {
+                    Err(VersionError::UnsupportedVersion)
+                } else {
+                    Ok(())
+                }
+            }
+            // The major numbers must be the same, and the minor numbers must not differ by more
+            // than `delta`.
+            Minor(delta) => {
+                if version.major != other_version.major
+                    || version.minor_delta(other_version) > delta
+                {
+                    Err(VersionError::UnsupportedVersion)
+                } else {
+                    Ok(())
+                }
+            }
+
+            // The major and minor numbers must be the same, and the build numbers must not differ
+            // by more than `delta`.
+            Build(delta) => {
+                if version.major != other_version.major
+                    || version.minor != other_version.minor
+                    || version.build_delta(other_version) > delta
+                {
+                    Err(VersionError::UnsupportedVersion)
+                } else {
+                    Ok(())
+                }
+            }
+
+            // The versions must be identical.
+            Same => {
+                if version != other_version {
+                    Err(VersionError::UnsupportedVersion)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn validate_header(
+        microvm_state: &MicrovmState,
+        current_app_version: Version,
+        _version_support: SnapshotVersionSupport,
+    ) -> Result<()> {
         if microvm_state.header.magic_id != SNAPSHOT_MAGIC {
             return Err(Error::BadMagicNumber);
         }
-        // Versioning is not supported yet.
-        if microvm_state.header.version != SNAPSHOT_VERSION {
-            return Err(Error::UnsupportedVersion(microvm_state.header.version));
-        }
+        Self::validate_version(
+            SNAPSHOT_VERSION.into(),
+            microvm_state.header.snapshot_version,
+            // Cross-version deserialization is not supported yet.
+            SnapshotVersionSupport::Same,
+        )
+        .map_err(|_| {
+            Error::UnsupportedSnapshotVersion(microvm_state.header.snapshot_version.into())
+        })?;
+        Self::validate_version(
+            current_app_version,
+            microvm_state.header.app_version,
+            // Cross-version deserialization is not supported yet.
+            SnapshotVersionSupport::Same,
+        )
+        .map_err(|_| Error::UnsupportedAppVersion(microvm_state.header.app_version.into()))?;
         if microvm_state.header.vcpu_count != microvm_state.vcpu_states.len() as u8 {
             return Err(Error::BadVcpuCount);
         }
@@ -256,6 +418,8 @@ mod tests {
         }
     }
 
+    const APP_VER: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
     impl PartialEq for Error {
         fn eq(&self, other: &Self) -> bool {
             // Guard match with no wildcard to make sure we catch new enum variants.
@@ -273,7 +437,8 @@ mod tests {
                 | Error::Mmap(_)
                 | Error::OpenExisting(_)
                 | Error::Serialize(_)
-                | Error::UnsupportedVersion(_)
+                | Error::UnsupportedAppVersion(_)
+                | Error::UnsupportedSnapshotVersion(_)
                 | Error::Truncate(_) => (),
             };
             match (self, other) {
@@ -290,7 +455,10 @@ mod tests {
                 (Error::Mmap(_), Error::Mmap(_)) => true,
                 (Error::OpenExisting(_), Error::OpenExisting(_)) => true,
                 (Error::Serialize(_), Error::Serialize(_)) => true,
-                (Error::UnsupportedVersion(_), Error::UnsupportedVersion(_)) => true,
+                (Error::UnsupportedAppVersion(_), Error::UnsupportedAppVersion(_)) => true,
+                (Error::UnsupportedSnapshotVersion(_), Error::UnsupportedSnapshotVersion(_)) => {
+                    true
+                }
                 (Error::Truncate(_), Error::Truncate(_)) => true,
                 _ => false,
             }
@@ -300,7 +468,8 @@ mod tests {
     impl PartialEq for SnapshotHdr {
         fn eq(&self, other: &Self) -> bool {
             self.magic_id == other.magic_id
-                && self.version == other.version
+                && self.snapshot_version == other.snapshot_version
+                && self.app_version == other.app_version
                 && self.mem_size_mib == other.mem_size_mib
                 && self.vcpu_count == other.vcpu_count
         }
@@ -378,7 +547,8 @@ mod tests {
     fn build_valid_header(mem_size_mib: u64, vcpu_count: u8) -> SnapshotHdr {
         SnapshotHdr {
             magic_id: SNAPSHOT_MAGIC,
-            version: SNAPSHOT_VERSION,
+            snapshot_version: SNAPSHOT_VERSION.into(),
+            app_version: APP_VER.into(),
             mem_size_mib,
             vcpu_count,
         }
@@ -427,7 +597,8 @@ mod tests {
         header: SnapshotHdr,
     ) -> String {
         let snapshot_path = tmp_snapshot_path.to_str().unwrap();
-        let mut image = SnapshotImage::create_new(snapshot_path, vm_config).unwrap();
+        let mut image =
+            SnapshotImage::create_new(snapshot_path, vm_config, APP_VER.into()).unwrap();
         image
             .serialize_microvm(header, vm_state, vec![vcpu_state], vec![])
             .unwrap();
@@ -463,7 +634,8 @@ mod tests {
             let inaccessible_path = "/foo/bar";
 
             // Test error case: inaccessible snapshot path.
-            let ret = SnapshotImage::create_new(inaccessible_path, vm_config.clone());
+            let ret =
+                SnapshotImage::create_new(inaccessible_path, vm_config.clone(), APP_VER.into());
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
@@ -471,7 +643,7 @@ mod tests {
             );
 
             // Test error case: missing guest memory size.
-            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone());
+            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone(), APP_VER.into());
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
@@ -481,7 +653,7 @@ mod tests {
             vm_config.mem_size_mib = Some(mem_size_mib);
 
             // Test error case: missing vCPU count.
-            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone());
+            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone(), APP_VER.into());
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
@@ -491,7 +663,7 @@ mod tests {
             vm_config.vcpu_count = Some(vcpu_count);
 
             // Good case: snapshot is created.
-            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone());
+            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone(), APP_VER.into());
             assert!(ret.is_ok());
             let mut image = ret.unwrap();
 
@@ -508,7 +680,7 @@ mod tests {
         // Restore snapshot.
         {
             // Test error case: inaccessible path.
-            let ret = SnapshotImage::open_existing("/foo/bar");
+            let ret = SnapshotImage::open_existing("/foo/bar", header.app_version);
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
@@ -516,7 +688,8 @@ mod tests {
             );
 
             // Test error case: path points to a directory.
-            let ret = SnapshotImage::open_existing(std::env::current_dir().unwrap());
+            let ret =
+                SnapshotImage::open_existing(std::env::current_dir().unwrap(), header.app_version);
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
@@ -525,7 +698,7 @@ mod tests {
 
             // Test error case: path points to an invalid snapshot.
             let bad_snap = NamedTempFile::new().unwrap().into_temp_path();
-            let ret = SnapshotImage::open_existing(bad_snap);
+            let ret = SnapshotImage::open_existing(bad_snap, header.app_version);
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
@@ -546,7 +719,7 @@ mod tests {
                     bad_header.clone(),
                 );
                 assert!(std::fs::metadata(bad_image_path.as_str()).is_ok());
-                let ret = SnapshotImage::open_existing(bad_image_path.as_str());
+                let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
                 assert!(ret.is_err());
                 assert_eq!(
                     format!("{}", ret.err().unwrap()),
@@ -555,11 +728,11 @@ mod tests {
             }
 
             {
-                // Test error case: invalid version number in header.
+                // Test error case: invalid snapshot version number in header.
                 let bad_snap = NamedTempFile::new().unwrap();
                 let bad_snap_path = bad_snap.into_temp_path();
                 let mut bad_header = header.clone();
-                bad_header.version = SNAPSHOT_VERSION + 1;
+                bad_header.snapshot_version.build += 1;
                 let bad_image_path = make_snapshot(
                     &bad_snap_path,
                     vm_config.clone(),
@@ -567,11 +740,35 @@ mod tests {
                     vcpu_state.clone(),
                     bad_header.clone(),
                 );
-                let ret = SnapshotImage::open_existing(bad_image_path.as_str());
+                let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
                 assert!(ret.is_err());
                 assert_eq!(
                     format!("{}", ret.err().unwrap()),
-                    format!("Unsupported snapshot version: {}.", bad_header.version)
+                    format!(
+                        "Unsupported snapshot version: {}.",
+                        bad_header.snapshot_version
+                    )
+                );
+            }
+
+            {
+                // Test error case: invalid app version number in header.
+                let bad_snap = NamedTempFile::new().unwrap();
+                let bad_snap_path = bad_snap.into_temp_path();
+                let mut bad_header = header.clone();
+                bad_header.app_version = 0.into();
+                let bad_image_path = make_snapshot(
+                    &bad_snap_path,
+                    vm_config.clone(),
+                    vm_state.clone(),
+                    vcpu_state.clone(),
+                    bad_header.clone(),
+                );
+                let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
+                assert!(ret.is_err());
+                assert_eq!(
+                    format!("{}", ret.err().unwrap()),
+                    "Unsupported app version: 0.0.0."
                 );
             }
 
@@ -588,7 +785,7 @@ mod tests {
                     vcpu_state.clone(),
                     bad_header.clone(),
                 );
-                let ret = SnapshotImage::open_existing(bad_image_path.as_str());
+                let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
                 assert!(ret.is_err());
                 assert_eq!(
                     format!("{}", ret.err().unwrap()),
@@ -597,7 +794,7 @@ mod tests {
             }
 
             // Good case: valid snapshot.
-            let ret = SnapshotImage::open_existing(snapshot_path);
+            let ret = SnapshotImage::open_existing(snapshot_path, header.app_version);
             assert!(ret.is_ok());
             let image = ret.unwrap();
 
@@ -708,12 +905,68 @@ mod tests {
             )
         );
         assert_eq!(
-            format!("{}", Error::UnsupportedVersion(42)),
-            "Unsupported snapshot version: 42."
+            format!("{}", Error::UnsupportedAppVersion(0x0001_0002_0000_0003)),
+            "Unsupported app version: 1.2.3."
+        );
+        assert_eq!(
+            format!("{}", Error::UnsupportedSnapshotVersion(42)),
+            "Unsupported snapshot version: 0.0.42."
         );
         assert_eq!(
             format!("{}", Error::Truncate(io::Error::from_raw_os_error(0))),
             format!("Failed to truncate snapshot file: {}", err0_str)
         );
+    }
+
+    #[test]
+    fn test_validate_version() {
+        use SnapshotVersionSupport::*;
+
+        assert!(SnapshotImage::validate_version(1u64.into(), 2u64.into(), Any).is_ok());
+
+        assert!(SnapshotImage::validate_version(
+            (1u16, 0u16, 0u32).into(),
+            (2u16, 0u16, 0u32).into(),
+            Major(1)
+        )
+        .is_ok());
+        assert!(SnapshotImage::validate_version(
+            (2u16, 0u16, 0u32).into(),
+            (1u16, 0u16, 0u32).into(),
+            Major(1)
+        )
+        .is_ok());
+        assert!(SnapshotImage::validate_version(
+            (1u16, 0u16, 0u32).into(),
+            (3u16, 0u16, 0u32).into(),
+            Major(1)
+        )
+        .is_err());
+
+        assert!(SnapshotImage::validate_version(
+            (0u16, 1u16, 0u32).into(),
+            (0u16, 2u16, 0u32).into(),
+            Minor(1)
+        )
+        .is_ok());
+        assert!(SnapshotImage::validate_version(
+            (0u16, 2u16, 0u32).into(),
+            (0u16, 1u16, 0u32).into(),
+            Minor(1)
+        )
+        .is_ok());
+        assert!(SnapshotImage::validate_version(
+            (0u16, 1u16, 0u32).into(),
+            (0u16, 3u16, 0u32).into(),
+            Minor(1)
+        )
+        .is_err());
+
+        assert!(SnapshotImage::validate_version(1.into(), 2.into(), Build(1)).is_ok());
+        assert!(SnapshotImage::validate_version(2.into(), 1.into(), Build(1)).is_ok());
+        assert!(SnapshotImage::validate_version(1.into(), 3.into(), Build(1)).is_err());
+
+        assert!(SnapshotImage::validate_version(1.into(), 1.into(), Same).is_ok());
+        assert!(SnapshotImage::validate_version(1.into(), 2.into(), Same).is_err());
     }
 }
