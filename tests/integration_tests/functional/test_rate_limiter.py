@@ -1,9 +1,11 @@
 # Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Tests that fail if network throughput does not obey rate limits."""
+import platform
+from subprocess import run, PIPE
 import time
 
-from subprocess import run, PIPE
+import pytest
 
 import host_tools.network as net_tools  # pylint: disable=import-error
 
@@ -35,52 +37,11 @@ def test_tx_rate_limiting(test_microvm_with_ssh, network_config):
 
     test_microvm.basic_config()
 
-    # For this test we will be adding three interfaces:
-    # 1. No rate limiting
-    # 2. Rate limiting without burst
-    # 3. Rate limiting with burst
-    host_ips = ['', '', '']
-    guest_ips = ['', '', '']
-
-    iface_id = '1'
-    # Create tap before configuring interface.
-    _tap1, host_ip, guest_ip = test_microvm.ssh_network_config(
-        network_config,
-        iface_id
+    # The taps needs to be returned and kept in scope, otherwise the interfaces
+    # get removed in the destructor.
+    _taps, host_ips, guest_ips = _config_tx_rate_limiting(
+        test_microvm, network_config
     )
-    guest_ips[0] = guest_ip
-    host_ips[0] = host_ip
-
-    iface_id = '2'
-    tx_rate_limiter_no_burst = {
-        'bandwidth': {
-            'size': RATE_LIMIT_BYTES,
-            'refill_time': RATE_LIMIT_REFILL_TIME
-        }
-    }
-    _tap2, host_ip, guest_ip = test_microvm.ssh_network_config(
-        network_config,
-        iface_id,
-        tx_rate_limiter=tx_rate_limiter_no_burst
-    )
-    guest_ips[1] = guest_ip
-    host_ips[1] = host_ip
-
-    iface_id = '3'
-    tx_rate_limiter_with_burst = {
-        'bandwidth': {
-            'size': RATE_LIMIT_BYTES,
-            'one_time_burst': BURST_SIZE,
-            'refill_time': RATE_LIMIT_REFILL_TIME
-        }
-    }
-    _tap3, host_ip, guest_ip = test_microvm.ssh_network_config(
-        network_config,
-        iface_id,
-        tx_rate_limiter=tx_rate_limiter_with_burst
-    )
-    guest_ips[2] = guest_ip
-    host_ips[2] = host_ip
 
     test_microvm.start()
 
@@ -95,101 +56,67 @@ def test_rx_rate_limiting(test_microvm_with_ssh, network_config):
 
     test_microvm.basic_config()
 
-    # For this test we will be adding three interfaces:
-    # 1. No rate limiting
-    # 2. Rate limiting without burst
-    # 3. Rate limiting with burst
-    host_ips = ['', '', '']
-    guest_ips = ['', '', '']
-
-    iface_id = '1'
-    # Create tap before configuring interface.
-    _tap1, host_ip, guest_ip = test_microvm.ssh_network_config(
-        network_config,
-        iface_id
+    # The taps needs to be returned and kept in scope, otherwise the interfaces
+    # get removed in the destructor.
+    _taps, _host_ips, guest_ips = _config_rx_rate_limiting(
+        test_microvm_with_ssh, network_config
     )
-    guest_ips[0] = guest_ip
-    host_ips[0] = host_ip
 
-    iface_id = '2'
-    rx_rate_limiter_no_burst = {
-        'bandwidth': {
-            'size': RATE_LIMIT_BYTES,
-            'refill_time': RATE_LIMIT_REFILL_TIME
-        }
-    }
-    _tap2, host_ip, guest_ip = test_microvm.ssh_network_config(
-        network_config,
-        iface_id,
-        rx_rate_limiter=rx_rate_limiter_no_burst
-    )
-    guest_ips[1] = guest_ip
-    host_ips[1] = host_ip
-
-    iface_id = '3'
-    rx_rate_limiter_no_burst = {
-        'bandwidth': {
-            'size': RATE_LIMIT_BYTES,
-            'one_time_burst': BURST_SIZE,
-            'refill_time': RATE_LIMIT_REFILL_TIME
-        }
-    }
-    _tap3, host_ip, guest_ip = test_microvm.ssh_network_config(
-        network_config,
-        iface_id,
-        rx_rate_limiter=rx_rate_limiter_no_burst
-    )
-    guest_ips[2] = guest_ip
-    host_ips[2] = host_ip
-
-    # Start the microvm.
     test_microvm.start()
 
     _check_rx_rate_limiting(test_microvm, guest_ips)
     _check_rx_rate_limit_patch(test_microvm, guest_ips)
 
 
-def _check_tx_rate_limiting(test_microvm, guest_ips, host_ips):
-    """Check that the transmit rate is within expectations."""
-    # Start iperf on the host as this is the tx rate limiting test.
-    _start_local_iperf(test_microvm.jailer.netns_cmd_prefix())
+@pytest.mark.skipif(
+    platform.machine() != "x86_64",
+    reason="not yet implemented on aarch64"
+)
+def test_clone_tx_rate_limiting(test_microvm_with_ssh, network_config):
+    """Run iperf tx in a resumed microVM; check limiting effect."""
+    test_microvm = test_microvm_with_ssh
 
-    # First step: get the transfer rate when no rate limiting is enabled.
-    # We are receiving the result in KBytes from iperf; 1000 converts to Bytes.
-    iperf_cmd = '{} -c {} -t{} -f KBytes'.format(
-        IPERF_BINARY,
-        host_ips[0],
-        IPERF_TRANSMIT_TIME
+    # Cloning and network namespaces don't work well together yet.
+    test_microvm.disable_netns()
+
+    test_microvm.spawn()
+
+    test_microvm.basic_config(memfile=test_microvm.tmp_path())
+
+    # The taps needs to be returned and kept in scope, otherwise the interfaces
+    # get removed in the destructor.
+    _taps, host_ips, guest_ips = _config_tx_rate_limiting(
+        test_microvm_with_ssh, network_config
     )
 
-    iperf_out = _run_iperf_on_guest(test_microvm, iperf_cmd, guest_ips[0])
-    iperf_out = _process_iperf_output(iperf_out)[1]
+    test_microvm.start()
 
-    rate_no_limit_bytes = 1000 * float(iperf_out)
-
-    # Second step: get the number of bytes when rate limiting is on.
+    # Start iperf on the host as this is the tx rate limiting test.
+    _start_local_iperf(test_microvm.jailer.netns_cmd_prefix())
 
     # Calculate the number of bytes that are expected to be sent
     # in each second once the rate limiting is enabled.
     rate_limit_bps = 1000 * RATE_LIMIT_BYTES / float(RATE_LIMIT_REFILL_TIME)
-
-    # Use iperf for some number of seconds to get the number of bytes it sent
-    # with rate limiting on.
-    iperf_cmd = '{} -c {} -t{} -f KBytes'.format(
-        IPERF_BINARY,
-        host_ips[1],
-        IPERF_TRANSMIT_TIME
-    )
-    iperf_out = _run_iperf_on_guest(
-        test_microvm, iperf_cmd, guest_ips[1]
-    )
-    iperf_out = _process_iperf_output(iperf_out)[1]
-
-    rate_limit_bytes_achieved = 1000 * float(iperf_out)
     rate_limit_bytes_expected = rate_limit_bps
 
+    # Then, get the number of bytes from clone when rate limiting is on.
+
+    # The APIs for snapshot related procedures does not get timed (yet?).
+    test_microvm.api_session.untime()
+
+    # Pause to snapshot.
+    snapshot_filename = test_microvm.pause_to_snapshot()
+
+    # Spawn clone.
+    test_microvm.resume_from_snapshot(snapshot_filename)
+
+    # Run rate limited iperf in the clone.
+    rate_limit_bytes_achieved = 1000 * _tx_rate_bytes(
+        test_microvm, host_ips[1], guest_ips[1]
+    )
+
     # Assert on the bytes expected and achieved with rate limiting on; we are
-    # expecting a difference no bigger than MAX_RATE_LIMIT_BYTES_DIFF
+    # expecting a difference no bigger than MAX_RATE_LIMIT_BYTES_DIFF.
     assert (
             _get_difference(
                 rate_limit_bytes_achieved,
@@ -198,29 +125,66 @@ def _check_tx_rate_limiting(test_microvm, guest_ips, host_ips):
             < MAX_BYTES_DIFF_PERCENTAGE
     )
 
-    # Third step: get the number of bytes when rate limiting is on and there is
-    # an initial burst size from where to consume.
 
-    # Use iperf to obtain the bandwidth when there is burst to consume from.
-    iperf_cmd = '{} -c {} -n{} -f KBytes'.format(
-        IPERF_BINARY,
-        host_ips[2],
-        BURST_SIZE
+@pytest.mark.skipif(
+    platform.machine() != "x86_64",
+    reason="not yet implemented on aarch64"
+)
+def test_clone_tx_rate_limiting_burst(test_microvm_with_ssh, network_config):
+    """Run iperf tx in a resumed microVM; check burst limiting effect."""
+    test_microvm = test_microvm_with_ssh
+
+    # Cloning and network namespaces don't work well together yet.
+    test_microvm.disable_netns()
+
+    test_microvm.spawn()
+
+    test_microvm.basic_config(memfile=test_microvm.tmp_path())
+
+    # The taps needs to be returned and kept in scope, otherwise the interfaces
+    # get removed in the destructor.
+    _taps, host_ips, guest_ips = _config_tx_rate_limiting(
+        test_microvm_with_ssh, network_config
     )
-    iperf_out = _run_iperf_on_guest(test_microvm, iperf_cmd, guest_ips[2])
-    # iperf will give variable number of output lines depending on how much
-    # time it took to send the amount specified.
-    burst_bw_first_time_achieved = _process_iperf_output(iperf_out)[1]
+
+    test_microvm.start()
+
+    # Start iperf on the host as this is the tx rate limiting test.
+    _start_local_iperf(test_microvm.jailer.netns_cmd_prefix())
+
+    # First step: get the transfer rate when no rate limiting is enabled.
+    rate_no_limit_bytes = 1000 * _tx_rate_bytes(
+        test_microvm, host_ips[0], guest_ips[0]
+    )
+
+    # Second step: get the number of bytes when rate limiting is on and there
+    # is an initial burst size from where to consume in the original VM.
+    burst_bw_first_time_achieved = _tx_rate_burst(
+        test_microvm, host_ips[2], guest_ips[2], BURST_SIZE
+    )[1]
+
+    # Third step: get the number of bytes from clone when rate limiting is on.
+
+    # The APIs for snapshot related procedures does not get timed (yet?).
+    test_microvm.api_session.untime()
+
+    # Pause to snapshot.
+    snapshot_filename = test_microvm.pause_to_snapshot()
+
+    # Spawn clone.
+    test_microvm.resume_from_snapshot(snapshot_filename)
+
+    # Calculate the number of bytes that are expected to be sent
+    # in each second once the rate limiting is enabled.
+    rate_limit_bps = 1000 * RATE_LIMIT_BYTES / float(RATE_LIMIT_REFILL_TIME)
 
     # The second time we use iperf to send bytes we need to see that the burst
     # was consumed and that the transmit rate is now equal to the rate limit.
     # We are sending the amount of bytes that can be sent in 1 sec with rate
-    # limiting enabled.
-    iperf_cmd = '{} -c {} -n{} -f KBytes'.format(
-        IPERF_BINARY, host_ips[2], rate_limit_bps
+    # limiting enabled in the clone.
+    iperf_out_time, iperf_out_bw = _tx_rate_burst(
+        test_microvm, host_ips[2], guest_ips[2], rate_limit_bps
     )
-    iperf_out = _run_iperf_on_guest(test_microvm, iperf_cmd, guest_ips[2])
-    iperf_out_time, iperf_out_bw = _process_iperf_output(iperf_out)
 
     # Test that the bandwidth we obtained first time is at least as two times
     # higher than the one obtained when rate limiting is on.
@@ -242,23 +206,288 @@ def _check_tx_rate_limiting(test_microvm, guest_ips, host_ips):
     )
 
 
-def _check_rx_rate_limiting(test_microvm, guest_ips):
-    """Check that the receiving rate is within expectations."""
+@pytest.mark.skipif(
+    platform.machine() != "x86_64",
+    reason="not yet implemented on aarch64"
+)
+def test_clone_rx_rate_limiting(test_microvm_with_ssh, network_config):
+    """Run iperf rx in a resumed microVM; check limiting effect."""
+    test_microvm = test_microvm_with_ssh
+
+    # Cloning and network namespaces don't work well together yet.
+    test_microvm.disable_netns()
+
+    test_microvm.spawn()
+
+    test_microvm.basic_config(memfile=test_microvm.tmp_path())
+
+    # The taps needs to be returned and kept in scope, otherwise the interfaces
+    # get removed in the destructor.
+    _taps, _host_ips, guest_ips = _config_rx_rate_limiting(
+        test_microvm_with_ssh, network_config
+    )
+
+    test_microvm.start()
+
+    # Pause and resume to check the RX rate only in the clone.
+
+    # The APIs for snapshot related procedures does not get timed (yet?).
+    test_microvm.api_session.untime()
+
+    # Pause to snapshot.
+    snapshot_filename = test_microvm.pause_to_snapshot()
+
+    # Spawn clone.
+    test_microvm.resume_from_snapshot(snapshot_filename)
+
+    # Start iperf on guest.
+    _start_iperf_on_guest(test_microvm, guest_ips[0])
+
+    # Get the number of bytes when rate limiting is on.
+
+    # Calculate the number of bytes that are expected to be sent
+    # in each second once the rate limiting is enabled.
+    rate_limit_bps = 1000 * RATE_LIMIT_BYTES / float(RATE_LIMIT_REFILL_TIME)
+
+    rate_limit_bytes_achieved = 1000 * _rx_rate_bytes(
+        test_microvm, guest_ips[1]
+    )
+    rate_limit_bytes_expected = rate_limit_bps
+
+    # Assert on the bytes expected and achieved with rate limiting on; we are
+    # expecting a difference no bigger than MAX_RATE_LIMIT_BYTES_DIFF
+    assert (
+            _get_difference(
+                rate_limit_bytes_achieved,
+                rate_limit_bytes_expected
+            )
+            < MAX_BYTES_DIFF_PERCENTAGE
+    )
+
+
+@pytest.mark.skipif(
+    platform.machine() != "x86_64",
+    reason="not yet implemented on aarch64"
+)
+def test_clone_rx_rate_limiting_burst(test_microvm_with_ssh, network_config):
+    """Run iperf rx in a resumed microVM; check burst limiting effect."""
+    test_microvm = test_microvm_with_ssh
+
+    # Cloning and network namespaces don't work well together yet.
+    test_microvm.disable_netns()
+
+    test_microvm.spawn()
+
+    test_microvm.basic_config(memfile=test_microvm.tmp_path())
+
+    # The taps needs to be returned and kept in scope, otherwise the interfaces
+    # get removed in the destructor.
+    _taps, _host_ips, guest_ips = _config_rx_rate_limiting(
+        test_microvm_with_ssh, network_config
+    )
+
+    test_microvm.start()
+
     # Start iperf on guest.
     _start_iperf_on_guest(test_microvm, guest_ips[0])
 
     # First step: get the transfer rate when no rate limiting is enabled.
+    rate_no_limit_bytes = _rx_rate_bytes(test_microvm, guest_ips[0])
+
+    # Consume a burst in the original microVM.
+    # Use iperf to obtain the time interval that a BURST_SIZE (way larger
+    # than the bucket's size) can be sent over the network.
+    burst_bw_first_time_achieved = _rx_rate_burst(
+        test_microvm, guest_ips[2], BURST_SIZE
+    )[1]
+
+    # In the clone, verify that the burst was consumed.
+
+    # The APIs for snapshot related procedures does not get timed (yet?).
+    test_microvm.api_session.untime()
+
+    # Pause to snapshot.
+    snapshot_filename = test_microvm.pause_to_snapshot()
+
+    # Spawn clone.
+    test_microvm.resume_from_snapshot(snapshot_filename)
+
+    # Calculate the number of bytes that are expected to be sent
+    # in each second once the rate limiting is enabled.
+    rate_limit_bps = 1000 * RATE_LIMIT_BYTES / float(RATE_LIMIT_REFILL_TIME)
+
+    # The second time we use iperf to send bytes we need to see that the burst
+    # was consumed and that the transmit rate is now equal to the rate limit.
+    # We are sending the amount of bytes that can be sent in 1 sec with rate
+    # rate limiting enabled.
+    iperf_out_time, iperf_out_bw = _rx_rate_burst(
+        test_microvm, guest_ips[2], rate_limit_bps
+    )
+
+    # Test that the bandwidth we obtained first time is at least two times
+    # higher than the one obtained when rate limiting is on.
+    assert _get_difference(burst_bw_first_time_achieved, iperf_out_bw) > 100
+    # Test that the bandwidth we obtained second time is at least two times
+    # lower than the one obtained when no rate limiting is in place.
+    assert _get_difference(rate_no_limit_bytes, iperf_out_bw) > 100
+
+    burst_consumed_time_achieved = iperf_out_time
+    # We expect it to take around 1 sec now.
+    burst_consumed_time_expected = 1
+
+    assert (
+            _get_difference(
+                burst_consumed_time_achieved,
+                burst_consumed_time_expected
+            )
+            < MAX_TIME_DIFF
+    )
+
+
+def _config_tx_rate_limiting(test_microvm, network_config):
+    """Configure TX rate limited network interfaces."""
+    # For this test we will be adding three interfaces:
+    # 1. No rate limiting
+    # 2. Rate limiting without burst
+    # 3. Rate limiting with burst
+    host_ips = ['', '', '']
+    guest_ips = ['', '', '']
+    taps = [None, None, None]
+
+    iface_id = '1'
+    # Create tap before configuring interface.
+    taps[0], host_ip, guest_ip = test_microvm.ssh_network_config(
+        network_config,
+        iface_id
+    )
+    guest_ips[0] = guest_ip
+    host_ips[0] = host_ip
+
+    iface_id = '2'
+    tx_rate_limiter_no_burst = {
+        'bandwidth': {
+            'size': RATE_LIMIT_BYTES,
+            'refill_time': RATE_LIMIT_REFILL_TIME
+        }
+    }
+    taps[1], host_ip, guest_ip = test_microvm.ssh_network_config(
+        network_config,
+        iface_id,
+        tx_rate_limiter=tx_rate_limiter_no_burst
+    )
+    guest_ips[1] = guest_ip
+    host_ips[1] = host_ip
+
+    iface_id = '3'
+    tx_rate_limiter_with_burst = {
+        'bandwidth': {
+            'size': RATE_LIMIT_BYTES,
+            'one_time_burst': BURST_SIZE,
+            'refill_time': RATE_LIMIT_REFILL_TIME
+        }
+    }
+    taps[2], host_ip, guest_ip = test_microvm.ssh_network_config(
+        network_config,
+        iface_id,
+        tx_rate_limiter=tx_rate_limiter_with_burst
+    )
+    guest_ips[2] = guest_ip
+    host_ips[2] = host_ip
+
+    return taps, host_ips, guest_ips
+
+
+def _config_rx_rate_limiting(test_microvm, network_config):
+    """Configure RX rate limited network interfaces."""
+    # For this test we will be adding three interfaces:
+    # 1. No rate limiting
+    # 2. Rate limiting without burst
+    # 3. Rate limiting with burst
+    host_ips = ['', '', '']
+    guest_ips = ['', '', '']
+    taps = [None, None, None]
+
+    iface_id = '1'
+    # Create tap before configuring interface.
+    taps[0], host_ip, guest_ip = test_microvm.ssh_network_config(
+        network_config,
+        iface_id
+    )
+    guest_ips[0] = guest_ip
+    host_ips[0] = host_ip
+
+    iface_id = '2'
+    rx_rate_limiter_no_burst = {
+        'bandwidth': {
+            'size': RATE_LIMIT_BYTES,
+            'refill_time': RATE_LIMIT_REFILL_TIME
+        }
+    }
+    taps[1], host_ip, guest_ip = test_microvm.ssh_network_config(
+        network_config,
+        iface_id,
+        rx_rate_limiter=rx_rate_limiter_no_burst
+    )
+    guest_ips[1] = guest_ip
+    host_ips[1] = host_ip
+
+    iface_id = '3'
+    rx_rate_limiter_no_burst = {
+        'bandwidth': {
+            'size': RATE_LIMIT_BYTES,
+            'one_time_burst': BURST_SIZE,
+            'refill_time': RATE_LIMIT_REFILL_TIME
+        }
+    }
+    taps[2], host_ip, guest_ip = test_microvm.ssh_network_config(
+        network_config,
+        iface_id,
+        rx_rate_limiter=rx_rate_limiter_no_burst
+    )
+    guest_ips[2] = guest_ip
+    host_ips[2] = host_ip
+
+    return taps, host_ips, guest_ips
+
+
+def _tx_rate_bytes(test_microvm, host_ip, guest_ip):
+    """Transmit from the guest for a fixed time and return TX rate."""
     # We are receiving the result in KBytes from iperf; 1000 converts to Bytes.
-    iperf_cmd = '{} {} -c {} -t{} -f KBytes'.format(
-        test_microvm.jailer.netns_cmd_prefix(),
+    iperf_cmd = '{} -c {} -t{} -f KBytes'.format(
         IPERF_BINARY,
-        guest_ips[0],
+        host_ip,
         IPERF_TRANSMIT_TIME
     )
-    iperf_out = _run_local_iperf(iperf_cmd)
+
+    iperf_out = _run_iperf_on_guest(test_microvm, iperf_cmd, guest_ip)
     iperf_out = _process_iperf_output(iperf_out)[1]
 
-    rate_no_limit_bytes = float(iperf_out)
+    return float(iperf_out)
+
+
+def _tx_rate_burst(test_microvm, host_ip, guest_ip, burst_size):
+    """Transmit a fixed number of buffers from the guest and return TX rate."""
+    # Use iperf to obtain the bandwidth when there is burst to consume from.
+    iperf_cmd = '{} -c {} -n{} -f KBytes'.format(
+        IPERF_BINARY,
+        host_ip,
+        burst_size
+    )
+    iperf_out = _run_iperf_on_guest(test_microvm, iperf_cmd, guest_ip)
+    # iperf will give variable number of output lines depending on how much
+    # time it took to send the amount specified.
+    return _process_iperf_output(iperf_out)
+
+
+def _check_tx_rate_limiting(test_microvm, guest_ips, host_ips):
+    """Check that the transmit rate is within expectations."""
+    # Start iperf on the host as this is the tx rate limiting test.
+    _start_local_iperf(test_microvm.jailer.netns_cmd_prefix())
+
+    # First step: get the transfer rate when no rate limiting is enabled.
+    rate_no_limit_bytes = 1000 * _tx_rate_bytes(
+        test_microvm, host_ips[0], guest_ips[0]
+    )
 
     # Second step: get the number of bytes when rate limiting is on.
 
@@ -266,17 +495,100 @@ def _check_rx_rate_limiting(test_microvm, guest_ips):
     # in each second once the rate limiting is enabled.
     rate_limit_bps = 1000 * RATE_LIMIT_BYTES / float(RATE_LIMIT_REFILL_TIME)
 
-    # Use iperf for 2 seconds to get the number of bytes it sent with rate
-    # limiting on.
+    rate_limit_bytes_achieved = 1000 * _tx_rate_bytes(
+        test_microvm, host_ips[1], guest_ips[1]
+    )
+    rate_limit_bytes_expected = rate_limit_bps
+
+    # Assert on the bytes expected and achieved with rate limiting on; we are
+    # expecting a difference no bigger than MAX_RATE_LIMIT_BYTES_DIFF
+    assert (
+            _get_difference(
+                rate_limit_bytes_achieved,
+                rate_limit_bytes_expected
+            )
+            < MAX_BYTES_DIFF_PERCENTAGE
+    )
+
+    # Third step: get the number of bytes when rate limiting is on and there is
+    # an initial burst size from where to consume.
+
+    burst_bw_first_time_achieved = _tx_rate_burst(
+        test_microvm, host_ips[2], guest_ips[2], BURST_SIZE
+    )[1]
+
+    # The second time we use iperf to send bytes we need to see that the burst
+    # was consumed and that the transmit rate is now equal to the rate limit.
+    # We are sending the amount of bytes that can be sent in 1 sec with rate
+    # limiting enabled.
+    iperf_out_time, iperf_out_bw = _tx_rate_burst(
+        test_microvm, host_ips[2], guest_ips[2], rate_limit_bps
+    )
+
+    # Test that the bandwidth we obtained first time is at least as two times
+    # higher than the one obtained when rate limiting is on.
+    assert _get_difference(burst_bw_first_time_achieved, iperf_out_bw) > 100
+    # Test that the bandwidth we obtained second time is at least two times
+    # lower than the one obtained when no rate limiting is in place.
+    assert _get_difference(rate_no_limit_bytes, iperf_out_bw) > 100
+
+    burst_consumed_time_achieved = iperf_out_time
+    # We expect it to take around 1 sec now.
+    burst_consumed_time_expected = 1
+
+    assert (
+            _get_difference(
+                burst_consumed_time_achieved,
+                burst_consumed_time_expected
+            )
+            < MAX_TIME_DIFF
+    )
+
+
+def _rx_rate_bytes(test_microvm, guest_ip):
+    """Receive in the guest for a fixed time and return RX rate."""
+    # We are receiving the result in KBytes from iperf; 1000 converts to Bytes.
     iperf_cmd = '{} {} -c {} -t{} -f KBytes'.format(
         test_microvm.jailer.netns_cmd_prefix(),
         IPERF_BINARY,
-        guest_ips[1],
+        guest_ip,
         IPERF_TRANSMIT_TIME
     )
     iperf_out = _run_local_iperf(iperf_cmd)
-    iperf_out = _process_iperf_output(iperf_out)[1]
-    rate_limit_bytes_achieved = 1000 * float(iperf_out)
+    return float(_process_iperf_output(iperf_out)[1])
+
+
+def _rx_rate_burst(test_microvm, guest_ip, burst_size):
+    """Receive a fixed number of buffers in the guest and return RX rate."""
+    iperf_cmd = '{} {} -c {} -n{} -f KBytes'.format(
+        test_microvm.jailer.netns_cmd_prefix(),
+        IPERF_BINARY,
+        guest_ip,
+        burst_size)
+    iperf_out = _run_local_iperf(iperf_cmd)
+
+    # iperf will give variable number of output lines depending on how much
+    # time it took to send the amount specified.
+    return _process_iperf_output(iperf_out)
+
+
+def _check_rx_rate_limiting(test_microvm, guest_ips):
+    """Check that the receiving rate is within expectations."""
+    # Start iperf on guest.
+    _start_iperf_on_guest(test_microvm, guest_ips[0])
+
+    # First step: get the transfer rate when no rate limiting is enabled.
+    rate_no_limit_bytes = _rx_rate_bytes(test_microvm, guest_ips[0])
+
+    # Second step: get the number of bytes when rate limiting is on.
+
+    # Calculate the number of bytes that are expected to be sent
+    # in each second once the rate limiting is enabled.
+    rate_limit_bps = 1000 * RATE_LIMIT_BYTES / float(RATE_LIMIT_REFILL_TIME)
+
+    rate_limit_bytes_achieved = 1000 * _rx_rate_bytes(
+        test_microvm, guest_ips[1]
+    )
     rate_limit_bytes_expected = rate_limit_bps
 
     # Assert on the bytes expected and achieved with rate limiting on; we are
@@ -294,29 +606,17 @@ def _check_rx_rate_limiting(test_microvm, guest_ips):
 
     # Use iperf to obtain the time interval that a BURST_SIZE (way larger
     # than the bucket's size) can be sent over the network.
-    iperf_cmd = '{} {} -c {} -n{} -f KBytes'.format(
-        test_microvm.jailer.netns_cmd_prefix(),
-        IPERF_BINARY,
-        guest_ips[2],
-        BURST_SIZE)
-    iperf_out = _run_local_iperf(iperf_cmd)
-
-    # iperf will give variable number of output lines depending on how much
-    # time it took to send the amount specified.
-    burst_bw_first_time_achieved = _process_iperf_output(iperf_out)[1]
+    burst_bw_first_time_achieved = _rx_rate_burst(
+        test_microvm, guest_ips[2], BURST_SIZE
+    )[1]
 
     # The second time we use iperf to send bytes we need to see that the burst
     # was consumed and that the transmit rate is now equal to the rate limit.
     # We are sending the amount of bytes that can be sent in 1 sec with rate
     # rate limiting enabled.
-    iperf_cmd = '{} {} -c {} -n{} -f KBytes'.format(
-        test_microvm.jailer.netns_cmd_prefix(),
-        IPERF_BINARY,
-        guest_ips[2],
-        rate_limit_bps
+    iperf_out_time, iperf_out_bw = _rx_rate_burst(
+        test_microvm, guest_ips[2], rate_limit_bps
     )
-    iperf_out = _run_local_iperf(iperf_cmd)
-    iperf_out_time, iperf_out_bw = _process_iperf_output(iperf_out)
 
     # Test that the bandwidth we obtained first time is at least two times
     # higher than the one obtained when rate limiting is on.

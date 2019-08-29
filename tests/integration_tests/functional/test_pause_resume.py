@@ -77,18 +77,14 @@ def test_snapshot(test_microvm_with_ssh, network_config):
     test_microvm = test_microvm_with_ssh
 
     # Cloning and network namespaces don't work well together yet.
-    test_microvm.jailer.netns = None
-    test_microvm.ssh_config['netns_file_path'] = None
+    test_microvm.disable_netns()
 
     test_microvm.spawn()
-
-    memfile = test_microvm.tmp_path()
-    snapshot_filename = test_microvm.tmp_path()
 
     # Set up the microVM with 1 vCPUs, 256 MiB of file-backed RAM, no network
     # ifaces and a root file system with the rw permission. The network
     # interface is added after we get a unique MAC and IP.
-    test_microvm.basic_config(memfile=memfile)
+    test_microvm.basic_config(memfile=test_microvm.tmp_path())
 
     _tap, _, _ = test_microvm.ssh_network_config(network_config, '1')
 
@@ -105,6 +101,7 @@ def test_snapshot(test_microvm_with_ssh, network_config):
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
     # Snapshotting the microVM before being started should not work.
+    snapshot_filename = test_microvm.tmp_path()
     response = test_microvm.actions.put(action_type='PauseToSnapshot',
                                         payload=snapshot_filename)
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
@@ -135,12 +132,7 @@ def test_snapshot(test_microvm_with_ssh, network_config):
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
     # Spawn clone.
-    test_microvm.jailer.cleanup(reuse_jail=True)
-    test_microvm.spawn()
-
-    response = test_microvm.actions.put(action_type='ResumeFromSnapshot',
-                                        payload=snapshot_filename)
-    assert test_microvm.api_session.is_status_no_content(response.status_code)
+    test_microvm.resume_from_snapshot(snapshot_filename)
 
     # Reconnect ssh.
     ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)

@@ -28,6 +28,8 @@ from framework.resources import Actions, BootSource, Drive, Logger, MMDS, \
     MachineConfigure, Network, Vsock
 
 
+# Pylint isn't OK with more than 20 public methods, but we need them.
+# pylint: disable=R0904
 class Microvm:
     """Class to represent a Firecracker microvm.
 
@@ -457,11 +459,42 @@ class Microvm:
         self.ssh_config['hostname'] = guest_ip
         return tap, host_ip, guest_ip
 
+    def disable_netns(self):
+        """Disable network namespaces functionality, to use with cloning."""
+        # Cloning and network namespaces don't work well together yet.
+        self.jailer.netns = None
+        self.ssh_config['netns_file_path'] = None
+
     def start(self, snapshot_path=None):
-        """Start the microvm.
+        """Start the microVM.
 
         This function validates that the microVM boots successfully.
         """
         response = self.actions.put(action_type='InstanceStart',
                                     payload=snapshot_path)
         assert self._api_session.is_status_no_content(response.status_code)
+
+    def pause_to_snapshot(self, snapshot_filename=None):
+        """Pause the microVM to snapshot.
+
+        This function validates that the microVM pauses successfully and
+        returns the name of the snapshot file.
+        """
+        if not snapshot_filename:
+            snapshot_filename = self.tmp_path()
+        response = self.actions.put(action_type='PauseToSnapshot',
+                                    payload=snapshot_filename)
+        assert self.api_session.is_status_no_content(response.status_code)
+        return snapshot_filename
+
+    def resume_from_snapshot(self, snapshot_filename):
+        """Resumes a microVM from a snapshot.
+
+        This function validates that resuming works.
+        """
+        self.jailer.cleanup(reuse_jail=True)
+        self.spawn()
+
+        response = self.actions.put(action_type='ResumeFromSnapshot',
+                                    payload=snapshot_filename)
+        assert self.api_session.is_status_no_content(response.status_code)
