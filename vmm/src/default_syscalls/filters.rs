@@ -60,6 +60,8 @@ pub fn default_filter() -> Result<SeccompFilter, Error> {
                 ]],
             ),
             allow_syscall(SYS_fstat),
+            // WISP specific syscall - used by File::set_len.
+            allow_syscall(libc::SYS_ftruncate),
             #[cfg(target_arch = "aarch64")]
             allow_syscall(SYS_newfstatat),
             allow_syscall_if(
@@ -96,7 +98,11 @@ pub fn default_filter() -> Result<SeccompFilter, Error> {
                 )?],],
             ),
             allow_syscall(SYS_mmap),
+            // WISP specific syscall - used by msync.
+            allow_syscall(libc::SYS_msync),
             allow_syscall(libc::SYS_munmap),
+            // WISP specific syscall - used by thread::sleep.
+            allow_syscall(libc::SYS_nanosleep),
             #[cfg(target_arch = "x86_64")]
             allow_syscall(libc::SYS_open),
             allow_syscall(libc::SYS_openat),
