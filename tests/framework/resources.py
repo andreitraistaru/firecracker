@@ -270,7 +270,7 @@ class MachineConfigure:
             mem_size_mib=None,
             ht_enabled=None,
             cpu_template=None,
-            memfile=None
+            mem_file_path=None
     ):
         """Compose the json associated to this type of API request."""
         datax = {}
@@ -282,8 +282,8 @@ class MachineConfigure:
             datax['ht_enabled'] = ht_enabled
         if cpu_template is not None:
             datax['cpu_template'] = cpu_template
-        if memfile is not None:
-            datax['memfile'] = memfile
+        if mem_file_path is not None:
+            datax['mem_file_path'] = mem_file_path
         return datax
 
 
@@ -383,6 +383,73 @@ class Network:
             datax['tx_rate_limiter'] = tx_rate_limiter
         if rx_rate_limiter is not None:
             datax['rx_rate_limiter'] = rx_rate_limiter
+        return datax
+
+
+class SnapshotCreate:
+    """Facility for sending snapshot instructions on the microvm."""
+
+    SNAPSHOT_CREATE_URL = 'snapshot/create'
+
+    __snapshot_cfg_url = None
+    __api_session = None
+
+    def __init__(self, api_usocket_full_name, api_session):
+        """Specify the information needed for sending API requests."""
+        url_encoded_path = urllib.parse.quote_plus(api_usocket_full_name)
+        api_url = API_USOCKET_URL_PREFIX + url_encoded_path + '/'
+        type(self).__snapshot_cfg_url = api_url + self.SNAPSHOT_CREATE_URL
+        type(self).__api_session = api_session
+
+    @classmethod
+    def put(cls, **args):
+        """Create a snapshot of the microvm."""
+        datax = cls.create_json(**args)
+        return SnapshotCreate.__api_session.put(
+            "{}".format(SnapshotCreate.__snapshot_cfg_url),
+            json=datax
+        )
+
+    @staticmethod
+    def create_json(snapshot_path):
+        """Compose the json associated to this type of API request."""
+        datax = {
+            'snapshot_path': snapshot_path
+        }
+        return datax
+
+
+class SnapshotLoad:
+    """Facility for sending snapshot instructions on the microvm."""
+
+    SNAPSHOT_LOAD_URL = 'snapshot/load'
+
+    __snapshot_cfg_url = None
+    __api_session = None
+
+    def __init__(self, api_usocket_full_name, api_session):
+        """Specify the information needed for sending API requests."""
+        url_encoded_path = urllib.parse.quote_plus(api_usocket_full_name)
+        api_url = API_USOCKET_URL_PREFIX + url_encoded_path + '/'
+        type(self).__snapshot_cfg_url = api_url + self.SNAPSHOT_LOAD_URL
+        type(self).__api_session = api_session
+
+    @classmethod
+    def put(cls, **args):
+        """Load a snapshot of the microvm."""
+        datax = cls.create_json(**args)
+        return SnapshotLoad.__api_session.put(
+            "{}".format(SnapshotLoad.__snapshot_cfg_url),
+            json=datax
+        )
+
+    @staticmethod
+    def create_json(snapshot_path, mem_file_path):
+        """Compose the json associated to this type of API request."""
+        datax = {
+            'snapshot_path': snapshot_path,
+            'mem_file_path': mem_file_path,
+        }
         return datax
 
 

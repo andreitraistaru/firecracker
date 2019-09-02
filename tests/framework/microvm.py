@@ -25,7 +25,7 @@ from framework.defs import MICROVM_KERNEL_RELPATH, MICROVM_FSFILES_RELPATH
 from framework.http import Session
 from framework.jailer import JailerContext
 from framework.resources import Actions, BootSource, Drive, Logger, MMDS, \
-    MachineConfigure, Network, Vsock
+    MachineConfigure, Network, SnapshotCreate, SnapshotLoad, Vsock
 
 
 # Pylint isn't OK with more than 20 public methods, but we need them.
@@ -64,7 +64,7 @@ class Microvm:
         self._fsfiles_path = os.path.join(self._path, MICROVM_FSFILES_RELPATH)
         self._kernel_file = ''
         self._rootfs_file = ''
-        self._memfile = ''
+        self._mem_file_path = ''
 
         # The binaries this microvm will use to start.
         self._fc_binary_path = fc_binary_path
@@ -99,6 +99,8 @@ class Microvm:
         self.mmds = None
         self.network = None
         self.machine_cfg = None
+        self.snapshot_create = None
+        self.snapshot_load = None
         self.vsock = None
 
         # The ssh config dictionary is populated with information about how
@@ -212,14 +214,14 @@ class Microvm:
         self._memory_events_queue = queue
 
     @property
-    def memfile(self):
+    def mem_file_path(self):
         """Return the path of file backing the guest memory."""
-        return self._memfile
+        return self._mem_file_path
 
-    @memfile.setter
-    def memfile(self, path):
+    @mem_file_path.setter
+    def mem_file_path(self, path):
         """Set the path of file backing the guest memory."""
-        self._memfile = path
+        self._mem_file_path = path
 
     def create_jailed_resource(self, path):
         """Create a hard link to some resource inside this microvm."""
@@ -286,6 +288,14 @@ class Microvm:
         )
         self.mmds = MMDS(self._api_socket, self._api_session)
         self.network = Network(self._api_socket, self._api_session)
+        self.snapshot_create = SnapshotCreate(
+            self._api_socket,
+            self._api_session
+        )
+        self.snapshot_load = SnapshotLoad(
+            self._api_socket,
+            self._api_session
+        )
         self.vsock = Vsock(self._api_socket, self._api_session)
 
         jailer_param_list = self._jailer.construct_param_list()
@@ -365,7 +375,7 @@ class Microvm:
         ht_enabled: bool = False,
         mem_size_mib: int = 256,
         add_root_device: bool = True,
-        memfile: str = None
+        mem_file_path: str = None
     ):
         """Shortcut for quickly configuring a microVM.
 
@@ -378,12 +388,16 @@ class Microvm:
         The function checks the response status code and asserts that
         the response is within the interval [200, 300).
         """
-        self.memfile = memfile
+        self.mem_file_path = mem_file_path
+        if mem_file_path:
+            jailed_mem_file = self.get_jailed_resource(mem_file_path)
+        else:
+            jailed_mem_file = None
         response = self.machine_cfg.put(
             vcpu_count=vcpu_count,
             ht_enabled=ht_enabled,
             mem_size_mib=mem_size_mib,
-            memfile=self.get_jailed_resource(memfile) if memfile else None
+            mem_file_path=jailed_mem_file
         )
         assert self._api_session.is_status_no_content(response.status_code)
 
@@ -482,12 +496,11 @@ class Microvm:
         """
         if not snapshot_filename:
             snapshot_filename = self.tmp_path()
-        response = self.actions.put(action_type='PauseToSnapshot',
-                                    payload=snapshot_filename)
+        response = self.snapshot_create.put(snapshot_path=snapshot_filename)
         assert self.api_session.is_status_no_content(response.status_code)
         return snapshot_filename
 
-    def resume_from_snapshot(self, snapshot_filename):
+    def resume_from_snapshot(self, snapshot_filename, mem_filename):
         """Resumes a microVM from a snapshot.
 
         This function validates that resuming works.
@@ -495,6 +508,6 @@ class Microvm:
         self.jailer.cleanup(reuse_jail=True)
         self.spawn()
 
-        response = self.actions.put(action_type='ResumeFromSnapshot',
-                                    payload=snapshot_filename)
+        response = self.snapshot_load.put(snapshot_path=snapshot_filename,
+                                          mem_file_path=mem_filename)
         assert self.api_session.is_status_no_content(response.status_code)

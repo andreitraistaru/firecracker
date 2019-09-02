@@ -70,7 +70,7 @@ def test_pause_resume(test_microvm_with_ssh, network_config):
 
 @pytest.mark.skipif(
     platform.machine() != "x86_64",
-    reason="not yet implemented on aarch64"
+    reason="only supported on x86_64"
 )
 def test_snapshot(test_microvm_with_ssh, network_config):
     """Test snapshotting functionality."""
@@ -81,10 +81,11 @@ def test_snapshot(test_microvm_with_ssh, network_config):
 
     test_microvm.spawn()
 
+    mem_file_path = test_microvm.tmp_path()
     # Set up the microVM with 1 vCPUs, 256 MiB of file-backed RAM, no network
     # ifaces and a root file system with the rw permission. The network
     # interface is added after we get a unique MAC and IP.
-    test_microvm.basic_config(memfile=test_microvm.tmp_path())
+    test_microvm.basic_config(mem_file_path=mem_file_path)
 
     _tap, _, _ = test_microvm.ssh_network_config(network_config, '1')
 
@@ -101,9 +102,8 @@ def test_snapshot(test_microvm_with_ssh, network_config):
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
     # Snapshotting the microVM before being started should not work.
-    snapshot_filename = test_microvm.tmp_path()
-    response = test_microvm.actions.put(action_type='PauseToSnapshot',
-                                        payload=snapshot_filename)
+    snapshot_file = test_microvm.tmp_path()
+    response = test_microvm.snapshot_create.put(snapshot_path=snapshot_file)
     assert test_microvm.api_session.is_status_bad_request(response.status_code)
     assert "Microvm is not running." in response.text
 
@@ -127,12 +127,11 @@ def test_snapshot(test_microvm_with_ssh, network_config):
     assert stderr.read().decode('utf-8') == ''
 
     # Pause to snapshot.
-    response = test_microvm.actions.put(action_type='PauseToSnapshot',
-                                        payload=snapshot_filename)
+    response = test_microvm.snapshot_create.put(snapshot_path=snapshot_file)
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
     # Spawn clone.
-    test_microvm.resume_from_snapshot(snapshot_filename)
+    test_microvm.resume_from_snapshot(snapshot_file, mem_file_path)
 
     # Reconnect ssh.
     ssh_connection = net_tools.SSHConnection(test_microvm.ssh_config)

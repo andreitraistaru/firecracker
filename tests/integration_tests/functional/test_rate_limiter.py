@@ -81,7 +81,8 @@ def test_clone_tx_rate_limiting(test_microvm_with_ssh, network_config):
 
     test_microvm.spawn()
 
-    test_microvm.basic_config(memfile=test_microvm.tmp_path())
+    mem_file_path = test_microvm.tmp_path()
+    test_microvm.basic_config(mem_file_path=mem_file_path)
 
     # The taps needs to be returned and kept in scope, otherwise the interfaces
     # get removed in the destructor.
@@ -108,7 +109,7 @@ def test_clone_tx_rate_limiting(test_microvm_with_ssh, network_config):
     snapshot_filename = test_microvm.pause_to_snapshot()
 
     # Spawn clone.
-    test_microvm.resume_from_snapshot(snapshot_filename)
+    test_microvm.resume_from_snapshot(snapshot_filename, mem_file_path)
 
     # Run rate limited iperf in the clone.
     rate_limit_bytes_achieved = 1000 * _tx_rate_bytes(
@@ -139,7 +140,8 @@ def test_clone_tx_rate_limiting_burst(test_microvm_with_ssh, network_config):
 
     test_microvm.spawn()
 
-    test_microvm.basic_config(memfile=test_microvm.tmp_path())
+    mem_file_path = test_microvm.tmp_path()
+    test_microvm.basic_config(mem_file_path=mem_file_path)
 
     # The taps needs to be returned and kept in scope, otherwise the interfaces
     # get removed in the destructor.
@@ -172,7 +174,7 @@ def test_clone_tx_rate_limiting_burst(test_microvm_with_ssh, network_config):
     snapshot_filename = test_microvm.pause_to_snapshot()
 
     # Spawn clone.
-    test_microvm.resume_from_snapshot(snapshot_filename)
+    test_microvm.resume_from_snapshot(snapshot_filename, mem_file_path)
 
     # Calculate the number of bytes that are expected to be sent
     # in each second once the rate limiting is enabled.
@@ -219,7 +221,8 @@ def test_clone_rx_rate_limiting(test_microvm_with_ssh, network_config):
 
     test_microvm.spawn()
 
-    test_microvm.basic_config(memfile=test_microvm.tmp_path())
+    mem_file_path = test_microvm.tmp_path()
+    test_microvm.basic_config(mem_file_path=mem_file_path)
 
     # The taps needs to be returned and kept in scope, otherwise the interfaces
     # get removed in the destructor.
@@ -238,7 +241,7 @@ def test_clone_rx_rate_limiting(test_microvm_with_ssh, network_config):
     snapshot_filename = test_microvm.pause_to_snapshot()
 
     # Spawn clone.
-    test_microvm.resume_from_snapshot(snapshot_filename)
+    test_microvm.resume_from_snapshot(snapshot_filename, mem_file_path)
 
     # Start iperf on guest.
     _start_iperf_on_guest(test_microvm, guest_ips[0])
@@ -278,7 +281,8 @@ def test_clone_rx_rate_limiting_burst(test_microvm_with_ssh, network_config):
 
     test_microvm.spawn()
 
-    test_microvm.basic_config(memfile=test_microvm.tmp_path())
+    mem_file_path = test_microvm.tmp_path()
+    test_microvm.basic_config(mem_file_path=mem_file_path)
 
     # The taps needs to be returned and kept in scope, otherwise the interfaces
     # get removed in the destructor.
@@ -310,7 +314,7 @@ def test_clone_rx_rate_limiting_burst(test_microvm_with_ssh, network_config):
     snapshot_filename = test_microvm.pause_to_snapshot()
 
     # Spawn clone.
-    test_microvm.resume_from_snapshot(snapshot_filename)
+    test_microvm.resume_from_snapshot(snapshot_filename, mem_file_path)
 
     # Calculate the number of bytes that are expected to be sent
     # in each second once the rate limiting is enabled.

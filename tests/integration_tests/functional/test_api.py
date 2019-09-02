@@ -101,14 +101,14 @@ def test_api_put_update_pre_boot(test_microvm_with_api):
         'ht_enabled': True,
         'mem_size_mib': 256,
         'cpu_template': 'C3',
-        'memfile': 'mem.file'
+        'mem_file_path': 'mem.file'
     }
     response = test_microvm.machine_cfg.put(
         vcpu_count=microvm_config_json['vcpu_count'],
         ht_enabled=microvm_config_json['ht_enabled'],
         mem_size_mib=microvm_config_json['mem_size_mib'],
         cpu_template=microvm_config_json['cpu_template'],
-        memfile=microvm_config_json['memfile']
+        mem_file_path=microvm_config_json['mem_file_path']
     )
     assert test_microvm.api_session.is_status_no_content(response.status_code)
 
@@ -128,8 +128,8 @@ def test_api_put_update_pre_boot(test_microvm_with_api):
     cpu_template = str(microvm_config_json['cpu_template'])
     assert response_json['cpu_template'] == cpu_template
 
-    memfile = str(microvm_config_json['memfile'])
-    assert response_json['memfile'] == memfile
+    mem_file_path = str(microvm_config_json['mem_file_path'])
+    assert response_json['mem_file_path'] == mem_file_path
 
 
 def test_net_api_put_update_pre_boot(test_microvm_with_api):
@@ -780,14 +780,17 @@ def test_api_file_backed_memory(test_microvm_with_api):
     test_microvm.spawn()
 
     mem_size_mib = 256
-    memfile = os.path.basename(test_microvm.tmp_path())
-    test_microvm.basic_config(mem_size_mib=mem_size_mib, memfile=memfile)
-    memfile_path = os.path.join(test_microvm.jailer.chroot_path(), memfile)
+    mem_file = os.path.basename(test_microvm.tmp_path())
+    test_microvm.basic_config(
+        mem_size_mib=mem_size_mib,
+        mem_file_path=mem_file
+    )
+    mem_file_path = os.path.join(test_microvm.jailer.chroot_path(), mem_file)
 
     test_microvm.start()
 
     time.sleep(0.3)
 
-    assert os.path.exists(memfile_path)
-    assert os.path.isfile(memfile_path)
-    assert os.path.getsize(memfile_path) == mem_size_mib * 1024 * 1024
+    assert os.path.exists(mem_file_path)
+    assert os.path.isfile(mem_file_path)
+    assert os.path.getsize(mem_file_path) == mem_size_mib * 1024 * 1024
