@@ -20,7 +20,6 @@ use bincode::Error as SerializationError;
 
 use devices::virtio::MmioDeviceState;
 use serialize::SnapshotReaderWriter;
-use vmm_config::machine_config::VmConfig;
 use vstate::{VcpuState, VmState};
 
 /// Magic number, verifies a snapshot file's validity.
@@ -183,22 +182,18 @@ impl SnapshotHdr {
 #[derive(Deserialize, Serialize)]
 pub struct MicrovmState {
     pub header: SnapshotHdr,
-    pub vm_state: Option<VmState>,
+    pub vm_state: VmState,
     pub vcpu_states: Vec<VcpuState>,
     pub device_states: Vec<MmioDeviceState>,
 }
 
 pub struct SnapshotImage {
     file: File,
-    pub microvm_state: MicrovmState,
+    microvm_state: Option<MicrovmState>,
 }
 
 impl SnapshotImage {
-    pub fn create_new<P: AsRef<Path>>(
-        path: P,
-        vm_cfg: VmConfig,
-        app_version: Version,
-    ) -> Result<SnapshotImage> {
+    pub fn create_new<P: AsRef<Path>>(path: P) -> Result<SnapshotImage> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -206,22 +201,9 @@ impl SnapshotImage {
             .truncate(true)
             .open(path.as_ref())
             .map_err(Error::CreateNew)?;
-        let header = SnapshotHdr {
-            magic_id: SNAPSHOT_MAGIC,
-            snapshot_version: SNAPSHOT_VERSION.into(),
-            app_version,
-            mem_size_mib: vm_cfg.mem_size_mib.ok_or(Error::MissingMemSize)? as u64,
-            vcpu_count: vm_cfg.vcpu_count.ok_or(Error::MissingVcpuNum)?,
-        };
-        let microvm_state = MicrovmState {
-            header,
-            vm_state: None,
-            vcpu_states: vec![],
-            device_states: vec![],
-        };
         Ok(SnapshotImage {
             file,
-            microvm_state,
+            microvm_state: None,
         })
     }
 
@@ -249,7 +231,7 @@ impl SnapshotImage {
 
         Ok(SnapshotImage {
             file,
-            microvm_state,
+            microvm_state: Some(microvm_state),
         })
     }
 
@@ -260,14 +242,13 @@ impl SnapshotImage {
         vcpu_states: Vec<VcpuState>,
         device_states: Vec<MmioDeviceState>,
     ) -> Result<()> {
-        self.microvm_state = MicrovmState {
+        let microvm_state = MicrovmState {
             header,
-            vm_state: Some(vm_state),
+            vm_state,
             vcpu_states,
             device_states,
         };
-        let serialized_microvm =
-            bincode::serialize(&self.microvm_state).map_err(Error::Serialize)?;
+        let serialized_microvm = bincode::serialize(&microvm_state).map_err(Error::Serialize)?;
         let microvm_size = serialized_microvm.len() as u64;
         self.file.set_len(microvm_size).map_err(Error::Truncate)?;
 
@@ -278,20 +259,54 @@ impl SnapshotImage {
             .map_err(Error::IO)?;
         reader_writer.flush().map_err(Error::IO)?;
 
+        self.microvm_state = Some(microvm_state);
+
         Ok(())
     }
 
-    pub fn vcpu_count(&self) -> u8 {
-        self.microvm_state.vcpu_states.len() as u8
+    pub fn vcpu_count(&self) -> Option<u8> {
+        self.microvm_state
+            .as_ref()
+            .map(|state| state.header.vcpu_count as u8)
     }
 
-    pub fn mem_size_mib(&self) -> usize {
-        self.microvm_state.header.mem_size_mib as usize
+    pub fn mem_size_mib(&self) -> Option<usize> {
+        self.microvm_state
+            .as_ref()
+            .map(|state| state.header.mem_size_mib as usize)
+    }
+
+    pub fn kvm_vm_state(&self) -> Option<&VmState> {
+        self.microvm_state.as_ref().map(|state| &state.vm_state)
+    }
+
+    pub fn device_states(&self) -> Option<&Vec<MmioDeviceState>> {
+        self.microvm_state
+            .as_ref()
+            .map(|state| &state.device_states)
+    }
+
+    #[allow(dead_code)]
+    pub fn vcpu_states(&self) -> Option<&Vec<VcpuState>> {
+        self.microvm_state.as_ref().map(|state| &state.vcpu_states)
+    }
+
+    pub fn into_vcpu_states(self) -> Vec<VcpuState> {
+        self.microvm_state
+            .map_or_else(|| vec![], |state| state.vcpu_states)
     }
 
     pub fn validate_mem_file_size(&self, mem_file_path: &str) -> Result<()> {
         let metadata = std::fs::metadata(mem_file_path).map_err(|_| Error::MissingMemFile)?;
-        if self.microvm_state.header.mem_size_mib << 20 != metadata.len() {
+        if self
+            .microvm_state
+            .as_ref()
+            .ok_or(Error::MissingMemFile)?
+            .header
+            .mem_size_mib
+            << 20
+            != metadata.len()
+        {
             Err(Error::MemfileSize)
         } else {
             Ok(())
@@ -416,6 +431,12 @@ mod tests {
     impl fmt::Debug for VcpuState {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             write!(f, "VcpuState")
+        }
+    }
+
+    impl fmt::Debug for VmState {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "VmState")
         }
     }
 
@@ -569,15 +590,16 @@ mod tests {
         let vcpu_count = 1u8;
         let mem_size_mib = 1u64;
         let (_, vcpu) = setup_vcpu();
-        let vcpu_state = vcpu.save_state().unwrap();
+        let vcpu_states = vec![vcpu.save_state().unwrap()];
 
         let header = build_valid_header(mem_size_mib, vcpu_count);
-        let microvm_state = MicrovmState {
+        let kvm_vm_state = VmState::default();
+        let microvm_state = Some(MicrovmState {
             header,
-            vm_state: None,
-            vcpu_states: vec![vcpu_state],
+            vm_state: kvm_vm_state.clone(),
+            vcpu_states: vcpu_states.clone(),
             device_states: vec![],
-        };
+        });
         let file = NamedTempFile::new().unwrap().into_file();
         let fd = file.as_raw_fd();
         let image = SnapshotImage {
@@ -585,21 +607,24 @@ mod tests {
             microvm_state,
         };
 
-        assert_eq!(image.vcpu_count(), vcpu_count);
-        assert_eq!(image.mem_size_mib(), mem_size_mib as usize);
+        assert_eq!(image.vcpu_count().unwrap(), vcpu_count);
+        assert_eq!(image.mem_size_mib().unwrap(), mem_size_mib as usize);
+        assert_eq!(image.kvm_vm_state().unwrap(), &kvm_vm_state);
+        // Can't compare MmioDeviceState objects, checking for `Some` will suffice.
+        assert!(image.device_states().is_some());
         assert_eq!(image.as_raw_fd(), fd);
+        assert_eq!(image.vcpu_states().unwrap(), &vcpu_states);
+        assert_eq!(image.into_vcpu_states(), vcpu_states);
     }
 
     fn make_snapshot(
         tmp_snapshot_path: &TempPath,
-        vm_config: VmConfig,
         vm_state: VmState,
         vcpu_state: VcpuState,
         header: SnapshotHdr,
     ) -> String {
         let snapshot_path = tmp_snapshot_path.to_str().unwrap();
-        let mut image =
-            SnapshotImage::create_new(snapshot_path, vm_config, APP_VER.into()).unwrap();
+        let mut image = SnapshotImage::create_new(snapshot_path).unwrap();
         image
             .serialize_microvm(header, vm_state, vec![vcpu_state], vec![])
             .unwrap();
@@ -617,15 +642,6 @@ mod tests {
 
         let header = build_valid_header(mem_size_mib as u64, vcpu_count);
 
-        let mut vm_config = VmConfig {
-            vcpu_count: None,
-            mem_size_mib: None,
-            mem_file_path: None,
-            cpu_template: None,
-            ht_enabled: None,
-            shared_mem: false,
-        };
-
         let (vm, vcpu) = setup_vcpu();
         let vm_state = vm.save_state().unwrap();
         let vcpu_state = vcpu.save_state().unwrap();
@@ -635,36 +651,15 @@ mod tests {
             let inaccessible_path = "/foo/bar";
 
             // Test error case: inaccessible snapshot path.
-            let ret =
-                SnapshotImage::create_new(inaccessible_path, vm_config.clone(), APP_VER.into());
+            let ret = SnapshotImage::create_new(inaccessible_path);
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
                 "Failed to create new snapshot file: No such file or directory (os error 2)"
             );
 
-            // Test error case: missing guest memory size.
-            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone(), APP_VER.into());
-            assert!(ret.is_err());
-            assert_eq!(
-                format!("{}", ret.err().unwrap()),
-                "Missing guest memory size."
-            );
-
-            vm_config.mem_size_mib = Some(mem_size_mib);
-
-            // Test error case: missing vCPU count.
-            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone(), APP_VER.into());
-            assert!(ret.is_err());
-            assert_eq!(
-                format!("{}", ret.err().unwrap()),
-                "Missing number of vCPUs."
-            );
-
-            vm_config.vcpu_count = Some(vcpu_count);
-
             // Good case: snapshot is created.
-            let ret = SnapshotImage::create_new(snapshot_path, vm_config.clone(), APP_VER.into());
+            let ret = SnapshotImage::create_new(snapshot_path);
             assert!(ret.is_ok());
             let mut image = ret.unwrap();
 
@@ -714,7 +709,6 @@ mod tests {
                 bad_header.magic_id = SNAPSHOT_MAGIC + 1;
                 let bad_image_path = make_snapshot(
                     &bad_snap_path,
-                    vm_config.clone(),
                     vm_state.clone(),
                     vcpu_state.clone(),
                     bad_header.clone(),
@@ -736,7 +730,6 @@ mod tests {
                 bad_header.snapshot_version.build += 1;
                 let bad_image_path = make_snapshot(
                     &bad_snap_path,
-                    vm_config.clone(),
                     vm_state.clone(),
                     vcpu_state.clone(),
                     bad_header.clone(),
@@ -760,7 +753,6 @@ mod tests {
                 bad_header.app_version = 0.into();
                 let bad_image_path = make_snapshot(
                     &bad_snap_path,
-                    vm_config.clone(),
                     vm_state.clone(),
                     vcpu_state.clone(),
                     bad_header.clone(),
@@ -781,7 +773,6 @@ mod tests {
                 bad_header.vcpu_count = 2;
                 let bad_image_path = make_snapshot(
                     &bad_snap_path,
-                    vm_config.clone(),
                     vm_state.clone(),
                     vcpu_state.clone(),
                     bad_header.clone(),
@@ -829,13 +820,13 @@ mod tests {
             }
 
             // Verify header deserialization.
-            assert!(header.eq(&image.microvm_state.header));
+            assert!(header.eq(&image.microvm_state.as_ref().unwrap().header));
 
             // Verify VM state deserialization.
-            assert!(Some(vm_state).eq(&image.microvm_state.vm_state));
+            assert!(vm_state.eq(image.kvm_vm_state().unwrap()));
 
             // Verify vCPU state deserialization.
-            assert!(vec![vcpu_state].eq(&image.microvm_state.vcpu_states));
+            assert!(vec![vcpu_state].eq(image.vcpu_states().unwrap()));
         }
     }
 

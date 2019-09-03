@@ -2370,11 +2370,11 @@ impl Vmm {
                 snapshot::Error::MissingMemFile,
             ))?;
         }
-        let app_version = self.app_version();
 
-        let image = SnapshotImage::create_new(snapshot_path, self.vm_config.clone(), app_version)
+        let image = SnapshotImage::create_new(snapshot_path)
             .map_err(PauseMicrovmError::SnapshotBackingFile)?;
 
+        let app_version = self.app_version();
         self.do_pause_to_snapshot(
             image,
             SnapshotHdr::new(mem_size_mib, vcpu_count, app_version),
@@ -2406,7 +2406,7 @@ impl Vmm {
             ))?;
         }
 
-        let mut snapshot_image = SnapshotImage::open_existing(snapshot_path, self.app_version())
+        let snapshot_image = SnapshotImage::open_existing(snapshot_path, self.app_version())
             .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
 
         snapshot_image
@@ -2418,10 +2418,10 @@ impl Vmm {
             .expect("Failed to start microVM because shared info couldn't be written due to poisoned lock")
             .state = InstanceState::Resuming;
 
-        self.vm_config.mem_size_mib = Some(snapshot_image.mem_size_mib());
-        self.vm_config.vcpu_count = Some(snapshot_image.vcpu_count());
+        self.vm_config.mem_size_mib = snapshot_image.mem_size_mib();
+        self.vm_config.vcpu_count = snapshot_image.vcpu_count();
         self.vm_config.mem_file_path = Some(mem_file_path);
-        // Hardcoded for cloning - needs to be configurable for other usecases.
+        // Hardcoded for cloning - could be configurable in the future for other use cases.
         self.vm_config.shared_mem = false;
 
         self.init_guest_memory()?;
@@ -2431,9 +2431,7 @@ impl Vmm {
         self.vm
             .restore_state(
                 snapshot_image
-                    .microvm_state
-                    .vm_state
-                    .as_ref()
+                    .kvm_vm_state()
                     .ok_or(ResumeMicrovmError::MissingVmState)?,
             )
             .map_err(ResumeMicrovmError::RestoreVmState)?;
@@ -2455,19 +2453,16 @@ impl Vmm {
         }
         self.register_events()?;
 
-        self.restore_mmio_devices(snapshot_image.microvm_state.device_states.as_slice())?;
+        self.restore_mmio_devices(snapshot_image.device_states().unwrap().as_slice())?;
 
         self.create_vcpus(request_ts.clone())?;
 
         self.start_vcpus()?;
 
-        assert_eq!(
-            self.vcpus_handles.len(),
-            snapshot_image.vcpu_count() as usize
-        );
-        for handle in self.vcpus_handles.iter_mut().rev() {
-            // Safe to unwrap because the length was validated earlier.
-            let state = snapshot_image.microvm_state.vcpu_states.pop().unwrap();
+        let mut vcpu_states: Vec<VcpuState> = snapshot_image.into_vcpu_states();
+        assert_eq!(self.vcpus_handles.len(), vcpu_states.len());
+
+        for (handle, state) in self.vcpus_handles.iter().zip(vcpu_states.drain(..)) {
             handle
                 .send_event(VcpuEvent::Deserialize(Box::new(state)))
                 .map_err(ResumeMicrovmError::SignalVcpu)?;
