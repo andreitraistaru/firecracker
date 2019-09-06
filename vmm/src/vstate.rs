@@ -23,7 +23,7 @@ use super::{KvmContext, TimestampUs};
 
 use arch;
 #[cfg(target_arch = "x86_64")]
-use cpuid::{c3, filter_cpuid, t2};
+use cpuid::{c3, filter_cpuid, t2, VmSpec};
 use default_syscalls;
 use kvm::{
     CpuId, Kvm, KvmArray, KvmMsrs, MsrList, VcpuExit, VcpuFd, VmFd, KVM_IRQCHIP_IOAPIC,
@@ -246,6 +246,8 @@ impl Vm {
                     userspace_addr: host_addr as u64,
                     flags,
                 };
+                // Safe because we mapped the memory region, we made sure that the regions
+                // are not overlapping.
                 self.fd.set_user_memory_region(memory_region)
             })
             .map_err(Error::SetUserMemoryRegion)?;
@@ -711,20 +713,29 @@ impl Vcpu {
         kernel_start_addr: GuestAddress,
         vm: &Vm,
     ) -> Result<()> {
-        filter_cpuid(
+        let cpuid_vm_spec = VmSpec::new(
             self.id,
             machine_config
                 .vcpu_count
                 .ok_or(Error::VcpuCountNotInitialized)?,
             machine_config.ht_enabled.ok_or(Error::HTNotInitialized)?,
-            &mut self.cpuid,
         )
         .map_err(Error::CpuId)?;
 
+        filter_cpuid(&mut self.cpuid, &cpuid_vm_spec).map_err(|e| {
+            METRICS.vcpu.filter_cpuid.inc();
+            error!("Failure in configuring CPUID for vcpu {}: {:?}", self.id, e);
+            Error::CpuId(e)
+        })?;
+
         if let Some(template) = machine_config.cpu_template {
             match template {
-                CpuFeaturesTemplate::T2 => t2::set_cpuid_entries(self.cpuid.as_mut_entries_slice()),
-                CpuFeaturesTemplate::C3 => c3::set_cpuid_entries(self.cpuid.as_mut_entries_slice()),
+                CpuFeaturesTemplate::T2 => {
+                    t2::set_cpuid_entries(&mut self.cpuid, &cpuid_vm_spec).map_err(Error::CpuId)?
+                }
+                CpuFeaturesTemplate::C3 => {
+                    c3::set_cpuid_entries(&mut self.cpuid, &cpuid_vm_spec).map_err(Error::CpuId)?
+                }
             }
         }
 
@@ -1169,8 +1180,6 @@ mod tests {
     use kernel::cmdline as kernel_cmdline;
     use kernel::loader as kernel_loader;
 
-    use libc::EBADF;
-
     impl VcpuHandle {
         // Closes our side of the channels with vcpu.
         fn close_vcpu_channel(&mut self) {
@@ -1331,36 +1340,18 @@ mod tests {
     }
 
     #[test]
-    fn test_create_vm() {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn test_get_supported_cpuid() {
         let kvm = KvmContext::new().unwrap();
         let vm = Vm::new(kvm.fd()).expect("Cannot create new vm");
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            let cpuid = kvm
-                .kvm
-                .get_supported_cpuid(MAX_KVM_CPUID_ENTRIES)
-                .expect("Cannot get supported cpuid");
-            assert_eq!(
-                vm.supported_cpuid().as_entries_slice(),
-                cpuid.as_entries_slice()
-            );
-        }
-
-        use super::Error::VmFd;
-        let faulty_kvm = unsafe { Kvm::new_with_fd_number(-1) };
-        match Vm::new(&faulty_kvm) {
-            Err(VmFd(_)) => (),
-            Err(e) => panic!(
-                "{:?} != {:?}.",
-                e,
-                VmFd(io::Error::from_raw_os_error(EBADF))
-            ),
-            Ok(_) => panic!(
-                "Expected error {:?}, got Ok()",
-                VmFd(io::Error::from_raw_os_error(EBADF))
-            ),
-        }
+        let cpuid = kvm
+            .kvm
+            .get_supported_cpuid(MAX_KVM_CPUID_ENTRIES)
+            .expect("Cannot get supported cpuid");
+        assert_eq!(
+            vm.supported_cpuid().as_entries_slice(),
+            cpuid.as_entries_slice()
+        );
     }
 
     #[test]
@@ -1395,10 +1386,14 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_setup_irqchip() {
-        let kvm = KvmContext::new().unwrap();
-        let vm = Vm::new(kvm.fd()).expect("Cannot create new vm");
+        let kvm_context = KvmContext::new().unwrap();
+        let vm = Vm::new(kvm_context.fd()).expect("Cannot create new vm");
 
         vm.setup_irqchip().expect("Cannot setup irqchip");
+        // Trying to setup two irqchips will result in EEXIST error. At the moment
+        // there is no good way of testing the actual error because io::Error does not implement
+        // PartialEq.
+        assert!(vm.setup_irqchip().is_err());
         let (_s1, r1) = channel();
         let (s2, _r2) = channel();
         let exit_evt = EventFd::new().unwrap();
@@ -1412,7 +1407,7 @@ mod tests {
             super::super::TimestampUs::default(),
         )
         .unwrap();
-        // Trying to setup two irqchips will result in EEXIST error.
+        // Trying to setup irqchip after KVM_VCPU_CREATE was called will result in error.
         assert!(vm.setup_irqchip().is_err());
     }
 

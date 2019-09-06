@@ -26,7 +26,6 @@ use vmm::vmm_config::instance_info::InstanceInfo;
 use vmm::vmm_config::logger::LoggerConfig;
 use vmm::vmm_config::machine_config::VmConfig;
 use vmm::vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceUpdateConfig};
-#[cfg(feature = "vsock")]
 use vmm::vmm_config::vsock::VsockDeviceConfig;
 use vmm::VmmAction;
 
@@ -400,7 +399,6 @@ fn parse_netif_req<'a>(path: &'a str, method: Method, body: &Chunk) -> Result<'a
     }
 }
 
-#[cfg(feature = "vsock")]
 // Turns a GET/PUT /vsocks HTTP request into a ParsedRequest.
 fn parse_vsocks_req<'a>(path: &'a str, method: Method, body: &Chunk) -> Result<'a, ParsedRequest> {
     let path_tokens: Vec<&str> = path[1..].split_terminator('/').collect();
@@ -468,7 +466,6 @@ fn parse_request<'a>(method: Method, path: &'a str, body: &Chunk) -> Result<'a, 
         "network-interfaces" => parse_netif_req(path, method, body),
         "mmds" => parse_mmds_request(path, method, body),
         "snapshot" => parse_snapshot_request(path, method, body),
-        #[cfg(feature = "vsock")]
         "vsocks" => parse_vsocks_req(path, method, body),
         _ => Err(Error::InvalidPathMethod(path, method)),
     }
@@ -710,6 +707,9 @@ fn describe(method: &Method, path: &str, body: &Option<String>) -> String {
 }
 
 #[cfg(test)]
+// Allowing assertions on constants so we can check enum variants using
+// match instead of equals.
+#[allow(clippy::assertions_on_constants)]
 mod tests {
     extern crate net_util;
 

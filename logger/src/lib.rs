@@ -136,7 +136,6 @@
 //! metric will get increased.
 //! Metrics are only logged to pipes. Logs can be flushed either to stdout/stderr or to a pipe.
 
-extern crate chrono;
 // workaround to macro_reexport
 #[macro_use]
 extern crate lazy_static;
@@ -144,7 +143,8 @@ extern crate libc;
 extern crate log;
 extern crate serde;
 extern crate serde_json;
-extern crate time;
+
+extern crate fc_util;
 
 pub mod error;
 pub mod metrics;
@@ -154,13 +154,13 @@ use std::error::Error;
 use std::ops::Deref;
 use std::result;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock};
 
-use chrono::Local;
 use serde_json::Value;
 
 use error::LoggerError;
+use fc_util::LocalTime;
 pub use log::Level::*;
 pub use log::*;
 use log::{set_logger, set_max_level, Log, Metadata, Record};
@@ -182,10 +182,7 @@ const PREINITIALIZING: usize = 1;
 const INITIALIZING: usize = 2;
 const INITIALIZED: usize = 3;
 
-static STATE: AtomicUsize = ATOMIC_USIZE_INIT;
-
-// Time format
-const TIME_FMT: &str = "%Y-%m-%dT%H:%M:%S.%f";
+static STATE: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref _LOGGER_INNER: Logger = Logger::new();
@@ -784,7 +781,7 @@ impl Log for Logger {
         if self.enabled(record.metadata()) {
             let msg = format!(
                 "{}{}{}{}",
-                Local::now().format(TIME_FMT),
+                LocalTime::now(),
                 self.create_prefix(&record),
                 MSG_SEPARATOR,
                 record.args()
@@ -847,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::cyclomatic_complexity)]
+    #[allow(clippy::cognitive_complexity)]
     fn test_init() {
         let app_info = AppInfo::new(TEST_APP_NAME, TEST_APP_VERSION);
 

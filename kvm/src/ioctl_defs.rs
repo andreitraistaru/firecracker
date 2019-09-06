@@ -1,9 +1,9 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use kvm_bindings::*;
+//! Declares necessary ioctls specific to their platform.
 
-/// Declares necessary ioctls specific to their platform.
+use kvm_bindings::*;
 
 // Ioctls for /dev/kvm.
 

@@ -217,9 +217,8 @@ pub enum StartMicrovmError {
     CreateNetDevice(devices::virtio::Error),
     /// Failed to create a `RateLimiter` object.
     CreateRateLimiter(std::io::Error),
-    #[cfg(feature = "vsock")]
-    /// Creating a vsock device can only fail if the /dev/vhost-vsock device cannot be open.
-    CreateVsockDevice(devices::virtio::vhost::Error),
+    /// Failed to create the vsock device.
+    CreateVsockDevice,
     /// The device manager was not configured.
     DeviceManager,
     /// Cannot read from an Event file descriptor.
@@ -250,7 +249,6 @@ pub enum StartMicrovmError {
     RegisterMMIODevice(device_manager::mmio::Error),
     /// Cannot initialize a MMIO Network Device or add a device to the MMIO Bus.
     RegisterNetDevice(device_manager::mmio::Error),
-    #[cfg(feature = "vsock")]
     /// Cannot initialize a MMIO Vsock Device or add a device to the MMIO Bus.
     RegisterVsockDevice(device_manager::mmio::Error),
     /// Cannot build seccomp filters.
@@ -275,6 +273,14 @@ impl std::convert::From<StateError> for StartMicrovmError {
     }
 }
 
+/// It's convenient to automatically convert `kernel::cmdline::Error`s
+/// to `StartMicrovmError`s.
+impl std::convert::From<kernel::cmdline::Error> for StartMicrovmError {
+    fn from(e: kernel::cmdline::Error) -> StartMicrovmError {
+        StartMicrovmError::KernelCmdline(e.to_string())
+    }
+}
+
 impl Display for StartMicrovmError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::StartMicrovmError::*;
@@ -293,13 +299,7 @@ impl Display for StartMicrovmError {
             }
             CreateBlockDevice(ref err) => write!(f, "Unable to Create block device. {:?}", err),
             CreateRateLimiter(ref err) => write!(f, "Cannot create RateLimiter. {}", err),
-            #[cfg(feature = "vsock")]
-            CreateVsockDevice(ref err) => {
-                let mut err_msg = format!("{:?}", err);
-                err_msg = err_msg.replace("\"", "");
-
-                write!(f, "Cannot create vsock device. {}", err_msg)
-            }
+            CreateVsockDevice => write!(f, "Cannot create vsock device."),
             CreateNetDevice(ref err) => {
                 let mut err_msg = format!("{:?}", err);
                 err_msg = err_msg.replace("\"", "");
@@ -369,7 +369,6 @@ impl Display for StartMicrovmError {
                     err_msg
                 )
             }
-            #[cfg(feature = "vsock")]
             RegisterVsockDevice(ref err) => {
                 let mut err_msg = format!("{}", err);
                 err_msg = err_msg.replace("\"", "");

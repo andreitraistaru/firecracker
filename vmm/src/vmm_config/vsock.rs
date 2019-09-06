@@ -10,9 +10,11 @@ use std::result;
 #[serde(deny_unknown_fields)]
 pub struct VsockDeviceConfig {
     /// ID of the vsock device.
-    pub id: String,
+    pub vsock_id: String,
     /// A 32-bit Context Identifier (CID) used to identify the guest.
     pub guest_cid: u32,
+    /// Path to local unix socket.
+    pub uds_path: String,
 }
 
 /// Errors associated with `VsockDeviceConfig`.
@@ -71,7 +73,7 @@ impl VsockDeviceConfigs {
         match self
             .configs
             .iter()
-            .position(|cfg_from_list| cfg_from_list.id.as_str() == cfg.id.as_str())
+            .position(|cfg_from_list| cfg_from_list.vsock_id.as_str() == cfg.vsock_id.as_str())
         {
             Some(index) => self.configs[index] = cfg,
             None => self.configs.push(cfg),
@@ -83,5 +85,33 @@ impl VsockDeviceConfigs {
     /// Returns an immutable iterator over the vsock available configurations.
     pub fn iter(&mut self) -> ::std::slice::Iter<VsockDeviceConfig> {
         self.configs.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vsock_device_config() {
+        const CID: u32 = 52;
+        let cfg = VsockDeviceConfig {
+            vsock_id: String::from("vsock"),
+            guest_cid: CID,
+            uds_path: String::from("/tmp/vsock.sock"),
+        };
+        let mut cfg_list = VsockDeviceConfigs::new();
+
+        cfg_list.add(cfg.clone()).unwrap();
+        assert!(cfg_list.contains_cid(CID));
+
+        assert_eq!(
+            format!("{}", cfg_list.add(cfg.clone()).err().unwrap()),
+            format!("The guest CID {} is already in use.", CID),
+        );
+
+        let mut cfg2 = cfg.clone();
+        cfg2.guest_cid = CID + 1;
+        assert!(cfg_list.add(cfg2).is_ok());
     }
 }

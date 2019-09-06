@@ -91,7 +91,7 @@ mod tests {
                 .unwrap()
                 .into_parsed_request(None, Method::Get)
             {
-                Ok(_) => assert!(false),
+                Ok(_) => unreachable!(),
                 Err(e) => assert_eq!(e, String::from("Invalid method.")),
             };
         }
@@ -125,7 +125,7 @@ mod tests {
                 .unwrap()
                 .into_parsed_request(None, Method::Get)
             {
-                Ok(_) => assert!(false),
+                Ok(_) => unreachable!(),
                 Err(e) => assert_eq!(e, String::from("Invalid method.")),
             };
         }

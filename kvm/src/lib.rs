@@ -2276,7 +2276,7 @@ mod tests {
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[allow(clippy::cyclomatic_complexity)]
+    #[allow(clippy::cognitive_complexity)]
     #[test]
     fn faulty_kvm_fds_test() {
         let badf_errno = libc::EBADF;

@@ -11,7 +11,6 @@ extern crate byteorder;
 extern crate epoll;
 extern crate libc;
 extern crate serde;
-extern crate time;
 
 extern crate dumbo;
 #[macro_use]
@@ -21,10 +20,6 @@ extern crate net_gen;
 extern crate net_util;
 extern crate rate_limiter;
 extern crate sys_util;
-#[cfg(feature = "vsock")]
-extern crate vhost_backend;
-#[cfg(feature = "vsock")]
-extern crate vhost_gen;
 extern crate virtio_gen;
 
 use rate_limiter::Error as RateLimiterError;
@@ -42,7 +37,7 @@ pub type DeviceEventT = u16;
 type Result<T> = std::result::Result<T, Error>;
 
 pub trait EpollHandler: AsAny + Send {
-    fn handle_event(&mut self, device_event: DeviceEventT) -> Result<()>;
+    fn handle_event(&mut self, device_event: DeviceEventT, evset: epoll::Events) -> Result<()>;
 
     fn interrupt_status(&self) -> usize;
 
@@ -64,4 +59,5 @@ pub enum Error {
         event: DeviceEventT,
     },
     IoError(io::Error),
+    NoAvailBuffers,
 }

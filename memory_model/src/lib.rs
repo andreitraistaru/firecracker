@@ -59,4 +59,5 @@ mod mmap;
 pub use guest_address::GuestAddress;
 pub use guest_memory::Error as GuestMemoryError;
 pub use guest_memory::GuestMemory;
+pub use guest_memory::MemoryRegion;
 pub use mmap::{AnonMemoryDesc, Error as MemoryMappingError, FileMemoryDesc, MemoryMapping};

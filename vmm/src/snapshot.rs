@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::cyclomatic_complexity)]
+    #[allow(clippy::cognitive_complexity)]
     fn test_snapshot_ser_deser() {
         let tmp_snapshot_path = NamedTempFile::new().unwrap().into_temp_path();
         let snapshot_path = tmp_snapshot_path.to_str().unwrap();

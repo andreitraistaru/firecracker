@@ -333,7 +333,7 @@ mod tests {
                 )
                 .unwrap();
 
-                let mut segment_len = TcpSegment::write_incomplete_segment::<[u8]>(
+                let segment_len = TcpSegment::write_incomplete_segment::<[u8]>(
                     packet.inner_mut().payload_mut(),
                     SEQ_NUMBER,
                     1234,
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::cyclomatic_complexity)]
+    #[allow(clippy::cognitive_complexity)]
     fn test_ns() {
         let mut ns = MmdsNetworkStack::new_with_defaults();
         assert_eq!(ns.mac_addr, MacAddr::parse_str(DEFAULT_MAC_ADDR).unwrap());

@@ -11,10 +11,11 @@ use std::sync::Arc;
 use byteorder::{ByteOrder, LittleEndian};
 use serde::{Deserialize, Serialize};
 
-use super::*;
 use memory_model::{GuestAddress, GuestMemory};
 use sys_util::EventFd;
-use BusDevice;
+
+use super::*;
+use crate::bus::BusDevice;
 
 //TODO crosvm uses 0 here, but IIRC virtio specified some other vendor id that should be used
 const VENDOR_ID: u32 = 0;
@@ -688,6 +689,7 @@ mod tests {
         fn handle_event(
             &mut self,
             _device_event: u16,
+            _evset: epoll::Events,
         ) -> std::result::Result<(), super::super::super::Error> {
             Ok(())
         }
@@ -732,17 +734,17 @@ mod tests {
         );
 
         d.queue_select = 0;
-        assert_eq!(d.with_queue(0, |q| q.get_max_size()), 16);
+        assert_eq!(d.with_queue(0, Queue::get_max_size), 16);
         assert!(d.with_queue_mut(|q| q.size = 16));
         assert_eq!(d.queues[d.queue_select as usize].size, 16);
 
         d.queue_select = 1;
-        assert_eq!(d.with_queue(0, |q| q.get_max_size()), 32);
+        assert_eq!(d.with_queue(0, Queue::get_max_size), 32);
         assert!(d.with_queue_mut(|q| q.size = 16));
         assert_eq!(d.queues[d.queue_select as usize].size, 16);
 
         d.queue_select = 2;
-        assert_eq!(d.with_queue(0, |q| q.get_max_size()), 0);
+        assert_eq!(d.with_queue(0, Queue::get_max_size), 0);
         assert!(!d.with_queue_mut(|q| q.size = 16));
 
         d.mem.take().unwrap();
@@ -821,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::cyclomatic_complexity)]
+    #[allow(clippy::cognitive_complexity)]
     fn test_bus_device_write() {
         let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)]).unwrap();
 

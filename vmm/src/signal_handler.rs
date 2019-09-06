@@ -75,6 +75,12 @@ extern "C" fn sigbus_sigsegv_handler(num: c_int, info: *mut siginfo_t, _unused: 
 
     // Other signals which might do async unsafe things incompatible with the rest of this
     // function are blocked due to the sa_mask used when registering the signal handler.
+    match si_signo {
+        SIGBUS => METRICS.signals.sigbus.inc(),
+        SIGSEGV => METRICS.signals.sigsegv.inc(),
+        _ => (),
+    }
+
     error!(
         "Shutting down VM after intercepting signal {}, code {}.",
         si_signo, si_code
@@ -111,10 +117,8 @@ pub fn register_signal_handlers() -> Result<(), io::Error> {
 mod tests {
     use super::*;
 
-    use std::mem;
-    use std::process;
-
     use libc::{cpu_set_t, syscall};
+    use std::{mem, process, thread};
 
     use seccomp::{allow_syscall, SeccompAction, SeccompFilter};
 
@@ -144,37 +148,52 @@ mod tests {
 
     #[test]
     fn test_signal_handler() {
-        assert!(register_signal_handlers().is_ok());
+        let child = thread::spawn(move || {
+            assert!(register_signal_handlers().is_ok());
 
-        let filter = SeccompFilter::new(
-            vec![
-                allow_syscall(libc::SYS_brk),
-                allow_syscall(libc::SYS_exit),
-                allow_syscall(libc::SYS_futex),
-                allow_syscall(libc::SYS_getpid),
-                allow_syscall(libc::SYS_kill),
-                allow_syscall(libc::SYS_munmap),
-                allow_syscall(libc::SYS_rt_sigprocmask),
-                allow_syscall(libc::SYS_rt_sigreturn),
-                allow_syscall(libc::SYS_sched_getaffinity),
-                allow_syscall(libc::SYS_set_tid_address),
-                allow_syscall(libc::SYS_sigaltstack),
-                allow_syscall(libc::SYS_write),
-            ]
-            .into_iter()
-            .collect(),
-            SeccompAction::Trap,
-        )
-        .unwrap();
+            let filter = SeccompFilter::new(
+                vec![
+                    allow_syscall(libc::SYS_brk),
+                    allow_syscall(libc::SYS_exit),
+                    allow_syscall(libc::SYS_futex),
+                    allow_syscall(libc::SYS_getpid),
+                    allow_syscall(libc::SYS_munmap),
+                    allow_syscall(libc::SYS_kill),
+                    allow_syscall(libc::SYS_rt_sigprocmask),
+                    allow_syscall(libc::SYS_rt_sigreturn),
+                    allow_syscall(libc::SYS_sched_getaffinity),
+                    allow_syscall(libc::SYS_set_tid_address),
+                    allow_syscall(libc::SYS_sigaltstack),
+                    allow_syscall(libc::SYS_write),
+                ]
+                .into_iter()
+                .collect(),
+                SeccompAction::Trap,
+            )
+            .unwrap();
 
-        assert!(filter.apply().is_ok());
-        assert_eq!(METRICS.seccomp.num_faults.count(), 0);
+            assert!(filter.apply().is_ok());
+            assert_eq!(METRICS.seccomp.num_faults.count(), 0);
 
-        // Call the blacklisted `SYS_mkdir`.
-        unsafe { syscall(libc::SYS_mkdirat, "/foo/bar\0") };
+            // Call the blacklisted `SYS_mkdirat`.
+            unsafe { syscall(libc::SYS_mkdirat, "/foo/bar\0") };
 
+            // Call SIGBUS signal handler.
+            assert_eq!(METRICS.signals.sigbus.count(), 0);
+            unsafe {
+                syscall(libc::SYS_kill, process::id(), SIGBUS);
+            }
+
+            // Call SIGSEGV signal handler.
+            assert_eq!(METRICS.signals.sigsegv.count(), 0);
+            unsafe {
+                syscall(libc::SYS_kill, process::id(), SIGSEGV);
+            }
+        });
+        assert!(child.join().is_ok());
+
+        // Sanity check.
         assert!(cpu_count() > 0);
-
         // Kcov somehow messes with our handler getting the SIGSYS signal when a bad syscall
         // is caught, so the following assertion no longer holds. Ideally, we'd have a surefire
         // way of either preventing this behaviour, or detecting for certain whether this test is
@@ -183,13 +202,9 @@ mod tests {
         // tests, so we use this as an heuristic to decide if we check the assertion.
         if cpu_count() > 1 {
             // The signal handler should let the program continue during unit tests.
-            assert_eq!(METRICS.seccomp.num_faults.count(), 1);
+            assert!(METRICS.seccomp.num_faults.count() >= 1);
         }
-
-        // Assert that the SIGBUS handler left the process alive.
-        unsafe {
-            syscall(libc::SYS_kill, process::id(), SIGBUS);
-        }
-        assert!(true);
+        assert!(METRICS.signals.sigbus.count() >= 1);
+        assert!(METRICS.signals.sigsegv.count() >= 1);
     }
 }
