@@ -2485,6 +2485,12 @@ impl Vmm {
             }
         }
 
+        // Load seccomp filters for the VMM thread.
+        // Execution panics if filters cannot be loaded, use --seccomp-level=0 if skipping filters
+        // altogether is the desired behaviour.
+        default_syscalls::set_seccomp_level(self.seccomp_level)
+            .map_err(StartMicrovmError::SeccompFilters)?;
+
         // Send the 'resume' command so that vcpus actually start running.
         self.resume_vcpus()?;
 
