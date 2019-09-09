@@ -92,7 +92,18 @@ impl Write for SnapshotReaderWriter {
     }
 
     fn flush(&mut self) -> std::result::Result<(), io::Error> {
-        Ok(())
+        let ret = unsafe {
+            libc::msync(
+                self.base_addr as *mut libc::c_void,
+                self.mapping_size,
+                libc::MS_SYNC,
+            )
+        };
+        if ret == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 }
 

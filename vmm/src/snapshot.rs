@@ -276,6 +276,7 @@ impl SnapshotImage {
         reader_writer
             .write_all(serialized_microvm.as_slice())
             .map_err(Error::IO)?;
+        reader_writer.flush().map_err(Error::IO)?;
 
         Ok(())
     }
