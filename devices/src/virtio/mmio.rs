@@ -11,10 +11,11 @@ use std::sync::Arc;
 use byteorder::{ByteOrder, LittleEndian};
 use serde::{Deserialize, Serialize};
 
+use super::super::Error as DeviceError;
+use super::*;
 use memory_model::{GuestAddress, GuestMemory};
 use sys_util::EventFd;
 
-use super::*;
 use crate::bus::BusDevice;
 
 //TODO crosvm uses 0 here, but IIRC virtio specified some other vendor id that should be used
@@ -136,12 +137,15 @@ pub enum SpecificVirtioDeviceStateError {
     InvalidDowncast,
     RestoreBlockDevice(BlockError),
     RestoreNetDevice(net::Error),
+    RestoreBalloonDevice(DeviceError),
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Deserialize, Serialize)]
 pub enum SpecificVirtioDeviceState {
     Block(BlockState),
     Net(NetState),
+    Balloon(BalloonState),
 }
 
 /// Implements the
@@ -526,6 +530,10 @@ impl MmioDeviceState {
             ),
             TYPE_NET => SpecificVirtioDeviceState::Net(
                 NetState::new(device, handler)
+                    .map_err(MmioDeviceStateError::SaveSpecificVirtioDevice)?,
+            ),
+            TYPE_BALLOON => SpecificVirtioDeviceState::Balloon(
+                BalloonState::new(device, handler)
                     .map_err(MmioDeviceStateError::SaveSpecificVirtioDevice)?,
             ),
             _ => {

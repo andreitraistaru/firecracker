@@ -12,12 +12,14 @@ use std::io::Error as IOError;
 use std::os::unix::io::RawFd;
 use std::sync::mpsc;
 
+pub mod balloon;
 pub mod block;
 mod mmio;
 pub mod net;
 mod queue;
 pub mod vsock;
 
+pub use self::balloon::*;
 pub use self::block::*;
 pub use self::mmio::*;
 pub use self::net::*;
@@ -37,6 +39,7 @@ const DEVICE_FAILED: u32 = 0x80;
 /// Type 0 is not used by virtio. Use it as wildcard for non-virtio devices
 pub const TYPE_NET: u32 = 1;
 pub const TYPE_BLOCK: u32 = 2;
+pub const TYPE_BALLOON: u32 = 5;
 
 /// Interrupt flags (re: interrupt status & acknowledge registers).
 /// See linux/virtio_mmio.h.
