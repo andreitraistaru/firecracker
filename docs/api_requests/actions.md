@@ -86,28 +86,6 @@ curl --unix-socket /tmp/firecracker.socket -i \
     }"
 ```
 
-## PauseToSnapshot
-
-The `PauseToSnapshot` pauses VCPUs, effectively pausing the microVM guest.
-It then saves VCPUs states, the VM state, all the devices states and guest
-memory on a _snapshot file_. This file is currently hardcoded as being `foo.image`.
-
-If the save to snapshot operation succeeds, Firecracker responds with an
-`OK` to this request then finishes execution.
-
-
-### PauseToSnapshot Example
-
-```bash
-curl --unix-socket /tmp/firecracker.socket -i \
-    -X PUT "http://localhost/actions" \
-    -H  "accept: application/json" \
-    -H  "Content-Type: application/json" \
-    -d "{
-             \"action_type\": \"PauseToSnapshot\"
-    }"
-```
-
 ## PauseVCPUs
 
 The `PauseVCPUs` pauses VCPUs, effectively pausing the microVM guest.
@@ -121,24 +99,6 @@ curl --unix-socket /tmp/firecracker.socket -i \
     -H  "Content-Type: application/json" \
     -d "{
              \"action_type\": \"PauseVCPUs\"
-    }"
-```
-
-## ResumeFromSnapshot
-
-The `ResumeFromSnapshot` action loads a suspended/paused microVM guest from
-the `foo.image` snapshot file on disk in Firecracker's CWD, restores VCPUs,
-VM, devices, and guest memory from said file and resumes execution.
-
-### ResumeFromSnapshot Example
-
-```bash
-curl --unix-socket /tmp/firecracker.socket -i \
-    -X PUT "http://localhost/actions" \
-    -H  "accept: application/json" \
-    -H  "Content-Type: application/json" \
-    -d "{
-             \"action_type\": \"ResumeFromSnapshot\"
     }"
 ```
 
