@@ -19,6 +19,7 @@ use bincode::Error as SerializationError;
 
 use devices::virtio::MmioDeviceState;
 use serialize::SnapshotReaderWriter;
+use vmm_config::device_config::DeviceConfigs;
 use vstate::{VcpuState, VmState};
 
 /// Magic number, verifies a snapshot file's validity.
@@ -200,6 +201,7 @@ pub struct MicrovmState {
     pub vm_state: VmState,
     pub vcpu_states: Vec<VcpuState>,
     pub device_states: Vec<MmioDeviceState>,
+    pub device_configs: DeviceConfigs,
 }
 
 pub struct SnapshotImage {
@@ -256,6 +258,7 @@ impl SnapshotImage {
         extra_info: VmInfo,
         vm_state: VmState,
         vcpu_states: Vec<VcpuState>,
+        device_configs: DeviceConfigs,
         device_states: Vec<MmioDeviceState>,
     ) -> Result<()> {
         let microvm_state = MicrovmState {
@@ -263,6 +266,7 @@ impl SnapshotImage {
             vm_info: extra_info,
             vm_state,
             vcpu_states,
+            device_configs,
             device_states,
         };
         let serialized_microvm = bincode::serialize(&microvm_state).map_err(Error::Serialize)?;
@@ -305,6 +309,12 @@ impl SnapshotImage {
     pub fn into_vcpu_states(self) -> Vec<VcpuState> {
         self.microvm_state
             .map_or_else(|| vec![], |state| state.vcpu_states)
+    }
+
+    pub fn device_configs(&self) -> DeviceConfigs {
+        self.microvm_state
+            .as_ref()
+            .map_or(Default::default(), |state| state.device_configs.clone())
     }
 
     pub fn validate_mem_file_size(&self, mem_file_path: &str) -> Result<()> {
@@ -546,6 +556,7 @@ mod tests {
             vm_state: kvm_vm_state.clone(),
             vcpu_states: vcpu_states.clone(),
             device_states: vec![],
+            device_configs: Default::default(),
         });
         let file = NamedTempFile::new().unwrap().into_file();
         let fd = file.as_raw_fd();
@@ -567,13 +578,21 @@ mod tests {
         tmp_snapshot_path: &TempPath,
         vm_state: VmState,
         vcpu_state: VcpuState,
+        device_configs: DeviceConfigs,
         header: SnapshotHdr,
         extra_info: VmInfo,
     ) -> String {
         let snapshot_path = tmp_snapshot_path.to_str().unwrap();
         let mut image = SnapshotImage::create_new(snapshot_path).unwrap();
         image
-            .serialize_microvm(header, extra_info, vm_state, vec![vcpu_state], vec![])
+            .serialize_microvm(
+                header,
+                extra_info,
+                vm_state,
+                vec![vcpu_state],
+                device_configs,
+                vec![],
+            )
             .unwrap();
         snapshot_path.to_string()
     }
@@ -616,6 +635,7 @@ mod tests {
                     extra_info.clone(),
                     vm_state.clone(),
                     vec![vcpu_state.clone()],
+                    Default::default(),
                     vec![]
                 )
                 .is_ok());
@@ -659,6 +679,7 @@ mod tests {
                     &bad_snap_path,
                     vm_state.clone(),
                     vcpu_state.clone(),
+                    Default::default(),
                     bad_header.clone(),
                     extra_info.clone(),
                 );
@@ -681,6 +702,7 @@ mod tests {
                     &bad_snap_path,
                     vm_state.clone(),
                     vcpu_state.clone(),
+                    Default::default(),
                     bad_header.clone(),
                     extra_info.clone(),
                 );

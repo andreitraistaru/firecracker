@@ -2415,8 +2415,17 @@ impl Vmm {
             .mmio_device_states()
             .map_err(PauseMicrovmError::SaveMmioDeviceState)?;
 
+        let device_configs = self.device_configs.clone();
+
         image
-            .serialize_microvm(header, extra_info, vm_state, vcpu_states, device_states)
+            .serialize_microvm(
+                header,
+                extra_info,
+                vm_state,
+                vcpu_states,
+                device_configs,
+                device_states,
+            )
             .map_err(PauseMicrovmError::SerializeMicrovmState)?;
 
         // Sync guest memory.
@@ -2523,6 +2532,8 @@ impl Vmm {
             .map_err(ResumeMicrovmError::RestoreVmState)?;
 
         self.attach_legacy_devices()?;
+
+        self.device_configs = snapshot_image.device_configs();
 
         {
             // Instantiate the MMIO device manager.
