@@ -32,7 +32,7 @@ pub mod vsock;
 
 /// A public-facing, stateless structure, holding all the data we need to create a TokenBucket
 /// (live) object.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct TokenBucketConfig {
     /// See TokenBucket::size.
     pub size: u64,
@@ -55,7 +55,7 @@ impl TokenBucketConfig {
 
 /// A public-facing, stateless structure, holding all the data we need to create a RateLimiter
 /// (live) object.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct RateLimiterConfig {
     /// Data used to initialize the RateLimiter::bandwidth bucket.
     pub bandwidth: Option<TokenBucketConfig>,

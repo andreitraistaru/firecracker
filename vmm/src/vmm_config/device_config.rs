@@ -9,6 +9,7 @@ use vmm_config::vsock::*;
 
 /// A data structure that encapsulates the device configurations
 /// held in the Vmm.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct DeviceConfigs {
     /// The configurations for block devices.
     pub block: BlockDeviceConfigs,

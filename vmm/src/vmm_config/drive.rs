@@ -57,7 +57,7 @@ impl Display for DriveError {
 }
 
 /// Use this structure to set up the Block Device before booting the kernel.
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BlockDeviceConfig {
     /// Unique identifier of the drive.
@@ -96,7 +96,7 @@ impl BlockDeviceConfig {
 }
 
 /// Wrapper for the collection that holds all the Block Devices Configs
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct BlockDeviceConfigs {
     /// A list of `BlockDeviceConfig` objects.
     pub config_list: VecDeque<BlockDeviceConfig>,
@@ -232,21 +232,6 @@ mod tests {
 
     use self::tempfile::NamedTempFile;
     use super::*;
-
-    // This implementation is used only in tests.
-    // We cannot directly derive clone because RateLimiter does not implement clone.
-    impl Clone for BlockDeviceConfig {
-        fn clone(&self) -> Self {
-            BlockDeviceConfig {
-                path_on_host: self.path_on_host.clone(),
-                is_root_device: self.is_root_device,
-                partuuid: self.partuuid.clone(),
-                is_read_only: self.is_read_only,
-                drive_id: self.drive_id.clone(),
-                rate_limiter: None,
-            }
-        }
-    }
 
     #[test]
     fn test_create_block_devices_configs() {

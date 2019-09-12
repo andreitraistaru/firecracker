@@ -11,7 +11,7 @@ use net_util::{MacAddr, Tap, TapError};
 
 /// This struct represents the strongly typed equivalent of the json body from net iface
 /// related requests.
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkInterfaceConfig {
     /// ID of the guest network interface.
@@ -31,9 +31,6 @@ pub struct NetworkInterfaceConfig {
     /// same address are intercepted by the device model, and do not reach
     /// the associated TAP device.
     pub allow_mmds_requests: bool,
-    /// Handle for a network tap interface created using `host_dev_name`.
-    #[serde(skip)]
-    pub tap: Option<Tap>,
 }
 
 // Serde does not allow specifying a default value for a field
@@ -44,10 +41,9 @@ fn default_allow_mmds_requests() -> bool {
 }
 
 impl NetworkInterfaceConfig {
-    /// Returns the tap device if it was configured. This function has side effects as it takes
-    /// the value from `self.tap` and leaves None in its place.
-    pub fn take_tap(&mut self) -> Option<Tap> {
-        self.tap.take()
+    /// Returns the tap device that `host_dev_name` refers to.
+    pub fn get_tap(&self) -> result::Result<Tap, NetworkInterfaceError> {
+        Tap::open_named(self.host_dev_name.as_str()).map_err(NetworkInterfaceError::OpenTap)
     }
 
     /// Returns a reference to the mac address. It the mac address is not configured, it
@@ -136,7 +132,7 @@ impl Display for NetworkInterfaceError {
 }
 
 /// A wrapper over the list of the `NetworkInterfaceConfig` that the microvm has configured.
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct NetworkInterfaceConfigs {
     if_list: Vec<NetworkInterfaceConfig>,
 }
@@ -213,25 +209,13 @@ impl NetworkInterfaceConfigs {
     fn update(
         &mut self,
         index: usize,
-        mut updated_netif_config: NetworkInterfaceConfig,
+        updated_netif_config: NetworkInterfaceConfig,
     ) -> result::Result<(), NetworkInterfaceError> {
         self.validate_update(index, &updated_netif_config)?;
-
-        // We are ignoring the tap field of the network interface we want to update. We are
-        // manually setting this field to a newly created tap (corresponding to the host_dev_name)
-        // or to the old tap device of the network interface we are trying to update.
-        updated_netif_config.tap =
-            if self.if_list[index].host_dev_name != updated_netif_config.host_dev_name {
-                Some(
-                    Tap::open_named(&updated_netif_config.host_dev_name.as_str())
-                        .map_err(NetworkInterfaceError::OpenTap)?,
-                )
-            } else {
-                self.if_list[index].tap.take()
-            };
         self.if_list[index] = updated_netif_config;
 
-        Ok(())
+        // Check that the tap can be opened.
+        self.if_list[index].get_tap().map(|_| ())
     }
 
     fn validate_create(
@@ -259,7 +243,8 @@ impl NetworkInterfaceConfigs {
             ));
         }
 
-        Ok(())
+        // Check that the tap refered to in `new_config` can be opened.
+        new_config.get_tap().map(|_| ())
     }
 
     fn create(
@@ -267,12 +252,7 @@ impl NetworkInterfaceConfigs {
         netif_config: NetworkInterfaceConfig,
     ) -> result::Result<(), NetworkInterfaceError> {
         self.validate_create(&netif_config)?;
-        let tap = Tap::open_named(netif_config.host_dev_name.as_str())
-            .map_err(NetworkInterfaceError::OpenTap)?;
         self.if_list.push(netif_config);
-
-        let index = self.if_list.len() - 1;
-        self.if_list[index].tap = Some(tap);
         Ok(())
     }
 }
@@ -293,23 +273,6 @@ mod tests {
             rx_rate_limiter: Some(RateLimiterConfig::default()),
             tx_rate_limiter: Some(RateLimiterConfig::default()),
             allow_mmds_requests: false,
-            tap: None,
-        }
-    }
-
-    // This implementation is used only in tests. We cannot directly derive clone because
-    // Tap and RateLimiter do not implement clone.
-    impl Clone for NetworkInterfaceConfig {
-        fn clone(&self) -> Self {
-            NetworkInterfaceConfig {
-                iface_id: self.iface_id.clone(),
-                host_dev_name: self.host_dev_name.clone(),
-                guest_mac: self.guest_mac,
-                rx_rate_limiter: None,
-                tx_rate_limiter: None,
-                allow_mmds_requests: self.allow_mmds_requests,
-                tap: None,
-            }
         }
     }
 
