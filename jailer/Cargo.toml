@@ -1,6 +1,6 @@
 [package]
 name = "jailer"
-version = "0.9.1"
+version = "1.0.1"
 authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
 
 [dependencies]
