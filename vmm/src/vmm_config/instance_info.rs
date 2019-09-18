@@ -265,6 +265,8 @@ pub enum StartMicrovmError {
     VcpusNotConfigured,
     /// Cannot spawn a new vCPU thread.
     VcpuSpawn(vstate::Error),
+    /// Cannot set mode for terminal.
+    StdinHandle(std::io::Error),
 }
 
 impl std::convert::From<StateError> for StartMicrovmError {
@@ -297,7 +299,12 @@ impl Display for StartMicrovmError {
 
                 write!(f, "Cannot configure virtual machine. {}", err_msg)
             }
-            CreateBlockDevice(ref err) => write!(f, "Unable to Create block device. {:?}", err),
+            CreateBlockDevice(ref err) => write!(
+                f,
+                "Unable to seek the block device backing file due to invalid permissions or \
+                 the file was deleted/corrupted. Error number: {:?}",
+                err
+            ),
             CreateRateLimiter(ref err) => write!(f, "Cannot create RateLimiter. {}", err),
             CreateVsockDevice => write!(f, "Cannot create vsock device."),
             CreateNetDevice(ref err) => {
@@ -406,6 +413,7 @@ impl Display for StartMicrovmError {
 
                 write!(f, "Cannot spawn vCPU thread. {}", err_msg)
             }
+            StdinHandle(ref err) => write!(f, "Failed to set mode for terminal: {}", err),
         }
     }
 }
@@ -582,8 +590,9 @@ mod tests {
                 ))
             ),
             format!(
-                "Unable to Create block device. OpenFile({:?})",
-                std::io::Error::from_raw_os_error(0)
+                "Unable to seek the block device backing file due to invalid permissions or \
+                 the file was deleted/corrupted. Error number: {:?}",
+                devices::virtio::block::BlockError::OpenFile(std::io::Error::from_raw_os_error(0))
             )
         );
         assert_eq!(

@@ -48,7 +48,8 @@ class Microvm:
         microvm_id,
         build_feature='',
         monitor_memory=True,
-        bin_cloner_path=None
+        bin_cloner_path=None,
+        config_file=None
     ):
         """Set up microVM attributes, paths, and data structures."""
         # Unique identifier for this machine.
@@ -100,6 +101,10 @@ class Microvm:
         self.snapshot_create = None
         self.snapshot_load = None
         self.vsock = None
+
+        # Optional file that contains a json for configuring microvm from
+        # command line parameter.
+        self.config_file = config_file
 
         # The ssh config dictionary is populated with information about how
         # to connect to a microVM that has ssh capability. The path of the
@@ -221,9 +226,10 @@ class Microvm:
         """Set the path of file backing the guest memory."""
         self._mem_file_path = path
 
-    def create_jailed_resource(self, path):
+    def create_jailed_resource(self, path, create_jail=False):
         """Create a hard link to some resource inside this microvm."""
-        return self.jailer.jailed_path(path, create=True)
+        return self.jailer.jailed_path(path, create=True,
+                                       create_jail=create_jail)
 
     def get_jailed_resource(self, path):
         """Get the jailed path to a resource."""
@@ -292,7 +298,7 @@ class Microvm:
         )
         self.vsock = Vsock(self._api_socket, self._api_session)
 
-        jailer_param_list = self._jailer.construct_param_list()
+        jailer_param_list = self._jailer.construct_param_list(self.config_file)
 
         # When the daemonize flag is on, we want to clone-exec into the
         # jailer rather than executing it via spawning a shell. Going

@@ -246,8 +246,7 @@ impl Vm {
                     userspace_addr: host_addr as u64,
                     flags,
                 };
-                // Safe because we mapped the memory region, we made sure that the regions
-                // are not overlapping.
+
                 self.fd.set_user_memory_region(memory_region)
             })
             .map_err(Error::SetUserMemoryRegion)?;
