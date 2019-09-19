@@ -9,7 +9,6 @@
 
 extern crate kvm_bindings;
 
-use std::cmp;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -25,27 +24,16 @@ use vstate::{VcpuState, VmState};
 /// Magic number, verifies a snapshot file's validity.
 pub(super) const SNAPSHOT_MAGIC: u64 = 0xEDA3_25D9_EDA3_25D9;
 /// Snapshot format version. Can vary independently from Firecracker's version.
-pub(super) const SNAPSHOT_VERSION: u64 = 0x0000_0000_0000_0001;
-
-/// How to deal with deserializing snapshots of different versions.
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-pub(super) enum SnapshotVersionSupport {
-    /// Any version is allowed through.
-    Any,
-    /// A specific `Major` delta is allowed.
-    Major(u16),
-    /// The same `Major` and a specific `Minor` delta are allowed.
-    Minor(u16),
-    /// The same `Major.Minor` and a specific `Build` delta are allowed.
-    Build(u32),
-    /// Only the same version is allowed.
-    Same,
-}
+pub(super) const SNAPSHOT_VERSION: Version = Version {
+    major: 0,
+    minor: 0,
+    build: 1,
+};
 
 // Helper enum that signals a generic versioning error. Caller translates it to a specific error.
-enum VersionError {
-    UnsupportedVersion,
+#[derive(Debug)]
+pub enum VersionError {
+    InvalidFormat,
 }
 
 /// Snapshot related errors.
@@ -64,8 +52,8 @@ pub enum Error {
     Mmap(io::Error),
     OpenExisting(io::Error),
     Serialize(SerializationError),
-    UnsupportedAppVersion(u64),
-    UnsupportedSnapshotVersion(u64),
+    UnsupportedAppVersion(Version),
+    UnsupportedSnapshotVersion(Version),
     Truncate(io::Error),
 }
 
@@ -87,10 +75,10 @@ impl Display for Error {
             OpenExisting(ref e) => write!(f, "Failed to open snapshot file: {}", e),
             Serialize(ref e) => write!(f, "Failed to serialize snapshot content. {}", e),
             UnsupportedAppVersion(v) => {
-                write!(f, "Unsupported app version: {}.", Version::from(v)
+                write!(f, "Unsupported app version: {}.", v
                 )
-            },
-            UnsupportedSnapshotVersion(v) => write!(f, "Unsupported snapshot version: {}.", Version::from(v)),
+            }
+            UnsupportedSnapshotVersion(v) => write!(f, "Unsupported snapshot version: {}.", v),
             Truncate(ref e) => write!(f, "Failed to truncate snapshot file: {}", e),
         }
     }
@@ -98,8 +86,15 @@ impl Display for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, PartialEq, PartialOrd)]
+pub enum VersionComponent {
+    Major,
+    Minor,
+    Build,
+}
+
 /// Version struct composed of major, minor and build numbers.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
 pub struct Version {
     major: u16,
     minor: u16,
@@ -107,42 +102,51 @@ pub struct Version {
 }
 
 impl Version {
-    fn major_delta(self, rhs: Version) -> u16 {
-        cmp::max(self.major, rhs.major) - cmp::min(self.major, rhs.major)
-    }
-
-    fn minor_delta(self, rhs: Version) -> u16 {
-        cmp::max(self.minor, rhs.minor) - cmp::min(self.minor, rhs.minor)
-    }
-
-    fn build_delta(self, rhs: Version) -> u32 {
-        cmp::max(self.build, rhs.build) - cmp::min(self.build, rhs.build)
-    }
-}
-
-impl Into<u64> for Version {
-    fn into(self) -> u64 {
-        (u64::from(self.major) << 48) | (u64::from(self.minor) << 32) | u64::from(self.build)
-    }
-}
-
-impl From<u64> for Version {
-    fn from(version: u64) -> Self {
+    pub fn new(major: u16, minor: u16, build: u32) -> Version {
         Version {
-            major: (version >> 48) as u16,
-            minor: ((version >> 32) & 0xFFFF) as u16,
-            build: (version & 0xFFFF_FFFF) as u32,
+            major,
+            minor,
+            build,
         }
     }
-}
 
-impl From<(u16, u16, u32)> for Version {
-    fn from(tuple_ver: (u16, u16, u32)) -> Self {
-        Version {
-            major: tuple_ver.0,
-            minor: tuple_ver.1,
-            build: tuple_ver.2,
+    pub fn from_str(version: &str) -> std::result::Result<Version, VersionError> {
+        let nums: &Vec<u32> = &version
+            .split('.')
+            .flat_map(str::parse::<u32>)
+            .collect::<Vec<u32>>();
+        if nums.len() != 3 {
+            return Err(VersionError::InvalidFormat);
         }
+
+        Ok(Version {
+            major: nums[0] as u16,
+            minor: nums[1] as u16,
+            build: nums[2],
+        })
+    }
+
+    /// Transform each component beginning from `start` to it's max possible value.
+    fn ceil(self, start: VersionComponent) -> Version {
+        let mut ceil = self;
+
+        if start <= VersionComponent::Major {
+            ceil.major = std::u16::MAX;
+        }
+
+        if start <= VersionComponent::Minor {
+            ceil.minor = std::u16::MAX;
+        }
+
+        if start <= VersionComponent::Build {
+            ceil.build = std::u32::MAX;
+        }
+
+        ceil
+    }
+
+    pub fn is_in_range(self, from: Version, to: Version) -> bool {
+        self >= from && self <= to
     }
 }
 
@@ -169,7 +173,7 @@ impl SnapshotHdr {
     pub fn new(app_version: Version) -> Self {
         SnapshotHdr {
             magic_id: SNAPSHOT_MAGIC,
-            snapshot_version: SNAPSHOT_VERSION.into(),
+            snapshot_version: SNAPSHOT_VERSION,
             app_version,
         }
     }
@@ -238,7 +242,7 @@ impl SnapshotImage {
                 .map_err(Error::Deserialize)?;
 
         // Cross-version deserialization is not supported yet.
-        Self::validate_header(&microvm_state, app_version, SnapshotVersionSupport::Same)?;
+        Self::validate_header(&microvm_state, app_version)?;
 
         Ok(SnapshotImage {
             file,
@@ -320,86 +324,24 @@ impl SnapshotImage {
         }
     }
 
-    /// Checks that two versions are compatible.
-    fn validate_version(
-        version: Version,
-        other_version: Version,
-        support: SnapshotVersionSupport,
-    ) -> std::result::Result<(), VersionError> {
-        use SnapshotVersionSupport::*;
-
-        match support {
-            // Anything works.
-            Any => Ok(()),
-
-            // The major numbers must not differ by more than `delta`.
-            Major(delta) => {
-                if version.major_delta(other_version) > delta {
-                    Err(VersionError::UnsupportedVersion)
-                } else {
-                    Ok(())
-                }
-            }
-            // The major numbers must be the same, and the minor numbers must not differ by more
-            // than `delta`.
-            Minor(delta) => {
-                if version.major != other_version.major
-                    || version.minor_delta(other_version) > delta
-                {
-                    Err(VersionError::UnsupportedVersion)
-                } else {
-                    Ok(())
-                }
-            }
-
-            // The major and minor numbers must be the same, and the build numbers must not differ
-            // by more than `delta`.
-            Build(delta) => {
-                if version.major != other_version.major
-                    || version.minor != other_version.minor
-                    || version.build_delta(other_version) > delta
-                {
-                    Err(VersionError::UnsupportedVersion)
-                } else {
-                    Ok(())
-                }
-            }
-
-            // The versions must be identical.
-            Same => {
-                if version != other_version {
-                    Err(VersionError::UnsupportedVersion)
-                } else {
-                    Ok(())
-                }
-            }
-        }
-    }
-
-    fn validate_header(
-        microvm_state: &MicrovmState,
-        current_app_version: Version,
-        _version_support: SnapshotVersionSupport,
-    ) -> Result<()> {
+    fn validate_header(microvm_state: &MicrovmState, current_app_version: Version) -> Result<()> {
         if microvm_state.header.magic_id != SNAPSHOT_MAGIC {
             return Err(Error::BadMagicNumber);
         }
-        Self::validate_version(
-            SNAPSHOT_VERSION.into(),
-            microvm_state.header.snapshot_version,
-            // Cross-version deserialization is not supported yet.
-            SnapshotVersionSupport::Same,
-        )
-        .map_err(|_| {
-            Error::UnsupportedSnapshotVersion(microvm_state.header.snapshot_version.into())
-        })?;
-        Self::validate_version(
-            current_app_version,
-            microvm_state.header.app_version,
-            // Cross-version deserialization is not supported yet.
-            SnapshotVersionSupport::Same,
-        )
-        .map_err(|_| Error::UnsupportedAppVersion(microvm_state.header.app_version.into()))?;
+
+        // We don't validate the Snapshot Version
+
+        // Check if the app version associated with the snapshot is valid.
+        // For the moment we accept any app version starting 1.0.0 (first wisp version
+        // supporting snapshotting) and ending with the current app version.
+        if !microvm_state.header.app_version.is_in_range(
+            Version::new(1, 0, 0),
+            current_app_version.ceil(VersionComponent::Minor),
+        ) {
+            return Err(Error::UnsupportedAppVersion(
+                microvm_state.header.app_version,
+            ));
+        }
 
         Ok(())
     }
@@ -444,7 +386,11 @@ mod tests {
         }
     }
 
-    const APP_VER: u64 = 0xDEAD_BEEF_CAFE_BABE;
+    const APP_VER: Version = Version {
+        major: 0xDEAD,
+        minor: 0xBEAF,
+        build: 0xCAFE_BABE,
+    };
 
     impl PartialEq for Error {
         fn eq(&self, other: &Self) -> bool {
@@ -571,8 +517,8 @@ mod tests {
     fn build_valid_header() -> SnapshotHdr {
         SnapshotHdr {
             magic_id: SNAPSHOT_MAGIC,
-            snapshot_version: SNAPSHOT_VERSION.into(),
-            app_version: APP_VER.into(),
+            snapshot_version: SNAPSHOT_VERSION,
+            app_version: APP_VER,
         }
     }
 
@@ -726,35 +672,11 @@ mod tests {
             }
 
             {
-                // Test error case: invalid snapshot version number in header.
-                let bad_snap = NamedTempFile::new().unwrap();
-                let bad_snap_path = bad_snap.into_temp_path();
-                let mut bad_header = header.clone();
-                bad_header.snapshot_version.build += 1;
-                let bad_image_path = make_snapshot(
-                    &bad_snap_path,
-                    vm_state.clone(),
-                    vcpu_state.clone(),
-                    bad_header.clone(),
-                    extra_info.clone(),
-                );
-                let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
-                assert!(ret.is_err());
-                assert_eq!(
-                    format!("{}", ret.err().unwrap()),
-                    format!(
-                        "Unsupported snapshot version: {}.",
-                        bad_header.snapshot_version
-                    )
-                );
-            }
-
-            {
                 // Test error case: invalid app version number in header.
                 let bad_snap = NamedTempFile::new().unwrap();
                 let bad_snap_path = bad_snap.into_temp_path();
                 let mut bad_header = header.clone();
-                bad_header.app_version = 0.into();
+                bad_header.app_version = Version::new(0, 0, 0);
                 let bad_image_path = make_snapshot(
                     &bad_snap_path,
                     vm_state.clone(),
@@ -882,11 +804,14 @@ mod tests {
             )
         );
         assert_eq!(
-            format!("{}", Error::UnsupportedAppVersion(0x0001_0002_0000_0003)),
+            format!("{}", Error::UnsupportedAppVersion(Version::new(1, 2, 3))),
             "Unsupported app version: 1.2.3."
         );
         assert_eq!(
-            format!("{}", Error::UnsupportedSnapshotVersion(42)),
+            format!(
+                "{}",
+                Error::UnsupportedSnapshotVersion(Version::new(0, 0, 42))
+            ),
             "Unsupported snapshot version: 0.0.42."
         );
         assert_eq!(
@@ -896,54 +821,62 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_version() {
-        use SnapshotVersionSupport::*;
+    fn test_version_new() {
+        let v = Version {
+            major: 1,
+            minor: 2,
+            build: 3,
+        };
 
-        assert!(SnapshotImage::validate_version(1u64.into(), 2u64.into(), Any).is_ok());
+        assert_eq!(v.major, 1);
+        assert_eq!(v.minor, 2);
+        assert_eq!(v.build, 3);
+    }
 
-        assert!(SnapshotImage::validate_version(
-            (1u16, 0u16, 0u32).into(),
-            (2u16, 0u16, 0u32).into(),
-            Major(1)
-        )
-        .is_ok());
-        assert!(SnapshotImage::validate_version(
-            (2u16, 0u16, 0u32).into(),
-            (1u16, 0u16, 0u32).into(),
-            Major(1)
-        )
-        .is_ok());
-        assert!(SnapshotImage::validate_version(
-            (1u16, 0u16, 0u32).into(),
-            (3u16, 0u16, 0u32).into(),
-            Major(1)
-        )
-        .is_err());
+    #[test]
+    fn test_version_from_str() {
+        let v = Version::from_str("1.2.3").unwrap();
+        assert_eq!(v, Version::new(1, 2, 3));
 
-        assert!(SnapshotImage::validate_version(
-            (0u16, 1u16, 0u32).into(),
-            (0u16, 2u16, 0u32).into(),
-            Minor(1)
-        )
-        .is_ok());
-        assert!(SnapshotImage::validate_version(
-            (0u16, 2u16, 0u32).into(),
-            (0u16, 1u16, 0u32).into(),
-            Minor(1)
-        )
-        .is_ok());
-        assert!(SnapshotImage::validate_version(
-            (0u16, 1u16, 0u32).into(),
-            (0u16, 3u16, 0u32).into(),
-            Minor(1)
-        )
-        .is_err());
+        assert!(Version::from_str("1.2").is_err());
+        assert!(Version::from_str("1.2.3.4").is_err());
+    }
 
-        assert!(SnapshotImage::validate_version(1.into(), 2.into(), Build(1)).is_ok());
-        assert!(SnapshotImage::validate_version(2.into(), 1.into(), Build(1)).is_ok());
-        assert!(SnapshotImage::validate_version(1.into(), 3.into(), Build(1)).is_err());
+    #[test]
+    fn test_version_ceil() {
+        let v = Version::new(1, 2, 3);
 
-        assert!(SnapshotImage::validate_version(1.into(), 1.into(), Same).is_ok());
-        assert!(SnapshotImage::validate_version(1.into(), 2.into(), Same).is_err());
+        assert_eq!(
+            v.ceil(VersionComponent::Build),
+            Version::new(1, 2, std::u32::MAX)
+        );
+
+        assert_eq!(
+            v.ceil(VersionComponent::Minor),
+            Version::new(1, std::u16::MAX, std::u32::MAX)
+        );
+
+        assert_eq!(
+            v.ceil(VersionComponent::Major),
+            Version::new(std::u16::MAX, std::u16::MAX, std::u32::MAX)
+        );
+    }
+
+    #[test]
+    fn test_version_is_in_range() {
+        let v = Version::new(1, 2, 3);
+
+        assert!(v.is_in_range(Version::new(1, 2, 3), Version::new(1, 2, 3)));
+        assert!(v.is_in_range(Version::new(1, 2, 2), Version::new(1, 2, 4)));
+        assert!(!v.is_in_range(Version::new(1, 2, 1), Version::new(1, 2, 2)));
+        assert!(!v.is_in_range(Version::new(1, 2, 4), Version::new(1, 2, 6)));
+
+        assert!(v.is_in_range(Version::new(1, 1, 0), Version::new(1, 3, 0)));
+        assert!(!v.is_in_range(Version::new(1, 0, 0), Version::new(1, 2, 0)));
+        assert!(!v.is_in_range(Version::new(1, 3, 0), Version::new(1, 5, 0)));
+
+        assert!(v.is_in_range(Version::new(1, 0, 0), Version::new(2, 0, 0)));
+        assert!(!v.is_in_range(Version::new(0, 0, 0), Version::new(1, 0, 0)));
+        assert!(!v.is_in_range(Version::new(3, 0, 0), Version::new(5, 0, 0)));
     }
 }

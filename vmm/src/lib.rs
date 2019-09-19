@@ -1755,14 +1755,10 @@ impl Vmm {
             );
             guard.vmm_version.clone()
         };
-        let nums = &version_str
-            .split('.')
-            .flat_map(str::parse::<u32>)
-            .collect::<Vec<u32>>()[..3];
-        let major = (nums[0] & 0xFFFF) as u16;
-        let minor = (nums[1] & 0xFFFF) as u16;
-        let build = nums[2];
-        Version::from((major, minor, build))
+
+        // Use expect() to crash if the version format is invalid
+        Version::from_str(&version_str)
+            .expect("Failed to read app version because of invalid format")
     }
 
     fn is_instance_initialized(&self) -> bool {
@@ -4546,6 +4542,7 @@ mod tests {
             // Take it out of the wrapper so it goes out of scope at the end of this block.
             let mut vmm1 = vmm1_wrap.take().unwrap();
             vmm1.shared_info.write().unwrap().id = microvm_id.clone();
+            vmm1.shared_info.write().unwrap().vmm_version = "1.0.1".to_string();
 
             vmm1.default_kernel_config(Some(good_kernel_file()));
             vmm1.vm_config.mem_file_path = Some(mem_file_path.clone());
@@ -4566,6 +4563,7 @@ mod tests {
         // Resume second microVM from snapshot.
         {
             vmm2.shared_info.write().unwrap().id = microvm_id.clone();
+            vmm2.shared_info.write().unwrap().vmm_version = "1.0.1".to_string();
             vmm2.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
             assert!(vmm2
                 .resume_from_snapshot(snapshot_filename.clone(), mem_file_path.clone())
