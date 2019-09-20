@@ -2376,6 +2376,7 @@ impl Vmm {
         &mut self,
         mut image: SnapshotImage,
         header: SnapshotHdr,
+        extra_info: VmInfo,
     ) -> VmmRequestOutcome {
         // Signal vcpus to pause to snapshot.
         self.initiate_vcpu_pause()?;
@@ -2419,7 +2420,7 @@ impl Vmm {
             .map_err(PauseMicrovmError::SaveMmioDeviceState)?;
 
         image
-            .serialize_microvm(header, vm_state, vcpu_states, device_states)
+            .serialize_microvm(header, extra_info, vm_state, vcpu_states, device_states)
             .map_err(PauseMicrovmError::SerializeMicrovmState)?;
 
         // Sync guest memory.
@@ -2450,12 +2451,6 @@ impl Vmm {
             .ok_or(PauseMicrovmError::InvalidHeader(
                 snapshot::Error::MissingMemSize,
             ))? as u64;
-        let vcpu_count = self
-            .vm_config
-            .vcpu_count
-            .ok_or(PauseMicrovmError::InvalidHeader(
-                snapshot::Error::MissingVcpuNum,
-            ))?;
         if self.vm_config.mem_file_path.is_none() {
             Err(PauseMicrovmError::InvalidHeader(
                 snapshot::Error::MissingMemFile,
@@ -2469,7 +2464,8 @@ impl Vmm {
 
         self.do_pause_to_snapshot(
             image,
-            SnapshotHdr::new(mem_size_mib, vcpu_count, app_version),
+            SnapshotHdr::new(app_version),
+            VmInfo::new(mem_size_mib),
         )
         .map_err(|e| {
             self.resume_vcpus()
@@ -2511,7 +2507,9 @@ impl Vmm {
             .state = InstanceState::Resuming;
 
         self.vm_config.mem_size_mib = snapshot_image.mem_size_mib();
-        self.vm_config.vcpu_count = snapshot_image.vcpu_count();
+        self.vm_config.vcpu_count = snapshot_image
+            .vcpu_states()
+            .map(|vcpu_states| vcpu_states.len() as u8);
         self.vm_config.mem_file_path = Some(mem_file_path);
         // Hardcoded for cloning - could be configurable in the future for other use cases.
         self.vm_config.shared_mem = false;

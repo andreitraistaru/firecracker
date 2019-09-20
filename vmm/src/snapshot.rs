@@ -152,7 +152,9 @@ impl Display for Version {
     }
 }
 
-/** The header of a Firecracker snapshot image. */
+/// The header of a Firecracker snapshot image.
+/// It strictly contains the most basic info needed to identify a Snapshot
+/// and to understand how to read it. This should never change.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SnapshotHdr {
     /** SNAPSHOT_IMAGE_MAGIC */
@@ -161,27 +163,36 @@ pub struct SnapshotHdr {
     snapshot_version: Version,
     /** Firecracker version **/
     app_version: Version,
-    /** Guest memory size */
-    mem_size_mib: u64,
-    /** Number of vCPUs. */
-    vcpu_count: u8,
 }
 
 impl SnapshotHdr {
-    pub fn new(mem_size_mib: u64, vcpu_count: u8, app_version: Version) -> Self {
+    pub fn new(app_version: Version) -> Self {
         SnapshotHdr {
             magic_id: SNAPSHOT_MAGIC,
             snapshot_version: SNAPSHOT_VERSION.into(),
             app_version,
-            mem_size_mib,
-            vcpu_count,
         }
+    }
+}
+
+/// VM info that is not strictly needed inside `SnapshotHdr`
+/// but is not part of the VM state either.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct VmInfo {
+    /** Guest memory size */
+    mem_size_mib: u64,
+}
+
+impl VmInfo {
+    pub fn new(mem_size_mib: u64) -> Self {
+        VmInfo { mem_size_mib }
     }
 }
 
 #[derive(Deserialize, Serialize)]
 pub struct MicrovmState {
     pub header: SnapshotHdr,
+    pub vm_info: VmInfo,
     pub vm_state: VmState,
     pub vcpu_states: Vec<VcpuState>,
     pub device_states: Vec<MmioDeviceState>,
@@ -238,12 +249,14 @@ impl SnapshotImage {
     pub fn serialize_microvm(
         &mut self,
         header: SnapshotHdr,
+        extra_info: VmInfo,
         vm_state: VmState,
         vcpu_states: Vec<VcpuState>,
         device_states: Vec<MmioDeviceState>,
     ) -> Result<()> {
         let microvm_state = MicrovmState {
             header,
+            vm_info: extra_info,
             vm_state,
             vcpu_states,
             device_states,
@@ -264,16 +277,10 @@ impl SnapshotImage {
         Ok(())
     }
 
-    pub fn vcpu_count(&self) -> Option<u8> {
-        self.microvm_state
-            .as_ref()
-            .map(|state| state.header.vcpu_count as u8)
-    }
-
     pub fn mem_size_mib(&self) -> Option<usize> {
         self.microvm_state
             .as_ref()
-            .map(|state| state.header.mem_size_mib as usize)
+            .map(|state| state.vm_info.mem_size_mib as usize)
     }
 
     pub fn kvm_vm_state(&self) -> Option<&VmState> {
@@ -302,7 +309,7 @@ impl SnapshotImage {
             .microvm_state
             .as_ref()
             .ok_or(Error::MissingMemFile)?
-            .header
+            .vm_info
             .mem_size_mib
             << 20
             != metadata.len()
@@ -393,9 +400,6 @@ impl SnapshotImage {
             SnapshotVersionSupport::Same,
         )
         .map_err(|_| Error::UnsupportedAppVersion(microvm_state.header.app_version.into()))?;
-        if microvm_state.header.vcpu_count != microvm_state.vcpu_states.len() as u8 {
-            return Err(Error::BadVcpuCount);
-        }
 
         Ok(())
     }
@@ -492,8 +496,6 @@ mod tests {
             self.magic_id == other.magic_id
                 && self.snapshot_version == other.snapshot_version
                 && self.app_version == other.app_version
-                && self.mem_size_mib == other.mem_size_mib
-                && self.vcpu_count == other.vcpu_count
         }
     }
 
@@ -566,19 +568,17 @@ mod tests {
         (vm, vcpu)
     }
 
-    fn build_valid_header(mem_size_mib: u64, vcpu_count: u8) -> SnapshotHdr {
+    fn build_valid_header() -> SnapshotHdr {
         SnapshotHdr {
             magic_id: SNAPSHOT_MAGIC,
             snapshot_version: SNAPSHOT_VERSION.into(),
             app_version: APP_VER.into(),
-            mem_size_mib,
-            vcpu_count,
         }
     }
 
     #[test]
     fn test_header_serialization() {
-        let header = build_valid_header(1, 1);
+        let header = build_valid_header();
         let serialized_header = bincode::serialize(&header).unwrap();
         let deserialized_header =
             bincode::deserialize::<SnapshotHdr>(serialized_header.as_slice()).unwrap();
@@ -587,15 +587,16 @@ mod tests {
 
     #[test]
     fn test_snapshot_getters() {
-        let vcpu_count = 1u8;
         let mem_size_mib = 1u64;
         let (_, vcpu) = setup_vcpu();
         let vcpu_states = vec![vcpu.save_state().unwrap()];
 
-        let header = build_valid_header(mem_size_mib, vcpu_count);
+        let header = build_valid_header();
+        let extra_info = VmInfo::new(mem_size_mib);
         let kvm_vm_state = VmState::default();
         let microvm_state = Some(MicrovmState {
             header,
+            vm_info: extra_info,
             vm_state: kvm_vm_state.clone(),
             vcpu_states: vcpu_states.clone(),
             device_states: vec![],
@@ -607,7 +608,6 @@ mod tests {
             microvm_state,
         };
 
-        assert_eq!(image.vcpu_count().unwrap(), vcpu_count);
         assert_eq!(image.mem_size_mib().unwrap(), mem_size_mib as usize);
         assert_eq!(image.kvm_vm_state().unwrap(), &kvm_vm_state);
         // Can't compare MmioDeviceState objects, checking for `Some` will suffice.
@@ -622,11 +622,12 @@ mod tests {
         vm_state: VmState,
         vcpu_state: VcpuState,
         header: SnapshotHdr,
+        extra_info: VmInfo,
     ) -> String {
         let snapshot_path = tmp_snapshot_path.to_str().unwrap();
         let mut image = SnapshotImage::create_new(snapshot_path).unwrap();
         image
-            .serialize_microvm(header, vm_state, vec![vcpu_state], vec![])
+            .serialize_microvm(header, extra_info, vm_state, vec![vcpu_state], vec![])
             .unwrap();
         snapshot_path.to_string()
     }
@@ -638,9 +639,9 @@ mod tests {
         let snapshot_path = tmp_snapshot_path.to_str().unwrap();
 
         let mem_size_mib: usize = 10;
-        let vcpu_count: u8 = 1;
 
-        let header = build_valid_header(mem_size_mib as u64, vcpu_count);
+        let header = build_valid_header();
+        let extra_info = VmInfo::new(mem_size_mib as u64);
 
         let (vm, vcpu) = setup_vcpu();
         let vm_state = vm.save_state().unwrap();
@@ -666,6 +667,7 @@ mod tests {
             assert!(image
                 .serialize_microvm(
                     header.clone(),
+                    extra_info.clone(),
                     vm_state.clone(),
                     vec![vcpu_state.clone()],
                     vec![]
@@ -712,6 +714,7 @@ mod tests {
                     vm_state.clone(),
                     vcpu_state.clone(),
                     bad_header.clone(),
+                    extra_info.clone(),
                 );
                 assert!(std::fs::metadata(bad_image_path.as_str()).is_ok());
                 let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
@@ -733,6 +736,7 @@ mod tests {
                     vm_state.clone(),
                     vcpu_state.clone(),
                     bad_header.clone(),
+                    extra_info.clone(),
                 );
                 let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
                 assert!(ret.is_err());
@@ -756,32 +760,13 @@ mod tests {
                     vm_state.clone(),
                     vcpu_state.clone(),
                     bad_header.clone(),
+                    extra_info.clone(),
                 );
                 let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
                 assert!(ret.is_err());
                 assert_eq!(
                     format!("{}", ret.err().unwrap()),
                     "Unsupported app version: 0.0.0."
-                );
-            }
-
-            {
-                // Test error case: incorrect vCPU count in header.
-                let bad_snap = NamedTempFile::new().unwrap();
-                let bad_snap_path = bad_snap.into_temp_path();
-                let mut bad_header = header.clone();
-                bad_header.vcpu_count = 2;
-                let bad_image_path = make_snapshot(
-                    &bad_snap_path,
-                    vm_state.clone(),
-                    vcpu_state.clone(),
-                    bad_header.clone(),
-                );
-                let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
-                assert!(ret.is_err());
-                assert_eq!(
-                    format!("{}", ret.err().unwrap()),
-                    "The vCPU count in the snapshot header does not match the number of vCPUs serialized in the snapshot."
                 );
             }
 
