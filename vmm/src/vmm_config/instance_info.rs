@@ -500,19 +500,6 @@ mod tests {
             )
         );
 
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(
-            format!(
-                "{}",
-                SnapshotBackingFile(snapshot::Error::Truncate(
-                    std::io::Error::from_raw_os_error(0)
-                ))
-            ),
-            format!(
-                "Cannot create snapshot backing file: {}",
-                snapshot::Error::Truncate(std::io::Error::from_raw_os_error(0))
-            )
-        );
         assert_eq!(
             format!(
                 "{}",

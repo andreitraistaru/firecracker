@@ -2533,7 +2533,7 @@ impl Vmm {
             .mmio_device_states()
             .map_err(PauseMicrovmError::SaveMmioDeviceState)?;
 
-        SnapshotImage::serialize_microvm(
+        SnapshotEngine::serialize(
             snapshot_path,
             header,
             extra_info,
@@ -2612,11 +2612,13 @@ impl Vmm {
             ))?;
         }
 
-        let snapshot_image = SnapshotImage::open_existing(snapshot_path, self.app_version())
+        let microvm_state = SnapshotEngine::deserialize(snapshot_path, self.app_version())
             .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
+        let (vm_info, kvm_vm_state, mut vcpu_states, device_configs, device_states) =
+            microvm_state.unpack();
 
-        snapshot_image
-            .validate_mem_file_size(&mem_file_path)
+        vm_info
+            .validate(&mem_file_path)
             .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
         // Use expect() to crash if the other thread poisoned this lock.
         self.shared_info
@@ -2624,10 +2626,8 @@ impl Vmm {
             .expect("Failed to start microVM because shared info couldn't be written due to poisoned lock")
             .state = InstanceState::Resuming;
 
-        self.vm_config.mem_size_mib = snapshot_image.mem_size_mib();
-        self.vm_config.vcpu_count = snapshot_image
-            .vcpu_states()
-            .map(|vcpu_states| vcpu_states.len() as u8);
+        self.vm_config.mem_size_mib = Some(vm_info.mem_size_mib() as usize);
+        self.vm_config.vcpu_count = Some(vcpu_states.len() as u8);
         self.vm_config.mem_file_path = Some(mem_file_path);
         // Hardcoded for cloning - could be configurable in the future for other use cases.
         self.vm_config.shared_mem = false;
@@ -2637,16 +2637,12 @@ impl Vmm {
         self.setup_interrupt_controller()?;
 
         self.vm
-            .restore_state(
-                snapshot_image
-                    .kvm_vm_state()
-                    .ok_or(ResumeMicrovmError::MissingVmState)?,
-            )
+            .restore_state(&kvm_vm_state)
             .map_err(ResumeMicrovmError::RestoreVmState)?;
 
         self.attach_legacy_devices()?;
 
-        self.device_configs = snapshot_image.device_configs();
+        self.device_configs = device_configs;
 
         {
             // Instantiate the MMIO device manager.
@@ -2663,13 +2659,12 @@ impl Vmm {
         }
         self.register_events()?;
 
-        self.restore_mmio_devices(snapshot_image.device_states().unwrap().as_slice())?;
+        self.restore_mmio_devices(&device_states)?;
 
         self.create_vcpus(request_ts.clone())?;
 
         self.start_vcpus()?;
 
-        let mut vcpu_states: Vec<VcpuState> = snapshot_image.into_vcpu_states();
         assert_eq!(self.vcpus_handles.len(), vcpu_states.len());
 
         for (handle, state) in self.vcpus_handles.iter().zip(vcpu_states.drain(..)) {
@@ -5133,12 +5128,6 @@ mod tests {
             )),
             ErrorKind::Internal
         );
-        assert_eq!(
-            error_kind(PauseMicrovmError::InvalidHeader(
-                snapshot::Error::InvalidFileType
-            )),
-            ErrorKind::Internal
-        );
 
         #[cfg(target_arch = "x86_64")]
         assert_eq!(
@@ -5173,13 +5162,6 @@ mod tests {
                 StateError::VcpusInvalidState
             )),
             ErrorKind::Internal
-        );
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(
-            error_kind(ResumeMicrovmError::OpenSnapshotFile(
-                snapshot::Error::InvalidFileType
-            )),
-            ErrorKind::User
         );
         assert_eq!(
             error_kind(ResumeMicrovmError::MissingVmState),

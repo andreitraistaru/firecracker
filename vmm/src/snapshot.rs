@@ -10,7 +10,6 @@
 extern crate kvm_bindings;
 
 use std::fmt::{self, Display, Formatter};
-use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
 
@@ -40,20 +39,15 @@ pub enum VersionError {
 pub enum Error {
     BadMagicNumber,
     BadVcpuCount,
-    CreateNew(io::Error),
     Deserialize(SerializationError),
-    InvalidFileType,
     IO(io::Error),
     MemfileSize,
     MissingMemFile,
     MissingMemSize,
     MissingVcpuNum,
     Mmap(io::Error),
-    OpenExisting(io::Error),
     Serialize(SerializationError),
     UnsupportedAppVersion(Version),
-    UnsupportedSnapshotVersion(Version),
-    Truncate(io::Error),
 }
 
 impl Display for Error {
@@ -62,23 +56,18 @@ impl Display for Error {
         match *self {
             BadMagicNumber => write!(f, "Bad snapshot magic number."),
             BadVcpuCount => write!(f, "The vCPU count in the snapshot header does not match the number of vCPUs serialized in the snapshot."),
-            CreateNew(ref e) => write!(f, "Failed to create new snapshot file: {}", e),
             Deserialize(ref e) => write!(f, "Failed to deserialize: {}", e),
-            InvalidFileType => write!(f, "Invalid snapshot file type."),
             IO(ref e) => write!(f, "Input/output error. {}", e),
             MemfileSize => write!(f, "The memory size defined in the snapshot header does not match the size of the memory file."),
             MissingMemFile => write!(f, "Missing guest memory file."),
             MissingMemSize => write!(f, "Missing guest memory size."),
             MissingVcpuNum => write!(f, "Missing number of vCPUs."),
             Mmap(ref e) => write!(f, "Failed to map memory: {}", e),
-            OpenExisting(ref e) => write!(f, "Failed to open snapshot file: {}", e),
             Serialize(ref e) => write!(f, "Failed to serialize snapshot content. {}", e),
             UnsupportedAppVersion(v) => {
                 write!(f, "Unsupported app version: {}.", v
                 )
             }
-            UnsupportedSnapshotVersion(v) => write!(f, "Unsupported snapshot version: {}.", v),
-            Truncate(ref e) => write!(f, "Failed to truncate snapshot file: {}", e),
         }
     }
 }
@@ -190,48 +179,90 @@ impl VmInfo {
     pub fn new(mem_size_mib: u64) -> Self {
         VmInfo { mem_size_mib }
     }
+
+    pub fn mem_size_mib(&self) -> u64 {
+        self.mem_size_mib
+    }
+
+    pub fn validate(&self, mem_file_path: &str) -> Result<()> {
+        let metadata = std::fs::metadata(mem_file_path).map_err(|_| Error::MissingMemFile)?;
+        if self.mem_size_mib << 20 != metadata.len() {
+            Err(Error::MemfileSize)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
 pub struct MicrovmState {
-    pub header: SnapshotHdr,
-    pub vm_info: VmInfo,
-    pub vm_state: VmState,
-    pub vcpu_states: Vec<VcpuState>,
-    pub device_states: Vec<MmioDeviceState>,
-    pub device_configs: DeviceConfigs,
+    header: SnapshotHdr,
+    vm_info: VmInfo,
+    vm_state: VmState,
+    vcpu_states: Vec<VcpuState>,
+    device_configs: DeviceConfigs,
+    device_states: Vec<MmioDeviceState>,
 }
 
-pub struct SnapshotImage {
-    microvm_state: Option<MicrovmState>,
+impl MicrovmState {
+    pub fn unpack(
+        self,
+    ) -> (
+        VmInfo,
+        VmState,
+        Vec<VcpuState>,
+        DeviceConfigs,
+        Vec<MmioDeviceState>,
+    ) {
+        (
+            self.vm_info,
+            self.vm_state,
+            self.vcpu_states,
+            self.device_configs,
+            self.device_states,
+        )
+    }
 }
 
-impl SnapshotImage {
-    pub fn open_existing<P: AsRef<Path>>(path: P, app_version: Version) -> Result<SnapshotImage> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(false)
-            .open(path.as_ref())
-            .map_err(Error::OpenExisting)?;
+pub struct SnapshotEngine {}
 
-        let metadata = file.metadata().map_err(Error::OpenExisting)?;
-        if !metadata.is_file() {
-            return Err(Error::InvalidFileType);
+impl SnapshotEngine {
+    fn validate_header(microvm_state: &MicrovmState, current_app_version: Version) -> Result<()> {
+        if microvm_state.header.magic_id != SNAPSHOT_MAGIC {
+            return Err(Error::BadMagicNumber);
         }
 
+        // We don't validate the Snapshot Version
+
+        // Check if the app version associated with the snapshot is valid.
+        // For the moment we accept any app version starting with 1.0.0 (first wisp version
+        // supporting snapshotting) and ending with the current app version.
+        if !microvm_state.header.app_version.is_in_range(
+            Version::new(1, 0, 0),
+            current_app_version.ceil(VersionComponent::Minor),
+        ) {
+            return Err(Error::UnsupportedAppVersion(
+                microvm_state.header.app_version,
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn deserialize<P: AsRef<Path>>(
+        path: P,
+        current_app_version: Version,
+    ) -> Result<MicrovmState> {
         let bytes = std::fs::read(path).map_err(Error::IO)?;
         let microvm_state = bincode::deserialize(&bytes).map_err(Error::Deserialize)?;
 
         // Cross-version deserialization is not supported yet.
-        Self::validate_header(&microvm_state, app_version)?;
+        Self::validate_header(&microvm_state, current_app_version)?;
 
-        Ok(SnapshotImage {
-            microvm_state: Some(microvm_state),
-        })
+        Ok(microvm_state)
     }
 
-    pub fn serialize_microvm<P: AsRef<Path>>(
+    pub fn serialize<P: AsRef<Path>>(
         path: P,
         header: SnapshotHdr,
         extra_info: VmInfo,
@@ -253,77 +284,6 @@ impl SnapshotImage {
 
         Ok(())
     }
-
-    pub fn mem_size_mib(&self) -> Option<usize> {
-        self.microvm_state
-            .as_ref()
-            .map(|state| state.vm_info.mem_size_mib as usize)
-    }
-
-    pub fn kvm_vm_state(&self) -> Option<&VmState> {
-        self.microvm_state.as_ref().map(|state| &state.vm_state)
-    }
-
-    pub fn device_states(&self) -> Option<&Vec<MmioDeviceState>> {
-        self.microvm_state
-            .as_ref()
-            .map(|state| &state.device_states)
-    }
-
-    #[allow(dead_code)]
-    pub fn vcpu_states(&self) -> Option<&Vec<VcpuState>> {
-        self.microvm_state.as_ref().map(|state| &state.vcpu_states)
-    }
-
-    pub fn into_vcpu_states(self) -> Vec<VcpuState> {
-        self.microvm_state
-            .map_or_else(|| vec![], |state| state.vcpu_states)
-    }
-
-    pub fn device_configs(&self) -> DeviceConfigs {
-        self.microvm_state
-            .as_ref()
-            .map_or(Default::default(), |state| state.device_configs.clone())
-    }
-
-    pub fn validate_mem_file_size(&self, mem_file_path: &str) -> Result<()> {
-        let metadata = std::fs::metadata(mem_file_path).map_err(|_| Error::MissingMemFile)?;
-        if self
-            .microvm_state
-            .as_ref()
-            .ok_or(Error::MissingMemFile)?
-            .vm_info
-            .mem_size_mib
-            << 20
-            != metadata.len()
-        {
-            Err(Error::MemfileSize)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn validate_header(microvm_state: &MicrovmState, current_app_version: Version) -> Result<()> {
-        if microvm_state.header.magic_id != SNAPSHOT_MAGIC {
-            return Err(Error::BadMagicNumber);
-        }
-
-        // We don't validate the Snapshot Version
-
-        // Check if the app version associated with the snapshot is valid.
-        // For the moment we accept any app version starting 1.0.0 (first wisp version
-        // supporting snapshotting) and ending with the current app version.
-        if !microvm_state.header.app_version.is_in_range(
-            Version::new(1, 0, 0),
-            current_app_version.ceil(VersionComponent::Minor),
-        ) {
-            return Err(Error::UnsupportedAppVersion(
-                microvm_state.header.app_version,
-            ));
-        }
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -341,9 +301,9 @@ mod tests {
     use memory_model::{GuestAddress, GuestMemory};
     use sys_util::EventFd;
 
-    impl fmt::Debug for SnapshotImage {
+    impl fmt::Debug for SnapshotEngine {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            write!(f, "SnapshotImage")
+            write!(f, "SnapshotEngine")
         }
     }
 
@@ -371,40 +331,28 @@ mod tests {
             match self {
                 Error::BadMagicNumber
                 | Error::BadVcpuCount
-                | Error::CreateNew(_)
                 | Error::Deserialize(_)
-                | Error::InvalidFileType
                 | Error::IO(_)
                 | Error::MemfileSize
                 | Error::MissingVcpuNum
                 | Error::MissingMemFile
                 | Error::MissingMemSize
                 | Error::Mmap(_)
-                | Error::OpenExisting(_)
                 | Error::Serialize(_)
-                | Error::UnsupportedAppVersion(_)
-                | Error::UnsupportedSnapshotVersion(_)
-                | Error::Truncate(_) => (),
+                | Error::UnsupportedAppVersion(_) => (),
             };
             match (self, other) {
                 (Error::BadMagicNumber, Error::BadMagicNumber) => true,
                 (Error::BadVcpuCount, Error::BadVcpuCount) => true,
-                (Error::CreateNew(_), Error::CreateNew(_)) => true,
                 (Error::Deserialize(_), Error::Deserialize(_)) => true,
-                (Error::InvalidFileType, Error::InvalidFileType) => true,
                 (Error::IO(_), Error::IO(_)) => true,
                 (Error::MissingVcpuNum, Error::MissingVcpuNum) => true,
                 (Error::MemfileSize, Error::MemfileSize) => true,
                 (Error::MissingMemFile, Error::MissingMemFile) => true,
                 (Error::MissingMemSize, Error::MissingMemSize) => true,
                 (Error::Mmap(_), Error::Mmap(_)) => true,
-                (Error::OpenExisting(_), Error::OpenExisting(_)) => true,
                 (Error::Serialize(_), Error::Serialize(_)) => true,
                 (Error::UnsupportedAppVersion(_), Error::UnsupportedAppVersion(_)) => true,
-                (Error::UnsupportedSnapshotVersion(_), Error::UnsupportedSnapshotVersion(_)) => {
-                    true
-                }
-                (Error::Truncate(_), Error::Truncate(_)) => true,
                 _ => false,
             }
         }
@@ -505,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_getters() {
+    fn test_microvm_state_unpack() {
         let mem_size_mib = 1u64;
         let (_, vcpu) = setup_vcpu();
         let vcpu_states = vec![vcpu.save_state().unwrap()];
@@ -513,22 +461,28 @@ mod tests {
         let header = build_valid_header();
         let extra_info = VmInfo::new(mem_size_mib);
         let kvm_vm_state = VmState::default();
-        let microvm_state = Some(MicrovmState {
+        let microvm_state = MicrovmState {
             header,
             vm_info: extra_info,
             vm_state: kvm_vm_state.clone(),
             vcpu_states: vcpu_states.clone(),
-            device_states: vec![],
             device_configs: Default::default(),
-        });
-        let image = SnapshotImage { microvm_state };
+            device_states: vec![],
+        };
 
-        assert_eq!(image.mem_size_mib().unwrap(), mem_size_mib as usize);
-        assert_eq!(image.kvm_vm_state().unwrap(), &kvm_vm_state);
-        // Can't compare MmioDeviceState objects, checking for `Some` will suffice.
-        assert!(image.device_states().is_some());
-        assert_eq!(image.vcpu_states().unwrap(), &vcpu_states);
-        assert_eq!(image.into_vcpu_states(), vcpu_states);
+        let (
+            unpacked_vm_info,
+            unpacked_kvm_vm_state,
+            unpacked_vcpu_states,
+            _,
+            unpacked_device_states,
+        ) = microvm_state.unpack();
+
+        assert_eq!(unpacked_vm_info.mem_size_mib(), mem_size_mib);
+        assert_eq!(unpacked_kvm_vm_state, kvm_vm_state);
+        assert_eq!(unpacked_vcpu_states, vcpu_states);
+        // Can't compare MmioDeviceState objects, checking for `is_empty()` will suffice.
+        assert!(unpacked_device_states.is_empty());
     }
 
     fn make_snapshot(
@@ -540,7 +494,7 @@ mod tests {
         extra_info: VmInfo,
     ) -> String {
         let snapshot_path = tmp_snapshot_path.to_str().unwrap();
-        SnapshotImage::serialize_microvm(
+        SnapshotEngine::serialize(
             snapshot_path,
             header,
             extra_info,
@@ -573,7 +527,7 @@ mod tests {
             let inaccessible_path = "/foo/bar";
 
             // Test error case: inaccessible snapshot path.
-            let ret = SnapshotImage::serialize_microvm(
+            let ret = SnapshotEngine::serialize(
                 inaccessible_path,
                 header.clone(),
                 extra_info.clone(),
@@ -589,7 +543,7 @@ mod tests {
             );
 
             // Good case: snapshot is created.
-            assert!(SnapshotImage::serialize_microvm(
+            assert!(SnapshotEngine::serialize(
                 snapshot_path,
                 header.clone(),
                 extra_info.clone(),
@@ -604,25 +558,25 @@ mod tests {
         // Restore snapshot.
         {
             // Test error case: inaccessible path.
-            let ret = SnapshotImage::open_existing("/foo/bar", header.app_version);
+            let ret = SnapshotEngine::deserialize("/foo/bar", header.app_version);
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
-                "Failed to open snapshot file: No such file or directory (os error 2)"
+                "Input/output error. No such file or directory (os error 2)"
             );
 
             // Test error case: path points to a directory.
             let ret =
-                SnapshotImage::open_existing(std::env::current_dir().unwrap(), header.app_version);
+                SnapshotEngine::deserialize(std::env::current_dir().unwrap(), header.app_version);
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
-                "Failed to open snapshot file: Is a directory (os error 21)"
+                "Input/output error. Is a directory (os error 21)"
             );
 
             // Test error case: path points to an invalid snapshot.
             let bad_snap = NamedTempFile::new().unwrap().into_temp_path();
-            let ret = SnapshotImage::open_existing(bad_snap, header.app_version);
+            let ret = SnapshotEngine::deserialize(bad_snap, header.app_version);
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
@@ -635,7 +589,7 @@ mod tests {
                 let bad_snap_path = bad_snap.into_temp_path();
                 let mut bad_header = header.clone();
                 bad_header.magic_id = SNAPSHOT_MAGIC + 1;
-                let bad_image_path = make_snapshot(
+                let bad_snapshot_path = make_snapshot(
                     &bad_snap_path,
                     vm_state.clone(),
                     vcpu_state.clone(),
@@ -643,8 +597,9 @@ mod tests {
                     bad_header.clone(),
                     extra_info.clone(),
                 );
-                assert!(std::fs::metadata(bad_image_path.as_str()).is_ok());
-                let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
+                assert!(std::fs::metadata(bad_snapshot_path.as_str()).is_ok());
+                let ret =
+                    SnapshotEngine::deserialize(bad_snapshot_path.as_str(), header.app_version);
                 assert!(ret.is_err());
                 assert_eq!(
                     format!("{}", ret.err().unwrap()),
@@ -658,7 +613,7 @@ mod tests {
                 let bad_snap_path = bad_snap.into_temp_path();
                 let mut bad_header = header.clone();
                 bad_header.app_version = Version::new(0, 0, 0);
-                let bad_image_path = make_snapshot(
+                let bad_snapshot_path = make_snapshot(
                     &bad_snap_path,
                     vm_state.clone(),
                     vcpu_state.clone(),
@@ -666,7 +621,8 @@ mod tests {
                     bad_header.clone(),
                     extra_info.clone(),
                 );
-                let ret = SnapshotImage::open_existing(bad_image_path.as_str(), header.app_version);
+                let ret =
+                    SnapshotEngine::deserialize(bad_snapshot_path.as_str(), header.app_version);
                 assert!(ret.is_err());
                 assert_eq!(
                     format!("{}", ret.err().unwrap()),
@@ -675,14 +631,14 @@ mod tests {
             }
 
             // Good case: valid snapshot.
-            let ret = SnapshotImage::open_existing(snapshot_path, header.app_version);
+            let ret = SnapshotEngine::deserialize(snapshot_path, header.app_version);
             assert!(ret.is_ok());
-            let image = ret.unwrap();
+            let microvm_state = ret.unwrap();
 
             // Test memory file validation on snapshot loading.
             {
                 // Test error case: incorrect memory file path in header.
-                let ret = image.validate_mem_file_size("/foo/bar");
+                let ret = microvm_state.vm_info.validate("/foo/bar");
                 assert_eq!(
                     format!("{}", ret.unwrap_err()),
                     "Missing guest memory file."
@@ -693,7 +649,7 @@ mod tests {
                 let tmp_memfile_path = tmp_memfile.path();
                 let memfile_path = tmp_memfile_path.to_str().unwrap();
 
-                let ret = image.validate_mem_file_size(memfile_path);
+                let ret = microvm_state.vm_info.validate(memfile_path);
                 assert_eq!(
                     format!("{}", ret.unwrap_err()),
                     "The memory size defined in the snapshot header does not match the size of the memory file."
@@ -704,18 +660,18 @@ mod tests {
                     .as_file()
                     .set_len(mem_size_mib as u64 * 1024 * 1024)
                     .unwrap();
-                let ret = image.validate_mem_file_size(memfile_path);
+                let ret = microvm_state.vm_info.validate(memfile_path);
                 assert!(ret.is_ok());
             }
 
             // Verify header deserialization.
-            assert!(header.eq(&image.microvm_state.as_ref().unwrap().header));
+            assert!(header.eq(&microvm_state.header));
 
             // Verify VM state deserialization.
-            assert!(vm_state.eq(image.kvm_vm_state().unwrap()));
+            assert!(vm_state.eq(&microvm_state.vm_state));
 
             // Verify vCPU state deserialization.
-            assert!(vec![vcpu_state].eq(image.vcpu_states().unwrap()));
+            assert!(vec![vcpu_state].eq(&microvm_state.vcpu_states));
         }
     }
 
@@ -733,19 +689,11 @@ mod tests {
         assert_eq!(format!("{}", Error::BadVcpuCount),
                    "The vCPU count in the snapshot header does not match the number of vCPUs serialized in the snapshot.");
         assert_eq!(
-            format!("{}", Error::CreateNew(io::Error::from_raw_os_error(0))),
-            format!("Failed to create new snapshot file: {}", err0_str)
-        );
-        assert_eq!(
             format!(
                 "{}",
                 Error::Deserialize(SerializationError::from(io::Error::from_raw_os_error(0)))
             ),
             format!("Failed to deserialize: io error: {}", err0_str)
-        );
-        assert_eq!(
-            format!("{}", Error::InvalidFileType),
-            "Invalid snapshot file type."
         );
         assert_eq!(
             format!("{}", Error::IO(io::Error::from_raw_os_error(0))),
@@ -772,10 +720,6 @@ mod tests {
             format!("Failed to map memory: {}", err0_str)
         );
         assert_eq!(
-            format!("{}", Error::OpenExisting(io::Error::from_raw_os_error(0))),
-            format!("Failed to open snapshot file: {}", err0_str)
-        );
-        assert_eq!(
             format!(
                 "{}",
                 Error::Serialize(SerializationError::from(io::Error::from_raw_os_error(0)))
@@ -788,17 +732,6 @@ mod tests {
         assert_eq!(
             format!("{}", Error::UnsupportedAppVersion(Version::new(1, 2, 3))),
             "Unsupported app version: 1.2.3."
-        );
-        assert_eq!(
-            format!(
-                "{}",
-                Error::UnsupportedSnapshotVersion(Version::new(0, 0, 42))
-            ),
-            "Unsupported snapshot version: 0.0.42."
-        );
-        assert_eq!(
-            format!("{}", Error::Truncate(io::Error::from_raw_os_error(0))),
-            format!("Failed to truncate snapshot file: {}", err0_str)
         );
     }
 
