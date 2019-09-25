@@ -10,9 +10,8 @@
 extern crate kvm_bindings;
 
 use std::fmt::{self, Display, Formatter};
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::fs::OpenOptions;
+use std::io;
 use std::path::Path;
 
 use bincode::Error as SerializationError;
@@ -204,25 +203,10 @@ pub struct MicrovmState {
 }
 
 pub struct SnapshotImage {
-    file: File,
     microvm_state: Option<MicrovmState>,
 }
 
 impl SnapshotImage {
-    pub fn create_new<P: AsRef<Path>>(path: P) -> Result<SnapshotImage> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path.as_ref())
-            .map_err(Error::CreateNew)?;
-        Ok(SnapshotImage {
-            file,
-            microvm_state: None,
-        })
-    }
-
     pub fn open_existing<P: AsRef<Path>>(path: P, app_version: Version) -> Result<SnapshotImage> {
         let file = OpenOptions::new()
             .read(true)
@@ -243,13 +227,12 @@ impl SnapshotImage {
         Self::validate_header(&microvm_state, app_version)?;
 
         Ok(SnapshotImage {
-            file,
             microvm_state: Some(microvm_state),
         })
     }
 
-    pub fn serialize_microvm(
-        &mut self,
+    pub fn serialize_microvm<P: AsRef<Path>>(
+        path: P,
         header: SnapshotHdr,
         extra_info: VmInfo,
         vm_state: VmState,
@@ -266,10 +249,7 @@ impl SnapshotImage {
             device_states,
         };
         let bytes = bincode::serialize(&microvm_state).map_err(Error::Serialize)?;
-        self.file.write_all(&bytes).map_err(Error::IO)?;
-        self.file.flush().map_err(Error::IO)?;
-
-        self.microvm_state = Some(microvm_state);
+        std::fs::write(path, &bytes).map_err(Error::IO)?;
 
         Ok(())
     }
@@ -343,12 +323,6 @@ impl SnapshotImage {
         }
 
         Ok(())
-    }
-}
-
-impl AsRawFd for SnapshotImage {
-    fn as_raw_fd(&self) -> RawFd {
-        self.file.as_raw_fd()
     }
 }
 
@@ -547,18 +521,12 @@ mod tests {
             device_states: vec![],
             device_configs: Default::default(),
         });
-        let file = NamedTempFile::new().unwrap().into_file();
-        let fd = file.as_raw_fd();
-        let image = SnapshotImage {
-            file,
-            microvm_state,
-        };
+        let image = SnapshotImage { microvm_state };
 
         assert_eq!(image.mem_size_mib().unwrap(), mem_size_mib as usize);
         assert_eq!(image.kvm_vm_state().unwrap(), &kvm_vm_state);
         // Can't compare MmioDeviceState objects, checking for `Some` will suffice.
         assert!(image.device_states().is_some());
-        assert_eq!(image.as_raw_fd(), fd);
         assert_eq!(image.vcpu_states().unwrap(), &vcpu_states);
         assert_eq!(image.into_vcpu_states(), vcpu_states);
     }
@@ -572,17 +540,16 @@ mod tests {
         extra_info: VmInfo,
     ) -> String {
         let snapshot_path = tmp_snapshot_path.to_str().unwrap();
-        let mut image = SnapshotImage::create_new(snapshot_path).unwrap();
-        image
-            .serialize_microvm(
-                header,
-                extra_info,
-                vm_state,
-                vec![vcpu_state],
-                device_configs,
-                vec![],
-            )
-            .unwrap();
+        SnapshotImage::serialize_microvm(
+            snapshot_path,
+            header,
+            extra_info,
+            vm_state,
+            vec![vcpu_state],
+            device_configs,
+            vec![],
+        )
+        .unwrap();
         snapshot_path.to_string()
     }
 
@@ -606,28 +573,32 @@ mod tests {
             let inaccessible_path = "/foo/bar";
 
             // Test error case: inaccessible snapshot path.
-            let ret = SnapshotImage::create_new(inaccessible_path);
+            let ret = SnapshotImage::serialize_microvm(
+                inaccessible_path,
+                header.clone(),
+                extra_info.clone(),
+                vm_state.clone(),
+                vec![vcpu_state.clone()],
+                Default::default(),
+                vec![],
+            );
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
-                "Failed to create new snapshot file: No such file or directory (os error 2)"
+                "Input/output error. No such file or directory (os error 2)"
             );
 
             // Good case: snapshot is created.
-            let ret = SnapshotImage::create_new(snapshot_path);
-            assert!(ret.is_ok());
-            let mut image = ret.unwrap();
-
-            assert!(image
-                .serialize_microvm(
-                    header.clone(),
-                    extra_info.clone(),
-                    vm_state.clone(),
-                    vec![vcpu_state.clone()],
-                    Default::default(),
-                    vec![]
-                )
-                .is_ok());
+            assert!(SnapshotImage::serialize_microvm(
+                snapshot_path,
+                header.clone(),
+                extra_info.clone(),
+                vm_state.clone(),
+                vec![vcpu_state.clone()],
+                Default::default(),
+                vec![]
+            )
+            .is_ok());
         }
 
         // Restore snapshot.

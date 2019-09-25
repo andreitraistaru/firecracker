@@ -2488,7 +2488,7 @@ impl Vmm {
     #[cfg(target_arch = "x86_64")]
     fn do_pause_to_snapshot(
         &mut self,
-        mut image: SnapshotImage,
+        snapshot_path: String,
         header: SnapshotHdr,
         extra_info: VmInfo,
     ) -> VmmRequestOutcome {
@@ -2533,18 +2533,16 @@ impl Vmm {
             .mmio_device_states()
             .map_err(PauseMicrovmError::SaveMmioDeviceState)?;
 
-        let device_configs = self.device_configs.clone();
-
-        image
-            .serialize_microvm(
-                header,
-                extra_info,
-                vm_state,
-                vcpu_states,
-                device_configs,
-                device_states,
-            )
-            .map_err(PauseMicrovmError::SerializeMicrovmState)?;
+        SnapshotImage::serialize_microvm(
+            snapshot_path,
+            header,
+            extra_info,
+            vm_state,
+            vcpu_states,
+            self.device_configs.clone(),
+            device_states,
+        )
+        .map_err(PauseMicrovmError::SerializeMicrovmState)?;
 
         // Sync guest memory.
         self.guest_memory
@@ -2580,13 +2578,10 @@ impl Vmm {
             ))?;
         }
 
-        let image = SnapshotImage::create_new(snapshot_path)
-            .map_err(PauseMicrovmError::SnapshotBackingFile)?;
-
         let app_version = self.app_version();
 
         self.do_pause_to_snapshot(
-            image,
+            snapshot_path,
             SnapshotHdr::new(app_version),
             VmInfo::new(mem_size_mib),
         )
