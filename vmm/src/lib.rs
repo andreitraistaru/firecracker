@@ -38,8 +38,6 @@ extern crate sys_util;
 /// Syscalls allowed through the seccomp filter.
 pub mod default_syscalls;
 mod device_manager;
-/// (De)Serialization functionality.
-pub mod serialize;
 /// Signal handling utilities.
 pub mod signal_handler;
 mod snapshot;

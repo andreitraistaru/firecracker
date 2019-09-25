@@ -18,7 +18,6 @@ use std::path::Path;
 use bincode::Error as SerializationError;
 
 use devices::virtio::MmioDeviceState;
-use serialize::SnapshotReaderWriter;
 use vmm_config::device_config::DeviceConfigs;
 use vstate::{VcpuState, VmState};
 
@@ -237,11 +236,8 @@ impl SnapshotImage {
             return Err(Error::InvalidFileType);
         }
 
-        let reader_writer = SnapshotReaderWriter::new(&file, 0, metadata.len() as u64, false)
-            .map_err(Error::OpenExisting)?;
-        let microvm_state =
-            bincode::deserialize_from::<SnapshotReaderWriter, MicrovmState>(reader_writer)
-                .map_err(Error::Deserialize)?;
+        let bytes = std::fs::read(path).map_err(Error::IO)?;
+        let microvm_state = bincode::deserialize(&bytes).map_err(Error::Deserialize)?;
 
         // Cross-version deserialization is not supported yet.
         Self::validate_header(&microvm_state, app_version)?;
@@ -269,16 +265,9 @@ impl SnapshotImage {
             device_configs,
             device_states,
         };
-        let serialized_microvm = bincode::serialize(&microvm_state).map_err(Error::Serialize)?;
-        let microvm_size = serialized_microvm.len() as u64;
-        self.file.set_len(microvm_size).map_err(Error::Truncate)?;
-
-        let mut reader_writer = SnapshotReaderWriter::new(&self.file, 0, microvm_size, true)
-            .map_err(Error::CreateNew)?;
-        reader_writer
-            .write_all(serialized_microvm.as_slice())
-            .map_err(Error::IO)?;
-        reader_writer.flush().map_err(Error::IO)?;
+        let bytes = bincode::serialize(&microvm_state).map_err(Error::Serialize)?;
+        self.file.write_all(&bytes).map_err(Error::IO)?;
+        self.file.flush().map_err(Error::IO)?;
 
         self.microvm_state = Some(microvm_state);
 
@@ -666,7 +655,7 @@ mod tests {
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
-                "Failed to open snapshot file: Invalid argument (os error 22)"
+                "Failed to deserialize: io error: failed to fill whole buffer"
             );
 
             {
