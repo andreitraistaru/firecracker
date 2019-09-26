@@ -2489,7 +2489,6 @@ impl Vmm {
     fn do_pause_to_snapshot(
         &mut self,
         snapshot_path: String,
-        header: SnapshotHdr,
         extra_info: VmInfo,
     ) -> VmmRequestOutcome {
         // Signal vcpus to pause to snapshot.
@@ -2535,12 +2534,14 @@ impl Vmm {
 
         SnapshotEngine::serialize(
             snapshot_path,
-            header,
-            extra_info,
-            vm_state,
-            vcpu_states,
-            self.device_configs.clone(),
-            device_states,
+            &MicrovmState::new(
+                self.app_version(),
+                extra_info,
+                vm_state,
+                vcpu_states,
+                self.device_configs.clone(),
+                device_states,
+            ),
         )
         .map_err(PauseMicrovmError::SerializeMicrovmState)?;
 
@@ -2578,18 +2579,12 @@ impl Vmm {
             ))?;
         }
 
-        let app_version = self.app_version();
-
-        self.do_pause_to_snapshot(
-            snapshot_path,
-            SnapshotHdr::new(app_version),
-            VmInfo::new(mem_size_mib),
-        )
-        .map_err(|e| {
-            self.resume_vcpus()
-                .expect("Failed to resume vCPUs after an unsuccessful pause");
-            e
-        })?;
+        self.do_pause_to_snapshot(snapshot_path, VmInfo::new(mem_size_mib))
+            .map_err(|e| {
+                self.resume_vcpus()
+                    .expect("Failed to resume vCPUs after an unsuccessful pause");
+                e
+            })?;
 
         Self::log_boot_time(&request_ts);
 

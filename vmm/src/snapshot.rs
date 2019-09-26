@@ -177,6 +177,24 @@ pub struct MicrovmState {
 }
 
 impl MicrovmState {
+    pub fn new(
+        app_version: Version,
+        vm_info: VmInfo,
+        vm_state: VmState,
+        vcpu_states: Vec<VcpuState>,
+        device_configs: DeviceConfigs,
+        device_states: Vec<MmioDeviceState>,
+    ) -> MicrovmState {
+        MicrovmState {
+            header: SnapshotHdr::new(app_version),
+            vm_info,
+            vm_state,
+            vcpu_states,
+            device_configs,
+            device_states,
+        }
+    }
+
     pub fn unpack(
         self,
     ) -> (
@@ -231,24 +249,8 @@ impl SnapshotEngine {
         Ok(microvm_state)
     }
 
-    pub fn serialize<P: AsRef<Path>>(
-        path: P,
-        header: SnapshotHdr,
-        vm_info: VmInfo,
-        vm_state: VmState,
-        vcpu_states: Vec<VcpuState>,
-        device_configs: DeviceConfigs,
-        device_states: Vec<MmioDeviceState>,
-    ) -> Result<()> {
-        let microvm_state = MicrovmState {
-            header,
-            vm_info,
-            vm_state,
-            vcpu_states,
-            device_configs,
-            device_states,
-        };
-        let bytes = bincode::serialize(&microvm_state).map_err(Error::Serialize)?;
+    pub fn serialize<P: AsRef<Path>>(path: P, microvm_state: &MicrovmState) -> Result<()> {
+        let bytes = bincode::serialize(microvm_state).map_err(Error::Serialize)?;
         std::fs::write(path, &bytes).map_err(Error::IO)?;
 
         Ok(())
@@ -259,7 +261,7 @@ impl SnapshotEngine {
 mod tests {
     extern crate tempfile;
 
-    use self::tempfile::{NamedTempFile, TempPath};
+    use self::tempfile::NamedTempFile;
 
     use std::fmt;
     use std::sync::mpsc::channel;
@@ -450,28 +452,6 @@ mod tests {
         assert!(unpacked_device_states.is_empty());
     }
 
-    fn make_snapshot(
-        tmp_snapshot_path: &TempPath,
-        vm_state: VmState,
-        vcpu_state: VcpuState,
-        device_configs: DeviceConfigs,
-        header: SnapshotHdr,
-        extra_info: VmInfo,
-    ) -> String {
-        let snapshot_path = tmp_snapshot_path.to_str().unwrap();
-        SnapshotEngine::serialize(
-            snapshot_path,
-            header,
-            extra_info,
-            vm_state,
-            vec![vcpu_state],
-            device_configs,
-            vec![],
-        )
-        .unwrap();
-        snapshot_path.to_string()
-    }
-
     #[test]
     #[allow(clippy::cognitive_complexity)]
     fn test_snapshot_ser_deser() {
@@ -494,12 +474,14 @@ mod tests {
             // Test error case: inaccessible snapshot path.
             let ret = SnapshotEngine::serialize(
                 inaccessible_path,
-                header.clone(),
-                extra_info.clone(),
-                vm_state.clone(),
-                vec![vcpu_state.clone()],
-                Default::default(),
-                vec![],
+                &MicrovmState::new(
+                    APP_VER,
+                    extra_info.clone(),
+                    vm_state.clone(),
+                    vec![vcpu_state.clone()],
+                    Default::default(),
+                    vec![],
+                ),
             );
             assert!(ret.is_err());
             assert_eq!(
@@ -510,12 +492,14 @@ mod tests {
             // Good case: snapshot is created.
             assert!(SnapshotEngine::serialize(
                 snapshot_path,
-                header.clone(),
-                extra_info.clone(),
-                vm_state.clone(),
-                vec![vcpu_state.clone()],
-                Default::default(),
-                vec![]
+                &MicrovmState::new(
+                    APP_VER,
+                    extra_info.clone(),
+                    vm_state.clone(),
+                    vec![vcpu_state.clone()],
+                    Default::default(),
+                    vec![]
+                )
             )
             .is_ok());
         }
@@ -552,19 +536,19 @@ mod tests {
                 // Test error case: invalid magic number in header.
                 let bad_snap = NamedTempFile::new().unwrap();
                 let bad_snap_path = bad_snap.into_temp_path();
-                let mut bad_header = header.clone();
-                bad_header.magic_id = SNAPSHOT_MAGIC + 1;
-                let bad_snapshot_path = make_snapshot(
-                    &bad_snap_path,
-                    vm_state.clone(),
-                    vcpu_state.clone(),
-                    Default::default(),
-                    bad_header.clone(),
+                let mut bad_microvm_state = MicrovmState::new(
+                    APP_VER,
                     extra_info.clone(),
+                    vm_state.clone(),
+                    vec![vcpu_state.clone()],
+                    Default::default(),
+                    vec![],
                 );
-                assert!(std::fs::metadata(bad_snapshot_path.as_str()).is_ok());
-                let ret =
-                    SnapshotEngine::deserialize(bad_snapshot_path.as_str(), header.app_version);
+                bad_microvm_state.header.magic_id = SNAPSHOT_MAGIC + 1;
+                SnapshotEngine::serialize(&bad_snap_path, &bad_microvm_state).unwrap();
+
+                assert!(std::fs::metadata(&bad_snap_path).is_ok());
+                let ret = SnapshotEngine::deserialize(&bad_snap_path, header.app_version);
                 assert!(ret.is_err());
                 assert_eq!(
                     format!("{}", ret.err().unwrap()),
@@ -576,18 +560,18 @@ mod tests {
                 // Test error case: invalid app version number in header.
                 let bad_snap = NamedTempFile::new().unwrap();
                 let bad_snap_path = bad_snap.into_temp_path();
-                let mut bad_header = header.clone();
-                bad_header.app_version = Version::new(0, 0, 0);
-                let bad_snapshot_path = make_snapshot(
-                    &bad_snap_path,
-                    vm_state.clone(),
-                    vcpu_state.clone(),
-                    Default::default(),
-                    bad_header.clone(),
+                let mut bad_microvm_state = MicrovmState::new(
+                    APP_VER,
                     extra_info.clone(),
+                    vm_state.clone(),
+                    vec![vcpu_state.clone()],
+                    Default::default(),
+                    vec![],
                 );
-                let ret =
-                    SnapshotEngine::deserialize(bad_snapshot_path.as_str(), header.app_version);
+                bad_microvm_state.header.app_version = Version::new(0, 0, 0);
+                SnapshotEngine::serialize(&bad_snap_path, &bad_microvm_state).unwrap();
+
+                let ret = SnapshotEngine::deserialize(&bad_snap_path, header.app_version);
                 assert!(ret.is_err());
                 assert_eq!(
                     format!("{}", ret.err().unwrap()),
