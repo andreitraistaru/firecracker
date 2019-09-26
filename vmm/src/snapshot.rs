@@ -16,6 +16,7 @@ use std::path::Path;
 use bincode::Error as SerializationError;
 
 use devices::virtio::MmioDeviceState;
+use translator::{self, create_snapshot_translator};
 use vmm_config::device_config::DeviceConfigs;
 use vstate::{VcpuState, VmState};
 
@@ -44,8 +45,8 @@ pub enum Error {
     MissingMemFile,
     MissingMemSize,
     Mmap(io::Error),
-    Serialize(SerializationError),
     UnsupportedAppVersion(Version),
+    Translate(translator::Error),
 }
 
 impl Display for Error {
@@ -59,11 +60,11 @@ impl Display for Error {
             MissingMemFile => write!(f, "Missing guest memory file."),
             MissingMemSize => write!(f, "Missing guest memory size."),
             Mmap(ref e) => write!(f, "Failed to map memory: {}", e),
-            Serialize(ref e) => write!(f, "Failed to serialize snapshot content. {}", e),
             UnsupportedAppVersion(v) => {
                 write!(f, "Unsupported app version: {}.", v
                 )
             }
+            Translate(ref e) => write!(f, "Failed to translate snapshot: {}.", e),
         }
     }
 }
@@ -101,6 +102,10 @@ impl Version {
             minor: nums[1] as u16,
             build: nums[2],
         })
+    }
+
+    pub fn major(self) -> u16 {
+        self.major
     }
 }
 
@@ -242,11 +247,16 @@ impl SnapshotEngine {
     ) -> Result<MicrovmState> {
         let bytes = std::fs::read(path).map_err(Error::IO)?;
 
+        // Deserialize just the header first and check if it's valid.
         let header: SnapshotHdr = bincode::deserialize(&bytes).map_err(Error::Deserialize)?;
         Self::validate_header(&header, current_app_version)?;
 
-        let microvm_state = bincode::deserialize(&bytes).map_err(Error::Deserialize)?;
-        Ok(microvm_state)
+        // If the header is valid deserialize the entire snapshot.
+        // The header will be deserialized again with the rest of the snapshot.
+        // We can afford doing this for convenience since it's very small.
+        let translator = create_snapshot_translator(header.app_version, current_app_version)
+            .map_err(Error::Translate)?;
+        Ok(translator.deserialize(&bytes).map_err(Error::Translate)?)
     }
 
     pub fn serialize<P: AsRef<Path>>(
@@ -256,9 +266,14 @@ impl SnapshotEngine {
     ) -> Result<()> {
         Self::validate_header(&microvm_state.header, current_app_version)?;
 
-        let bytes = bincode::serialize(microvm_state).map_err(Error::Serialize)?;
-        std::fs::write(path, &bytes).map_err(Error::IO)?;
+        let translator =
+            create_snapshot_translator(microvm_state.header.app_version, current_app_version)
+                .map_err(Error::Translate)?;
+        let bytes = translator
+            .serialize(microvm_state)
+            .map_err(Error::Translate)?;
 
+        std::fs::write(path, &bytes).map_err(Error::IO)?;
         Ok(())
     }
 }
@@ -313,8 +328,8 @@ mod tests {
                 | Error::MissingMemFile
                 | Error::MissingMemSize
                 | Error::Mmap(_)
-                | Error::Serialize(_)
-                | Error::UnsupportedAppVersion(_) => (),
+                | Error::UnsupportedAppVersion(_)
+                | Error::Translate(_) => (),
             };
             match (self, other) {
                 (Error::BadMagicNumber, Error::BadMagicNumber) => true,
@@ -324,8 +339,8 @@ mod tests {
                 (Error::MissingMemFile, Error::MissingMemFile) => true,
                 (Error::MissingMemSize, Error::MissingMemSize) => true,
                 (Error::Mmap(_), Error::Mmap(_)) => true,
-                (Error::Serialize(_), Error::Serialize(_)) => true,
                 (Error::UnsupportedAppVersion(_), Error::UnsupportedAppVersion(_)) => true,
+                (Error::Translate(_), Error::Translate(_)) => true,
                 _ => false,
             }
         }
@@ -685,18 +700,20 @@ mod tests {
             format!("Failed to map memory: {}", err0_str)
         );
         assert_eq!(
-            format!(
-                "{}",
-                Error::Serialize(SerializationError::from(io::Error::from_raw_os_error(0)))
-            ),
-            format!(
-                "Failed to serialize snapshot content. io error: {}",
-                err0_str
-            )
-        );
-        assert_eq!(
             format!("{}", Error::UnsupportedAppVersion(Version::new(1, 2, 3))),
             "Unsupported app version: 1.2.3."
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                Error::Translate(translator::Error::Serialize(SerializationError::from(
+                    io::Error::from_raw_os_error(0)
+                )))
+            ),
+            format!(
+                "Failed to translate snapshot: Failed to serialize snapshot content. io error: {}.",
+                err0_str
+            )
         );
     }
 

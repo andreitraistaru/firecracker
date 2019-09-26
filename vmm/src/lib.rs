@@ -41,6 +41,7 @@ mod device_manager;
 /// Signal handling utilities.
 pub mod signal_handler;
 mod snapshot;
+mod translator;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 mod vstate;
