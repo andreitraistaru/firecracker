@@ -70,13 +70,6 @@ impl Display for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone, PartialEq, PartialOrd)]
-pub enum VersionComponent {
-    Major,
-    Minor,
-    Build,
-}
-
 /// Version struct composed of major, minor and build numbers.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
 pub struct Version {
@@ -109,29 +102,6 @@ impl Version {
             build: nums[2],
         })
     }
-
-    /// Transform each component beginning from `start` to it's max possible value.
-    fn ceil(self, start: VersionComponent) -> Version {
-        let mut ceil = self;
-
-        if start <= VersionComponent::Major {
-            ceil.major = std::u16::MAX;
-        }
-
-        if start <= VersionComponent::Minor {
-            ceil.minor = std::u16::MAX;
-        }
-
-        if start <= VersionComponent::Build {
-            ceil.build = std::u32::MAX;
-        }
-
-        ceil
-    }
-
-    pub fn is_in_range(self, from: Version, to: Version) -> bool {
-        self >= from && self <= to
-    }
 }
 
 impl Display for Version {
@@ -139,6 +109,12 @@ impl Display for Version {
         write!(f, "{}.{}.{}", self.major, self.minor, self.build)
     }
 }
+
+const FIRST_SUPPORTED_APP_VERSION: Version = Version {
+    major: 1,
+    minor: 0,
+    build: 0,
+};
 
 /// The header of a Firecracker snapshot image.
 /// It strictly contains the most basic info needed to identify a Snapshot
@@ -223,8 +199,8 @@ impl MicrovmState {
 pub struct SnapshotEngine {}
 
 impl SnapshotEngine {
-    fn validate_header(microvm_state: &MicrovmState, current_app_version: Version) -> Result<()> {
-        if microvm_state.header.magic_id != SNAPSHOT_MAGIC {
+    fn validate_header(header: &SnapshotHdr, current_app_version: Version) -> Result<()> {
+        if header.magic_id != SNAPSHOT_MAGIC {
             return Err(Error::BadMagicNumber);
         }
 
@@ -233,13 +209,10 @@ impl SnapshotEngine {
         // Check if the app version associated with the snapshot is valid.
         // For the moment we accept any app version starting with 1.0.0 (first wisp version
         // supporting snapshotting) and ending with the current app version.
-        if !microvm_state.header.app_version.is_in_range(
-            Version::new(1, 0, 0),
-            current_app_version.ceil(VersionComponent::Minor),
-        ) {
-            return Err(Error::UnsupportedAppVersion(
-                microvm_state.header.app_version,
-            ));
+        if !(header.app_version.major >= FIRST_SUPPORTED_APP_VERSION.major
+            && header.app_version.major <= current_app_version.major)
+        {
+            return Err(Error::UnsupportedAppVersion(header.app_version));
         }
 
         Ok(())
@@ -250,18 +223,18 @@ impl SnapshotEngine {
         current_app_version: Version,
     ) -> Result<MicrovmState> {
         let bytes = std::fs::read(path).map_err(Error::IO)?;
+
+        let header: SnapshotHdr = bincode::deserialize(&bytes).map_err(Error::Deserialize)?;
+        Self::validate_header(&header, current_app_version)?;
+
         let microvm_state = bincode::deserialize(&bytes).map_err(Error::Deserialize)?;
-
-        // Cross-version deserialization is not supported yet.
-        Self::validate_header(&microvm_state, current_app_version)?;
-
         Ok(microvm_state)
     }
 
     pub fn serialize<P: AsRef<Path>>(
         path: P,
         header: SnapshotHdr,
-        extra_info: VmInfo,
+        vm_info: VmInfo,
         vm_state: VmState,
         vcpu_states: Vec<VcpuState>,
         device_configs: DeviceConfigs,
@@ -269,7 +242,7 @@ impl SnapshotEngine {
     ) -> Result<()> {
         let microvm_state = MicrovmState {
             header,
-            vm_info: extra_info,
+            vm_info,
             vm_state,
             vcpu_states,
             device_configs,
@@ -741,43 +714,5 @@ mod tests {
 
         assert!(Version::from_str("1.2").is_err());
         assert!(Version::from_str("1.2.3.4").is_err());
-    }
-
-    #[test]
-    fn test_version_ceil() {
-        let v = Version::new(1, 2, 3);
-
-        assert_eq!(
-            v.ceil(VersionComponent::Build),
-            Version::new(1, 2, std::u32::MAX)
-        );
-
-        assert_eq!(
-            v.ceil(VersionComponent::Minor),
-            Version::new(1, std::u16::MAX, std::u32::MAX)
-        );
-
-        assert_eq!(
-            v.ceil(VersionComponent::Major),
-            Version::new(std::u16::MAX, std::u16::MAX, std::u32::MAX)
-        );
-    }
-
-    #[test]
-    fn test_version_is_in_range() {
-        let v = Version::new(1, 2, 3);
-
-        assert!(v.is_in_range(Version::new(1, 2, 3), Version::new(1, 2, 3)));
-        assert!(v.is_in_range(Version::new(1, 2, 2), Version::new(1, 2, 4)));
-        assert!(!v.is_in_range(Version::new(1, 2, 1), Version::new(1, 2, 2)));
-        assert!(!v.is_in_range(Version::new(1, 2, 4), Version::new(1, 2, 6)));
-
-        assert!(v.is_in_range(Version::new(1, 1, 0), Version::new(1, 3, 0)));
-        assert!(!v.is_in_range(Version::new(1, 0, 0), Version::new(1, 2, 0)));
-        assert!(!v.is_in_range(Version::new(1, 3, 0), Version::new(1, 5, 0)));
-
-        assert!(v.is_in_range(Version::new(1, 0, 0), Version::new(2, 0, 0)));
-        assert!(!v.is_in_range(Version::new(0, 0, 0), Version::new(1, 0, 0)));
-        assert!(!v.is_in_range(Version::new(3, 0, 0), Version::new(5, 0, 0)));
     }
 }
