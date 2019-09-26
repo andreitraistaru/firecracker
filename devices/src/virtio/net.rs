@@ -2190,7 +2190,7 @@ mod tests {
         check_net_state(
             &net_state,
             false,
-            Some("test_tap\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}".to_string()),
+            Some("test_tap\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}".to_string()),
             None,
             None,
             None,
