@@ -249,7 +249,13 @@ impl SnapshotEngine {
         Ok(microvm_state)
     }
 
-    pub fn serialize<P: AsRef<Path>>(path: P, microvm_state: &MicrovmState) -> Result<()> {
+    pub fn serialize<P: AsRef<Path>>(
+        path: P,
+        microvm_state: &MicrovmState,
+        current_app_version: Version,
+    ) -> Result<()> {
+        Self::validate_header(&microvm_state.header, current_app_version)?;
+
         let bytes = bincode::serialize(microvm_state).map_err(Error::Serialize)?;
         std::fs::write(path, &bytes).map_err(Error::IO)?;
 
@@ -482,6 +488,7 @@ mod tests {
                     Default::default(),
                     vec![],
                 ),
+                APP_VER,
             );
             assert!(ret.is_err());
             assert_eq!(
@@ -499,7 +506,8 @@ mod tests {
                     vec![vcpu_state.clone()],
                     Default::default(),
                     vec![]
-                )
+                ),
+                APP_VER
             )
             .is_ok());
         }
@@ -545,8 +553,15 @@ mod tests {
                     vec![],
                 );
                 bad_microvm_state.header.magic_id = SNAPSHOT_MAGIC + 1;
-                SnapshotEngine::serialize(&bad_snap_path, &bad_microvm_state).unwrap();
+                let ret = SnapshotEngine::serialize(&bad_snap_path, &bad_microvm_state, APP_VER);
+                assert!(ret.is_err());
+                assert_eq!(
+                    format!("{}", ret.err().unwrap()),
+                    "Bad snapshot magic number."
+                );
 
+                let bad_bytes = bincode::serialize(&bad_microvm_state).unwrap();
+                std::fs::write(&bad_snap_path, &bad_bytes).unwrap();
                 assert!(std::fs::metadata(&bad_snap_path).is_ok());
                 let ret = SnapshotEngine::deserialize(&bad_snap_path, header.app_version);
                 assert!(ret.is_err());
@@ -569,8 +584,15 @@ mod tests {
                     vec![],
                 );
                 bad_microvm_state.header.app_version = Version::new(0, 0, 0);
-                SnapshotEngine::serialize(&bad_snap_path, &bad_microvm_state).unwrap();
+                let ret = SnapshotEngine::serialize(&bad_snap_path, &bad_microvm_state, APP_VER);
+                assert!(ret.is_err());
+                assert_eq!(
+                    format!("{}", ret.err().unwrap()),
+                    "Unsupported app version: 0.0.0."
+                );
 
+                let bad_bytes = bincode::serialize(&bad_microvm_state).unwrap();
+                std::fs::write(&bad_snap_path, &bad_bytes).unwrap();
                 let ret = SnapshotEngine::deserialize(&bad_snap_path, header.app_version);
                 assert!(ret.is_err());
                 assert_eq!(

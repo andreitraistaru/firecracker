@@ -2542,6 +2542,7 @@ impl Vmm {
                 self.device_configs.clone(),
                 device_states,
             ),
+            self.app_version(),
         )
         .map_err(PauseMicrovmError::SerializeMicrovmState)?;
 
