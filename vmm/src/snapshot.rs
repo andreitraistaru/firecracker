@@ -38,13 +38,11 @@ pub enum VersionError {
 #[derive(Debug)]
 pub enum Error {
     BadMagicNumber,
-    BadVcpuCount,
     Deserialize(SerializationError),
     IO(io::Error),
     MemfileSize,
     MissingMemFile,
     MissingMemSize,
-    MissingVcpuNum,
     Mmap(io::Error),
     Serialize(SerializationError),
     UnsupportedAppVersion(Version),
@@ -55,13 +53,11 @@ impl Display for Error {
         use self::Error::*;
         match *self {
             BadMagicNumber => write!(f, "Bad snapshot magic number."),
-            BadVcpuCount => write!(f, "The vCPU count in the snapshot header does not match the number of vCPUs serialized in the snapshot."),
             Deserialize(ref e) => write!(f, "Failed to deserialize: {}", e),
             IO(ref e) => write!(f, "Input/output error. {}", e),
             MemfileSize => write!(f, "The memory size defined in the snapshot header does not match the size of the memory file."),
             MissingMemFile => write!(f, "Missing guest memory file."),
             MissingMemSize => write!(f, "Missing guest memory size."),
-            MissingVcpuNum => write!(f, "Missing number of vCPUs."),
             Mmap(ref e) => write!(f, "Failed to map memory: {}", e),
             Serialize(ref e) => write!(f, "Failed to serialize snapshot content. {}", e),
             UnsupportedAppVersion(v) => {
@@ -330,11 +326,9 @@ mod tests {
             // Guard match with no wildcard to make sure we catch new enum variants.
             match self {
                 Error::BadMagicNumber
-                | Error::BadVcpuCount
                 | Error::Deserialize(_)
                 | Error::IO(_)
                 | Error::MemfileSize
-                | Error::MissingVcpuNum
                 | Error::MissingMemFile
                 | Error::MissingMemSize
                 | Error::Mmap(_)
@@ -343,10 +337,8 @@ mod tests {
             };
             match (self, other) {
                 (Error::BadMagicNumber, Error::BadMagicNumber) => true,
-                (Error::BadVcpuCount, Error::BadVcpuCount) => true,
                 (Error::Deserialize(_), Error::Deserialize(_)) => true,
                 (Error::IO(_), Error::IO(_)) => true,
-                (Error::MissingVcpuNum, Error::MissingVcpuNum) => true,
                 (Error::MemfileSize, Error::MemfileSize) => true,
                 (Error::MissingMemFile, Error::MissingMemFile) => true,
                 (Error::MissingMemSize, Error::MissingMemSize) => true,
@@ -686,8 +678,6 @@ mod tests {
             format!("{}", Error::BadMagicNumber),
             "Bad snapshot magic number."
         );
-        assert_eq!(format!("{}", Error::BadVcpuCount),
-                   "The vCPU count in the snapshot header does not match the number of vCPUs serialized in the snapshot.");
         assert_eq!(
             format!(
                 "{}",
@@ -702,10 +692,6 @@ mod tests {
         assert_eq!(
             format!("{}", Error::MemfileSize),
             "The memory size defined in the snapshot header does not match the size of the memory file."
-        );
-        assert_eq!(
-            format!("{}", Error::MissingVcpuNum),
-            "Missing number of vCPUs."
         );
         assert_eq!(
             format!("{}", Error::MissingMemFile),
