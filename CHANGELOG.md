@@ -10,6 +10,7 @@
 ### Fixed
 
 - Snapshot is properly flushed before `/snapshot/create` API response.
+- The failure message returned by an API call is flushed in the log FIFOs.
 
 ## [0.9.1]
 
