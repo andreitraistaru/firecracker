@@ -124,7 +124,7 @@ impl Display for PauseMicrovmError {
         use self::PauseMicrovmError::*;
         match *self {
             #[cfg(target_arch = "x86_64")]
-            InvalidHeader(ref e) => write!(f, "Failed to sync snapshot: {:?}", e),
+            InvalidHeader(ref e) => write!(f, "Failed to sync snapshot: {}", e),
             MicroVMInvalidState(ref e) => write!(f, "{}", e),
             MissingSnapshot => write!(f, "Missing snapshot file"),
             SaveMmioDeviceState(ref e) => write!(f, "Cannot save a mmio device. {:?}", e),
@@ -159,7 +159,7 @@ pub enum ResumeMicrovmError {
     #[cfg(target_arch = "x86_64")]
     OpenSnapshotFile(snapshot::Error),
     /// Failed to restore virtio device state.
-    RestoreVirtioDeviceState(SpecificVirtioDeviceStateError),
+    RestoreVirtioDeviceState(SpecificVirtioDeviceStateError, String, String),
     /// Failed to reregister MMIO device.
     ReregisterMmioDevice(device_manager::mmio::Error),
     /// Failed to restore vCPU state.
@@ -185,9 +185,11 @@ impl Display for ResumeMicrovmError {
             OpenSnapshotFile(ref err) => {
                 write!(f, "Cannot open the snapshot image file: {:?}", err)
             }
-            RestoreVirtioDeviceState(ref err) => {
-                write!(f, "Failed to restore MMIO device state: {:?}", err)
-            }
+            RestoreVirtioDeviceState(ref err, ref dev_type, ref dev_id) => write!(
+                f,
+                "Failed to restore the MMIO state for {} device {}: {:?}",
+                dev_type, dev_id, err
+            ),
             ReregisterMmioDevice(ref err) => {
                 write!(f, "Failed to reregister MMIO device: {:?}", err)
             }
@@ -539,9 +541,13 @@ mod tests {
         assert_eq!(
             format!(
                 "{}",
-                RestoreVirtioDeviceState(SpecificVirtioDeviceStateError::InvalidDeviceType)
+                RestoreVirtioDeviceState(
+                    SpecificVirtioDeviceStateError::InvalidDeviceType,
+                    "block".to_string(),
+                    "root".to_string()
+                )
             ),
-            "Failed to restore MMIO device state: InvalidDeviceType"
+            "Failed to restore the MMIO state for block device root: InvalidDeviceType"
         );
         assert_eq!(
             format!(

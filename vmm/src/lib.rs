@@ -388,7 +388,7 @@ impl std::convert::From<ResumeMicrovmError> for VmmActionError {
             #[cfg(target_arch = "x86_64")]
             OpenSnapshotFile(_) => ErrorKind::User,
             VcpuResume => ErrorKind::User,
-            RestoreVirtioDeviceState(_)
+            RestoreVirtioDeviceState(_, _, _)
             | ReregisterMmioDevice(_)
             | RestoreVmState(_)
             | RestoreVcpuState
@@ -2471,9 +2471,16 @@ impl Vmm {
         mmio_device_states: &[MmioDeviceState],
     ) -> std::result::Result<(), ResumeMicrovmError> {
         for device_state in mmio_device_states.iter() {
-            let virtio_device = self
-                .restore_virtio_device(device_state)
-                .map_err(ResumeMicrovmError::RestoreVirtioDeviceState)?;
+            let virtio_device = self.restore_virtio_device(device_state).map_err(|e| {
+                ResumeMicrovmError::RestoreVirtioDeviceState(
+                    e,
+                    device_state.specific_virtio_device_state().to_string(),
+                    device_state
+                        .generic_virtio_device_state()
+                        .device_id()
+                        .to_string(),
+                )
+            })?;
 
             // Safe to unwrap() because mmio_device_manager is initialized
             // inside `resume_from_snapshot` before calling `restore_mmio_devices`
@@ -3042,7 +3049,9 @@ mod tests {
 
     use self::tempfile::NamedTempFile;
     use arch::DeviceType;
-    use devices::virtio::{ActivateResult, BlockEpollHandler, MmioDevice, NetEpollHandler, Queue};
+    use devices::virtio::{
+        ActivateResult, BalloonEpollHandler, BlockEpollHandler, MmioDevice, NetEpollHandler, Queue,
+    };
     use devices::BusDevice;
     use net_util::MacAddr;
     use vmm_config::drive::DriveError;
@@ -5497,6 +5506,7 @@ mod tests {
         let block_file = NamedTempFile::new().unwrap();
         let block_id = "block";
         let net_id = "net";
+        let ballon_id = "balloon";
 
         let serialized_states = {
             let mut vmm = create_vmm_object(InstanceState::Uninitialized);
@@ -5524,17 +5534,22 @@ mod tests {
                 tx_rate_limiter: None,
                 allow_mmds_requests: false,
             })
-            .expect("blahhh");
+            .unwrap();
             vmm.attach_net_devices().unwrap();
+
+            vmm.insert_balloon(BalloonConfig::new(223, true, true))
+                .unwrap();
+            vmm.attach_balloons().unwrap();
 
             if activate_devices {
                 activate_device(&vmm, TYPE_BLOCK, block_id, 1);
                 activate_device(&vmm, TYPE_NET, net_id, 2);
+                activate_device(&vmm, TYPE_BALLOON, ballon_id, 2);
             }
 
             let states = vmm.mmio_device_states().unwrap();
-            assert_eq!(states.len(), 2);
-            // check that the block device state has been saved
+            assert_eq!(states.len(), 3);
+            // Check that the block device state has been saved.
             assert_eq!(
                 states[0].generic_virtio_device_state().device_type(),
                 TYPE_BLOCK
@@ -5543,12 +5558,23 @@ mod tests {
                 states[0].generic_virtio_device_state().device_id(),
                 block_id
             );
-            // check that the net device state has been saved
+
+            // Check that the net device state has been saved.
             assert_eq!(
                 states[1].generic_virtio_device_state().device_type(),
                 TYPE_NET
             );
             assert_eq!(states[1].generic_virtio_device_state().device_id(), net_id);
+
+            // Check that the balloon device state has been saved.
+            assert_eq!(
+                states[2].generic_virtio_device_state().device_type(),
+                TYPE_BALLOON
+            );
+            assert_eq!(
+                states[2].generic_virtio_device_state().device_id(),
+                ballon_id
+            );
 
             bincode::serialize(&MmioDeviceStates(states)).unwrap()
         };
@@ -5570,14 +5596,22 @@ mod tests {
                 .is_ok());
 
             let device_manager = vmm.mmio_device_manager.as_ref().unwrap();
-            // validate block device
+
+            // 1. Validate block device.
             assert!(device_manager
                 .get_device(DeviceType::Virtio(TYPE_BLOCK), block_id)
                 .is_some());
-            // validate net device
+
+            // 2. Validate net device.
             assert!(device_manager
                 .get_device(DeviceType::Virtio(TYPE_NET), net_id)
                 .is_some());
+
+            // 3. Validate balloon device.
+            assert!(device_manager
+                .get_device(DeviceType::Virtio(TYPE_BALLOON), ballon_id)
+                .is_some());
+
             if activate_devices {
                 assert!(vmm
                     .epoll_context
@@ -5586,6 +5620,10 @@ mod tests {
                 assert!(vmm
                     .epoll_context
                     .get_device_handler_by_device_id::<NetEpollHandler>(TYPE_NET, net_id)
+                    .is_ok());
+                assert!(vmm
+                    .epoll_context
+                    .get_device_handler_by_device_id::<BalloonEpollHandler>(TYPE_BALLOON, ballon_id)
                     .is_ok());
             }
         }
@@ -5614,5 +5652,38 @@ mod tests {
             vmm.kvm_vm().get_fd().as_raw_fd(),
             vmm.vm.get_fd().as_raw_fd()
         );
+    }
+
+    #[test]
+    fn test_errors_on_restore() {
+        let net_id = "net123";
+        let mut vmm = create_vmm_object(InstanceState::Uninitialized);
+        vmm.init_guest_memory().unwrap();
+        vmm.setup_interrupt_controller().unwrap();
+        vmm.default_kernel_config(None);
+        vmm.init_mmio_device_manager().unwrap();
+        vmm.insert_net_device(NetworkInterfaceConfig {
+            iface_id: net_id.to_string(),
+            host_dev_name: String::from("hostname123"),
+            guest_mac: None,
+            rx_rate_limiter: None,
+            tx_rate_limiter: None,
+            allow_mmds_requests: false,
+        })
+        .unwrap();
+        vmm.attach_net_devices().unwrap();
+        let states = vmm.mmio_device_states().unwrap();
+        let serialized_states = bincode::serialize(&MmioDeviceStates(states)).unwrap();
+        let res = vmm.restore_mmio_devices(
+            bincode::deserialize::<MmioDeviceStates>(serialized_states.as_slice())
+                .unwrap()
+                .0
+                .as_slice(),
+        );
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to restore the MMIO state for network device net123"));
     }
 }
