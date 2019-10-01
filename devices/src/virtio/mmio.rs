@@ -5,6 +5,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -143,9 +144,19 @@ pub enum SpecificVirtioDeviceStateError {
 #[allow(clippy::large_enum_variant)]
 #[derive(Deserialize, Serialize)]
 pub enum SpecificVirtioDeviceState {
+    Balloon(BalloonState),
     Block(BlockState),
     Net(NetState),
-    Balloon(BalloonState),
+}
+
+impl fmt::Display for SpecificVirtioDeviceState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            SpecificVirtioDeviceState::Balloon(_) => write!(f, "balloon"),
+            SpecificVirtioDeviceState::Block(_) => write!(f, "block"),
+            SpecificVirtioDeviceState::Net(_) => write!(f, "network"),
+        }
+    }
 }
 
 /// Implements the
@@ -617,6 +628,8 @@ impl MmioDeviceState {
 
 #[cfg(test)]
 mod tests {
+    extern crate tempfile;
+
     use byteorder::{ByteOrder, LittleEndian};
 
     use super::*;
@@ -1106,5 +1119,56 @@ mod tests {
 
         let state = MmioDeviceState::new(0, 0, 100, "1", &mmio_device, Some(&handler));
         assert!(state.is_err());
+    }
+
+    #[test]
+    fn test_display_specific_device_state() {
+        use self::tempfile::NamedTempFile;
+
+        assert_eq!(
+            SpecificVirtioDeviceState::Balloon(BalloonState {}).to_string(),
+            "balloon"
+        );
+
+        let file = NamedTempFile::new().unwrap();
+        let (sender, _handler_receiver) = mpsc::channel();
+        assert_eq!(
+            SpecificVirtioDeviceState::Block(
+                BlockState::new(
+                    &Block::new(
+                        &file.path().to_path_buf(),
+                        false,
+                        block::EpollConfig::new(0, epoll::create(true).unwrap(), sender),
+                        None,
+                    )
+                    .unwrap(),
+                    None
+                )
+                .unwrap()
+            )
+            .to_string(),
+            "block"
+        );
+
+        let (sender, _handler_receiver) = mpsc::channel();
+        assert_eq!(
+            SpecificVirtioDeviceState::Net(
+                NetState::new(
+                    &Net::new_with_tap(
+                        net_util::Tap::new().map_err(Error::TapOpen).unwrap(),
+                        None,
+                        net::EpollConfig::new(0, epoll::create(true).unwrap(), sender),
+                        None,
+                        None,
+                        false,
+                    )
+                    .unwrap(),
+                    None
+                )
+                .unwrap()
+            )
+            .to_string(),
+            "network"
+        );
     }
 }
