@@ -19,7 +19,7 @@ impl Display for Error {
             Serialize(ref e) => write!(f, "Failed to serialize snapshot content. {}", e),
             UnimplementedSnapshotTranslator((from, to)) => write!(
                 f,
-                "Unimplemented snapshot translator from version {} to version {}.",
+                "Unimplemented snapshot translator between versions {} and {}.",
                 from, to
             ),
         }
@@ -33,19 +33,23 @@ pub trait SnapshotTranslator {
 }
 
 pub fn create_snapshot_translator(
-    from: Version,
-    to: Version,
+    current_app_version: Version,
+    other_app_version: Version,
 ) -> Result<Box<SnapshotTranslator>, Error> {
-    match from.major() {
-        v if v == to.major() => Ok(Box::new(IdentitySnapshotTranslator {})),
-        _ => Err(Error::UnimplementedSnapshotTranslator((from, to))),
+    match current_app_version.major() {
+        v if v == other_app_version.major() => Ok(Box::new(IdentitySnapshotTranslator {})),
+        _ => Err(Error::UnimplementedSnapshotTranslator((
+            current_app_version,
+            other_app_version,
+        ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use snapshot::Version;
-    use std::io;
+    use snapshot::{MicrovmState, SnapshotHdr, Version};
+    use std::path::PathBuf;
+    use std::{fs, io};
     use translator::*;
 
     #[test]
@@ -80,7 +84,7 @@ mod tests {
                     Version::new(1, 0, 0)
                 ))
             ),
-            "Unimplemented snapshot translator from version 0.0.0 to version 1.0.0."
+            "Unimplemented snapshot translator between versions 0.0.0 and 1.0.0."
         );
     }
 
@@ -92,7 +96,110 @@ mod tests {
         assert!(ret.is_err());
         assert_eq!(
             format!("{}", ret.err().unwrap()),
-            "Unimplemented snapshot translator from version 0.0.0 to version 1.0.0."
+            "Unimplemented snapshot translator between versions 0.0.0 and 1.0.0."
         );
+    }
+
+    /// In `vmm/src/translator/resources/current/` we should keep a json serialized
+    /// snapshot  and a binary serialized compatible with the current version of MicrovmState.
+    ///
+    /// In `vmm/src/translator/resources/older` we keep a binary serialized snapshot for each
+    /// older version of MicrovmState. This snapshots were generated using the latest
+    /// `json-vm-snapshot` at that time.
+    ///
+    /// This test checks 3 things:
+    ///
+    /// 1. That `vmm/src/translator/resources/current/json-vm-snapshot` can be deserialized into
+    /// a MicrovmState instance and that if we serialize this MicrovmState with bincode we get
+    /// exactly `vmm/src/translator/resources/current/binary-vm-snapshot`. This confirms that we
+    /// haven't modified the structure of the MicrovmState in the current firecracker build.
+    ///
+    /// 2. That if we deserialize each older snapshot from
+    /// `vmm/src/translator/resources/older*/binary-vm-snapshot` into a MicrovmState instance
+    /// and then serialize it to binary we get
+    /// `vmm/src/translator/resources/current/binary-vm-snapshot`.
+    /// This should confirm that all the translations from older versions to the current version
+    /// work as expected.
+    ///
+    /// 3. That if we serialize the current snapshot from
+    /// `vmm/src/translator/resources/current/binary-vm-snapshot` into each older version
+    /// we get `vmm/src/translator/resources/older*/binary-vm-snapshot`.
+    /// This should confirm that all the translations from the current version to older versions
+    /// work as expected.
+    ///
+    /// When the structure of the MicrovmState changes we should move
+    /// `vmm/src/translator/resources/current/binary-vm-snapshot` to
+    /// `vmm/src/translator/resources/older/[version]/binary-vm-snapshot`
+    /// and update `vmm/src/translator/resources/current/json-vm-snapshot` and
+    /// `vmm/src/translator/resources/current/binary-vm-snapshot` accordingly.
+    #[test]
+    fn test_snapshot_translators() {
+        let vmm_crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let resources_path = vmm_crate_path.join("src/translator/resources");
+
+        // Read the current snapshot bytes
+        let current_snapshot_bytes =
+            fs::read(&resources_path.join("current/binary-vm-snapshot")).unwrap();
+        let current_snapshot_hdr =
+            bincode::deserialize::<SnapshotHdr>(&current_snapshot_bytes).unwrap();
+        // Read the current snapshot from json
+        let current_snapshot_json =
+            fs::read_to_string(&resources_path.join("current/json-vm-snapshot")).unwrap();
+        let maybe_current_snapshot = serde_json::from_str::<MicrovmState>(&current_snapshot_json);
+        assert!(
+            maybe_current_snapshot.is_ok(),
+            "The MicrovmState structure has changed. \
+             Make sure that the Firecracker version number has been updated \
+             and the translation functions have been implemented."
+        );
+        let current_snapshot = maybe_current_snapshot.unwrap();
+        // Check that if we deserialize the current snapshot from json we get the expected bytes
+        assert_eq!(
+            bincode::serialize(&current_snapshot).unwrap(),
+            current_snapshot_bytes
+        );
+
+        // Read all the older snapshots from "firecracker/vmm/src/translator/resources/older".
+        let mut older_snapshots = vec![];
+        let dir = fs::read_dir(&resources_path.join("older")).unwrap();
+        for subdir in dir {
+            let subdir_path = subdir.unwrap().path();
+            let snapshot_bytes = fs::read(subdir_path.join("binary-vm-snapshot")).unwrap();
+            older_snapshots.push(snapshot_bytes);
+        }
+
+        // For each old snapshot:
+        for old_snapshot_bytes in &older_snapshots {
+            let old_snapshot_hdr =
+                bincode::deserialize::<SnapshotHdr>(&old_snapshot_bytes).unwrap();
+            let translator = create_snapshot_translator(
+                old_snapshot_hdr.app_version(),
+                current_snapshot_hdr.app_version(),
+            )
+            .unwrap();
+
+            // Try to deserialize each old snapshot to the current snapshot format
+            // and check the result.
+            let maybe_old_snapshot = translator.deserialize(old_snapshot_bytes);
+            assert!(maybe_old_snapshot.is_ok());
+            let old_snapshot = maybe_old_snapshot.unwrap();
+            assert_eq!(
+                bincode::serialize(&old_snapshot).unwrap(),
+                current_snapshot_bytes
+            );
+
+            // Try to reserialize the result into the old format and check that it matches
+            let maybe_reserialized_snapshot_bytes = translator.serialize(&old_snapshot);
+            assert!(maybe_reserialized_snapshot_bytes.is_ok());
+            let reserialized_snapshot_bytes = maybe_reserialized_snapshot_bytes.unwrap();
+            assert_eq!(&reserialized_snapshot_bytes, old_snapshot_bytes);
+
+            // Try to serialize the current snapshot into each older snapshot format
+            // and check the result.
+            let maybe_current_snapshot_bytes = translator.serialize(&current_snapshot);
+            assert!(maybe_current_snapshot_bytes.is_ok());
+            let current_snapshot_bytes = maybe_current_snapshot_bytes.unwrap();
+            assert_eq!(&current_snapshot_bytes, old_snapshot_bytes);
+        }
     }
 }

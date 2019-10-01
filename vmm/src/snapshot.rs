@@ -142,6 +142,11 @@ impl SnapshotHdr {
             app_version,
         }
     }
+
+    #[allow(dead_code)]
+    pub fn app_version(&self) -> Version {
+        self.app_version
+    }
 }
 
 /// VM info that is not strictly needed inside `SnapshotHdr`
