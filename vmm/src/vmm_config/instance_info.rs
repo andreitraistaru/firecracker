@@ -161,7 +161,7 @@ pub enum ResumeMicrovmError {
     /// Failed to restore virtio device state.
     RestoreVirtioDeviceState(SpecificVirtioDeviceStateError, String, String),
     /// Failed to reregister MMIO device.
-    ReregisterMmioDevice(device_manager::mmio::Error),
+    ReregisterMmioDevice(device_manager::mmio::Error, String, String),
     /// Failed to restore vCPU state.
     RestoreVcpuState,
     /// Failed to restore VM state.
@@ -190,9 +190,11 @@ impl Display for ResumeMicrovmError {
                 "Failed to restore the MMIO state for {} device {}: {:?}",
                 dev_type, dev_id, err
             ),
-            ReregisterMmioDevice(ref err) => {
-                write!(f, "Failed to reregister MMIO device: {:?}", err)
-            }
+            ReregisterMmioDevice(ref err, ref dev_type, ref dev_id) => write!(
+                f,
+                "Failed to reregister {} device {}: {:?}",
+                dev_type, dev_id, err
+            ),
             RestoreVcpuState => write!(f, "Failed to restore vCPU state."),
             RestoreVmState(ref e) => write!(f, "Failed to restore VM state: {:?}", e),
             SignalVcpu(ref err) => write!(f, "Failed to signal vCPU: {:?}", err),
@@ -552,9 +554,13 @@ mod tests {
         assert_eq!(
             format!(
                 "{}",
-                ReregisterMmioDevice(device_manager::mmio::Error::ActivationFailed)
+                ReregisterMmioDevice(
+                    device_manager::mmio::Error::ActivationFailed,
+                    "block".to_string(),
+                    "root".to_string()
+                )
             ),
-            "Failed to reregister MMIO device: ActivationFailed"
+            "Failed to reregister block device root: ActivationFailed"
         );
         assert_eq!(
             format!("{}", RestoreVcpuState),

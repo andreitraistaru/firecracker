@@ -389,7 +389,7 @@ impl std::convert::From<ResumeMicrovmError> for VmmActionError {
             OpenSnapshotFile(_) => ErrorKind::User,
             VcpuResume => ErrorKind::User,
             RestoreVirtioDeviceState(_, _, _)
-            | ReregisterMmioDevice(_)
+            | ReregisterMmioDevice(_, _, _)
             | RestoreVmState(_)
             | RestoreVcpuState
             | SignalVcpu(_)
@@ -2487,7 +2487,16 @@ impl Vmm {
             let device_manager = self.mmio_device_manager.as_mut().unwrap();
             device_manager
                 .reregister_virtio_device(self.vm.get_fd(), virtio_device, device_state)
-                .map_err(ResumeMicrovmError::ReregisterMmioDevice)?;
+                .map_err(|e| {
+                    ResumeMicrovmError::ReregisterMmioDevice(
+                        e,
+                        device_state.specific_virtio_device_state().to_string(),
+                        device_state
+                            .generic_virtio_device_state()
+                            .device_id()
+                            .to_string(),
+                    )
+                })?;
         }
 
         Ok(())

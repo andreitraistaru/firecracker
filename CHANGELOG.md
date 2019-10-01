@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Errors triggered during device state restoration contain details
+  identifying that device (i.e type and id).
+
 ## [1.0.1]
 
 ### Added
