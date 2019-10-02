@@ -88,3 +88,8 @@ to be updated to the current time.
 
 This has to be done on the guest-side using `timedatectl`,
 `settimeofday` or using NTP.
+
+If using our [recommended guest kernel config](
+https://github.com/firecracker-microvm/firecracker/blob/master/resources/microvm-kernel-config),
+`/dev/ptp0` is available in the guest to use as a reliable host-synchronized
+time-source.
