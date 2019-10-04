@@ -1008,10 +1008,10 @@ impl VirtioDevice for Net {
 
 #[derive(Deserialize, Serialize)]
 pub struct NetState {
-    tap_if_name: Option<String>,
-    rx_rate_limiter_state: Option<RateLimiterState>,
-    tx_rate_limiter_state: Option<RateLimiterState>,
-    allow_mmds_requests: bool,
+    pub tap_if_name: Option<String>,
+    pub rx_rate_limiter_state: Option<RateLimiterState>,
+    pub tx_rate_limiter_state: Option<RateLimiterState>,
+    pub allow_mmds_requests: bool,
 }
 
 impl NetState {

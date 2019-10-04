@@ -353,11 +353,11 @@ impl Vm {
 #[cfg(target_arch = "x86_64")]
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct VmState {
-    pitstate: kvm_pit_state2,
-    clock: kvm_clock_data,
-    pic_master: kvm_irqchip,
-    pic_slave: kvm_irqchip,
-    ioapic: kvm_irqchip,
+    pub pitstate: kvm_pit_state2,
+    pub clock: kvm_clock_data,
+    pub pic_master: kvm_irqchip,
+    pub pic_slave: kvm_irqchip,
+    pub ioapic: kvm_irqchip,
 }
 
 /// List of events that the Vcpu can receive.

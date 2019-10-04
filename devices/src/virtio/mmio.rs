@@ -489,20 +489,20 @@ impl BusDevice for MmioDevice {
 
 #[derive(Deserialize, Serialize)]
 pub struct MmioDeviceState {
-    addr: u64,
-    irq: u32,
+    pub addr: u64,
+    pub irq: u32,
 
-    device_activated: bool,
-    features_select: u32,
-    acked_features_select: u32,
-    queue_select: u32,
-    interrupt_status: usize,
-    driver_status: u32,
-    config_generation: u32,
-    queues: Vec<Queue>,
+    pub device_activated: bool,
+    pub features_select: u32,
+    pub acked_features_select: u32,
+    pub queue_select: u32,
+    pub interrupt_status: usize,
+    pub driver_status: u32,
+    pub config_generation: u32,
+    pub queues: Vec<Queue>,
 
-    generic_virtio_device_state: GenericVirtioDeviceState,
-    specific_virtio_device_state: SpecificVirtioDeviceState,
+    pub generic_virtio_device_state: GenericVirtioDeviceState,
+    pub specific_virtio_device_state: SpecificVirtioDeviceState,
 }
 
 impl MmioDeviceState {

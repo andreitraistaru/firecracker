@@ -693,9 +693,9 @@ impl VirtioDevice for Block {
 
 #[derive(Deserialize, Serialize)]
 pub struct BlockState {
-    disk_image_path: PathBuf,
-    is_disk_read_only: bool,
-    rate_limiter_state: Option<RateLimiterState>,
+    pub disk_image_path: PathBuf,
+    pub is_disk_read_only: bool,
+    pub rate_limiter_state: Option<RateLimiterState>,
 }
 
 impl BlockState {
