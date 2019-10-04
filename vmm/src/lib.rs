@@ -3878,14 +3878,6 @@ mod tests {
         assert!(vmm.is_instance_initialized());
         assert!(!vmm.is_instance_running());
 
-        let vmm = create_vmm_object(InstanceState::Halting);
-        assert!(vmm.is_instance_initialized());
-        assert!(!vmm.is_instance_running());
-
-        let vmm = create_vmm_object(InstanceState::Halted);
-        assert!(vmm.is_instance_initialized());
-        assert!(!vmm.is_instance_running());
-
         let vmm = create_vmm_object(InstanceState::Running);
         assert!(vmm.is_instance_initialized());
         assert!(vmm.is_instance_running());

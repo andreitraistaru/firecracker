@@ -606,8 +606,6 @@ definitions:
           - Uninitialized
           - Starting
           - Running
-          - Halting
-          - Halted
       vmm_version:
         description: MicroVM hypervisor build version.
         type: string
