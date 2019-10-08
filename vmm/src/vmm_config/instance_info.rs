@@ -14,13 +14,20 @@ use seccomp;
 use snapshot;
 use vstate;
 
-/// The microvm state. When Firecracker starts, the instance state is Uninitialized.
-/// Once start_microvm method is called, the state goes from Uninitialized to Starting.
-/// The state is changed to Running before ending the start_microvm method.
-#[derive(Clone, Debug, Serialize)]
+/// The microvm state. When Firecracker starts, the instance state is `Uninitialized`.
+/// Configuring any microVM resources (logger not included as that's a Firecracker
+/// process resource and not a VM resource) will change the state from `Uninitialized`
+/// to `Configuring`.
+/// Once `start_microvm()` method is called, the state goes to `Starting`. The state
+/// is then changed to `Running` if the start function succeeds.
+/// Loading a microVM from a snapshot is only permitted on an `Uninitialized` microVM.
+/// In such a case the flow is `Uninitialized` -> `Resuming` -> `Running`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum InstanceState {
     /// Microvm is not initialized.
     Uninitialized,
+    /// Microvm is being configured.
+    Configuring,
     /// Microvm is starting.
     Starting,
     /// Microvm is resuming.
@@ -43,6 +50,8 @@ pub struct InstanceInfo {
 /// Errors associated with failed state validations.
 #[derive(Debug)]
 pub enum StateError {
+    /// This microVM has been configured therefore cannot be loaded from snapshot.
+    MicroVMAlreadyConfigured,
     /// The start/resume command was issued more than once.
     MicroVMAlreadyRunning,
     /// The microVM hasn't been started.
@@ -55,6 +64,10 @@ impl Display for StateError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::StateError::*;
         match *self {
+            MicroVMAlreadyConfigured => write!(
+                f,
+                "Microvm has been configured therefore cannot be loaded from snapshot."
+            ),
             MicroVMAlreadyRunning => write!(f, "Microvm is already running."),
             MicroVMIsNotRunning => write!(f, "Microvm is not running."),
             VcpusInvalidState => write!(f, "vCPUs are in an invalid state."),
@@ -525,6 +538,13 @@ mod tests {
     fn test_resume_microvm_error_messages() {
         use self::ResumeMicrovmError::*;
         assert_eq!(
+            format!(
+                "{}",
+                MicroVMInvalidState(StateError::MicroVMAlreadyConfigured)
+            ),
+            format!("{}", StateError::MicroVMAlreadyConfigured)
+        );
+        assert_eq!(
             format!("{}", MicroVMInvalidState(StateError::MicroVMAlreadyRunning)),
             format!("{}", StateError::MicroVMAlreadyRunning)
         );
@@ -660,6 +680,13 @@ mod tests {
                 "Cannot add devices to the legacy I/O Bus. {}",
                 device_manager::legacy::Error::EventFd(std::io::Error::from_raw_os_error(0))
             )
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                MicroVMInvalidState(StateError::MicroVMAlreadyConfigured)
+            ),
+            format!("{}", StateError::MicroVMAlreadyConfigured)
         );
         assert_eq!(
             format!("{}", MicroVMInvalidState(StateError::MicroVMAlreadyRunning)),

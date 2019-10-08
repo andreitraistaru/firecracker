@@ -353,7 +353,9 @@ impl std::convert::From<PauseMicrovmError> for VmmActionError {
         use self::StateError::*;
         let kind = match e {
             MicroVMInvalidState(ref err) => match err {
-                MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
+                MicroVMAlreadyConfigured | MicroVMAlreadyRunning | MicroVMIsNotRunning => {
+                    ErrorKind::User
+                }
                 VcpusInvalidState => ErrorKind::Internal,
             },
             VcpuPause => ErrorKind::User,
@@ -380,7 +382,9 @@ impl std::convert::From<ResumeMicrovmError> for VmmActionError {
         use self::StateError::*;
         let kind = match e {
             MicroVMInvalidState(ref err) => match err {
-                MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
+                MicroVMAlreadyConfigured | MicroVMAlreadyRunning | MicroVMIsNotRunning => {
+                    ErrorKind::User
+                }
                 VcpusInvalidState => ErrorKind::Internal,
             },
             #[cfg(target_arch = "x86_64")]
@@ -443,7 +447,9 @@ impl std::convert::From<StartMicrovmError> for VmmActionError {
                 _ => ErrorKind::Internal,
             },
             StartMicrovmError::MicroVMInvalidState(ref err) => match err {
-                MicroVMAlreadyRunning | MicroVMIsNotRunning => ErrorKind::User,
+                MicroVMAlreadyConfigured | MicroVMAlreadyRunning | MicroVMIsNotRunning => {
+                    ErrorKind::User
+                }
                 VcpusInvalidState => ErrorKind::Internal,
             },
             StdinHandle(_) => ErrorKind::Internal,
@@ -1633,7 +1639,7 @@ impl Vmm {
     /// Set up the initial microVM state and start the vCPU threads.
     pub fn start_microvm(&mut self) -> VmmRequestOutcome {
         info!("VMM received instance start command");
-        if self.is_instance_initialized() {
+        if self.is_instance_active() {
             Err(StartMicrovmError::from(StateError::MicroVMAlreadyRunning))?;
         }
 
@@ -1644,10 +1650,7 @@ impl Vmm {
 
         self.check_health()?;
         // Use expect() to crash if the other thread poisoned this lock.
-        self.shared_info
-            .write()
-            .expect("Failed to start microVM because shared info couldn't be written due to poisoned lock")
-            .state = InstanceState::Starting;
+        self.set_instance_state(InstanceState::Starting);
 
         self.init_guest_memory()?;
 
@@ -1692,10 +1695,7 @@ impl Vmm {
         self.resume_vcpus()?;
 
         // Use expect() to crash if the other thread poisoned this lock.
-        self.shared_info
-            .write()
-            .expect("Failed to start microVM because shared info couldn't be written due to poisoned lock")
-            .state = InstanceState::Running;
+        self.set_instance_state(InstanceState::Running);
 
         // Arm the log write timer.
         // TODO: the timer does not stop on InstanceStop.
@@ -1770,10 +1770,19 @@ impl Vmm {
     fn instance_state(&self) -> InstanceState {
         // Use expect() to crash if the other thread poisoned this lock.
         let shared_info = self.shared_info.read().expect(
-            "Failed to determine if instance is initialized because \
-             shared info couldn't be read due to poisoned lock",
+            "Failed to get instance state because shared \
+             info couldn't be read due to poisoned lock",
         );
         shared_info.state.clone()
+    }
+
+    fn set_instance_state(&mut self, state: InstanceState) {
+        // Use expect() to crash if the other thread poisoned this lock.
+        let mut shared_info = self.shared_info.write().expect(
+            "Failed to set instance state because shared \
+             info couldn't be read due to poisoned lock",
+        );
+        shared_info.state = state;
     }
 
     fn app_version(&self) -> Version {
@@ -1791,9 +1800,9 @@ impl Vmm {
             .expect("Failed to read app version because of invalid format")
     }
 
-    fn is_instance_initialized(&self) -> bool {
+    fn is_instance_active(&self) -> bool {
         match self.instance_state() {
-            InstanceState::Uninitialized => false,
+            InstanceState::Uninitialized | InstanceState::Configuring => false,
             _ => true,
         }
     }
@@ -1917,9 +1926,10 @@ impl Vmm {
         use ErrorKind::User;
         use VmmActionError::BootSource;
 
-        if self.is_instance_initialized() {
+        if self.is_instance_active() {
             Err(BootSource(User, UpdateNotAllowedPostBoot))?;
         }
+        self.set_instance_state(InstanceState::Configuring);
 
         let kernel_file =
             File::open(kernel_image_path).map_err(|_| BootSource(User, InvalidKernelPath))?;
@@ -1942,9 +1952,10 @@ impl Vmm {
 
     /// Set the machine configuration of the microVM.
     pub fn set_vm_configuration(&mut self, machine_config: VmConfig) -> VmmRequestOutcome {
-        if self.is_instance_initialized() {
+        if self.is_instance_active() {
             Err(VmConfigError::UpdateNotAllowedPostBoot)?;
         }
+        self.set_instance_state(InstanceState::Configuring);
 
         if machine_config.vcpu_count == Some(0) {
             Err(VmConfigError::InvalidVcpuCount)?;
@@ -1993,9 +2004,10 @@ impl Vmm {
     }
 
     fn insert_balloon(&mut self, body: BalloonConfig) -> VmmRequestOutcome {
-        if self.is_instance_initialized() {
+        if self.is_instance_active() {
             Err(VmmActionError::from(BalloonError::InsertNotAllowedPostBoot))
         } else {
+            self.set_instance_state(InstanceState::Configuring);
             self.device_configs.balloon = Some(body);
             Ok(VmmData::Empty)
         }
@@ -2015,7 +2027,7 @@ impl Vmm {
                 .ok_or(BalloonError::UpdatedInexistentDevice)?,
         );
         // If the VM is running, update the live device.
-        if self.is_instance_initialized() {
+        if self.is_instance_active() {
             let handler = self
                 .epoll_context
                 .get_device_handler_by_device_id::<virtio::BalloonEpollHandler>(
@@ -2073,9 +2085,10 @@ impl Vmm {
 
     /// Inserts a network device to be attached when the VM starts.
     pub fn insert_net_device(&mut self, body: NetworkInterfaceConfig) -> VmmRequestOutcome {
-        if self.is_instance_initialized() {
+        if self.is_instance_active() {
             Err(NetworkInterfaceError::UpdateNotAllowedPostBoot)?;
         }
+        self.set_instance_state(InstanceState::Configuring);
         self.device_configs
             .network_interface
             .insert(body)
@@ -2084,7 +2097,7 @@ impl Vmm {
     }
 
     fn update_net_device(&mut self, new_cfg: NetworkInterfaceUpdateConfig) -> VmmRequestOutcome {
-        if !self.is_instance_initialized() {
+        if !self.is_instance_active() {
             // VM not started yet, so we only need to update the device configs, not the actual
             // live device.
             let old_cfg = self
@@ -2146,12 +2159,13 @@ impl Vmm {
 
     /// Sets a vsock device to be attached when the VM starts.
     pub fn set_vsock_device(&mut self, config: VsockDeviceConfig) -> VmmRequestOutcome {
-        if self.is_instance_initialized() {
+        if self.is_instance_active() {
             Err(VmmActionError::VsockConfig(
                 ErrorKind::User,
                 VsockError::UpdateNotAllowedPostBoot,
             ))
         } else {
+            self.set_instance_state(InstanceState::Configuring);
             self.device_configs.vsock = Some(config);
             Ok(VmmData::Empty)
         }
@@ -2182,7 +2196,7 @@ impl Vmm {
 
         // When the microvm is running, we also need to update the drive handler and send a
         // rescan command to the drive.
-        if self.is_instance_initialized() {
+        if self.is_instance_active() {
             self.update_drive_handler(&drive_id, disk_file)?;
             self.rescan_block_device(&drive_id)?;
         }
@@ -2191,7 +2205,7 @@ impl Vmm {
 
     fn rescan_block_device(&mut self, drive_id: &str) -> VmmRequestOutcome {
         // Rescan can only happen after the guest is booted.
-        if !self.is_instance_initialized() {
+        if !self.is_instance_active() {
             Err(DriveError::OperationNotAllowedPreBoot)?;
         }
 
@@ -2227,9 +2241,10 @@ impl Vmm {
         &mut self,
         block_device_config: BlockDeviceConfig,
     ) -> VmmRequestOutcome {
-        if self.is_instance_initialized() {
+        if self.is_instance_active() {
             Err(DriveError::UpdateNotAllowedPostBoot)?;
         }
+        self.set_instance_state(InstanceState::Configuring);
         self.device_configs
             .block
             .insert(block_device_config)
@@ -2238,7 +2253,7 @@ impl Vmm {
     }
 
     fn init_logger(&self, api_logger: LoggerConfig) -> VmmRequestOutcome {
-        if self.is_instance_initialized() {
+        if self.is_instance_active() {
             return Err(VmmActionError::Logger(
                 ErrorKind::User,
                 LoggerConfigError::InitializationFailure(
@@ -2296,7 +2311,7 @@ impl Vmm {
     }
 
     fn validate_vcpus_are_active(&self) -> std::result::Result<(), StateError> {
-        if !self.is_instance_initialized() {
+        if !self.is_instance_active() {
             return Err(StateError::MicroVMIsNotRunning);
         }
         for handle in self.vcpus_handles.iter() {
@@ -2619,11 +2634,13 @@ impl Vmm {
             time_us: get_time_us(),
             cputime_us: now_cputime_us(),
         };
-        if self.is_instance_initialized() {
-            Err(ResumeMicrovmError::MicroVMInvalidState(
-                StateError::MicroVMAlreadyRunning,
-            ))?;
+
+        match self.instance_state() {
+            InstanceState::Uninitialized => Ok(()),
+            InstanceState::Configuring => Err(StateError::MicroVMAlreadyConfigured),
+            _ => Err(StateError::MicroVMAlreadyRunning),
         }
+        .map_err(ResumeMicrovmError::MicroVMInvalidState)?;
 
         let microvm_state = SnapshotEngine::deserialize(snapshot_path, self.app_version())
             .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
@@ -2633,11 +2650,7 @@ impl Vmm {
         vm_info
             .validate(&mem_file_path)
             .map_err(ResumeMicrovmError::OpenSnapshotFile)?;
-        // Use expect() to crash if the other thread poisoned this lock.
-        self.shared_info
-            .write()
-            .expect("Failed to start microVM because shared info couldn't be written due to poisoned lock")
-            .state = InstanceState::Resuming;
+        self.set_instance_state(InstanceState::Resuming);
 
         self.vm_config.mem_size_mib = Some(vm_info.mem_size_mib() as usize);
         self.vm_config.vcpu_count = Some(vcpu_states.len() as u8);
@@ -2709,11 +2722,7 @@ impl Vmm {
 
         Self::log_boot_time(&request_ts);
 
-        // Use expect() to crash if the other thread poisoned this lock.
-        self.shared_info
-            .write()
-            .expect("Failed to start microVM because shared info couldn't be written due to poisoned lock")
-            .state = InstanceState::Running;
+        self.set_instance_state(InstanceState::Running);
 
         Ok(VmmData::Empty)
     }
@@ -3117,10 +3126,6 @@ mod tests {
             self.configure_kernel(kernel_cfg);
         }
 
-        fn set_instance_state(&mut self, instance_state: InstanceState) {
-            self.shared_info.write().unwrap().state = instance_state;
-        }
-
         fn update_block_device_path(&mut self, block_device_id: &str, new_path: PathBuf) {
             for config in self.device_configs.block.config_list.iter_mut() {
                 if config.drive_id == block_device_id {
@@ -3336,6 +3341,9 @@ mod tests {
         assert!(vmm.insert_balloon(config).is_ok());
         assert_eq!(vmm.device_configs.balloon, Some(config));
 
+        // Validate instance state was updated.
+        assert_eq!(vmm.instance_state(), InstanceState::Configuring);
+
         // Test that inserting a balloon device again returns the correct output.
 
         let config = BalloonConfig::new(41, false, false);
@@ -3428,6 +3436,9 @@ mod tests {
             .config_list
             .contains(&root_block_device));
 
+        // Validate instance state was updated.
+        assert_eq!(vmm.instance_state(), InstanceState::Configuring);
+
         // Test that updating a block device returns the correct output.
         let root_block_device = BlockDeviceConfig {
             drive_id: String::from("root"),
@@ -3507,6 +3518,9 @@ mod tests {
             allow_mmds_requests: false,
         };
         assert!(vmm.insert_net_device(network_interface).is_ok());
+
+        // Validate instance state was updated.
+        assert_eq!(vmm.instance_state(), InstanceState::Configuring);
 
         let mac = MacAddr::parse_str("01:23:45:67:89:0A").unwrap();
         // test update network interface
@@ -3669,6 +3683,9 @@ mod tests {
         assert_eq!(vmm.vm_config.ht_enabled, Some(false));
         assert_eq!(vmm.vm_config.mem_file_path, None);
         assert_eq!(vmm.vm_config.shared_mem, false);
+
+        // Validate instance state was updated.
+        assert_eq!(vmm.instance_state(), InstanceState::Configuring);
 
         // Test put machine configuration for mem size with valid value.
         let machine_config = VmConfig {
@@ -3871,15 +3888,15 @@ mod tests {
     #[test]
     fn test_instance_state() {
         let vmm = create_vmm_object(InstanceState::Uninitialized);
-        assert!(!vmm.is_instance_initialized());
+        assert!(!vmm.is_instance_active());
         assert!(!vmm.is_instance_running());
 
         let vmm = create_vmm_object(InstanceState::Starting);
-        assert!(vmm.is_instance_initialized());
+        assert!(vmm.is_instance_active());
         assert!(!vmm.is_instance_running());
 
         let vmm = create_vmm_object(InstanceState::Running);
-        assert!(vmm.is_instance_initialized());
+        assert!(vmm.is_instance_active());
         assert!(vmm.is_instance_running());
     }
 
@@ -4066,6 +4083,9 @@ mod tests {
         assert!(vmm
             .configure_boot_source(kernel_path.clone(), Some(String::from("reboot=k")))
             .is_ok());
+
+        // Validate instance state was updated.
+        assert_eq!(vmm.instance_state(), InstanceState::Configuring);
 
         // Test valid configuration after boot (should fail).
         vmm.set_instance_state(InstanceState::Running);
@@ -4734,6 +4754,37 @@ mod tests {
         );
 
         assert!(vmm.configure_from_json(json).is_ok());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn invalid_instance_state_resume() {
+        let mut vmm = create_vmm_object(InstanceState::Configuring);
+
+        // Resume should not be allowed if instance has been configured.
+        match vmm
+            .resume_from_snapshot("dummy".to_string(), "dummy".to_string())
+            .unwrap_err()
+        {
+            VmmActionError::ResumeMicrovm(
+                _,
+                ResumeMicrovmError::MicroVMInvalidState(StateError::MicroVMAlreadyConfigured),
+            ) => (),
+            _ => panic!("Resuming on microVM with instance state 'Configuring' not allowed"),
+        };
+
+        vmm.set_instance_state(InstanceState::Running);
+        // Resume should not be allowed if instance has been started.
+        match vmm
+            .resume_from_snapshot("dummy".to_string(), "dummy".to_string())
+            .unwrap_err()
+        {
+            VmmActionError::ResumeMicrovm(
+                _,
+                ResumeMicrovmError::MicroVMInvalidState(StateError::MicroVMAlreadyRunning),
+            ) => (),
+            _ => panic!("Resuming on microVM with instance state 'Running' not allowed"),
+        };
     }
 
     #[cfg(target_arch = "x86_64")]

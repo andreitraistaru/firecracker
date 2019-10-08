@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Removed unused 'Halting' and 'Halted' instance states and added
+  new 'Configuring' state where the microVM resources have been
+  partially or fully configured, but the microVM has not been yet
+  started.
+
 ### Fixed
 
 - Errors triggered during device state restoration contain details

@@ -604,6 +604,7 @@ definitions:
         type: string
         enum:
           - Uninitialized
+          - Configuring
           - Starting
           - Running
       vmm_version:
