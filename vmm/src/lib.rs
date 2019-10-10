@@ -2666,6 +2666,7 @@ impl Vmm {
             .restore_state(&kvm_vm_state)
             .map_err(ResumeMicrovmError::RestoreVmState)?;
 
+        self.configure_stdin()?;
         self.attach_legacy_devices()?;
 
         self.device_configs = device_configs;
