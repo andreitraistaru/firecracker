@@ -744,8 +744,11 @@ definitions:
     type: object
     required:
       - snapshot_path
+      - mem_file_path
     properties:
       snapshot_path:
+        type: string
+      mem_file_path:
         type: string
 
   SnapshotLoadConfig:

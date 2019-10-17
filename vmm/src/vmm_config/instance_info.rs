@@ -125,6 +125,8 @@ pub enum PauseMicrovmError {
     SyncMemory(GuestMemoryError),
     /// vCPU pause failed.
     VcpuPause,
+    /// Failed to sync memory to snapshot.
+    WriteMemory(std::io::Error),
 }
 
 impl Display for PauseMicrovmError {
@@ -151,6 +153,7 @@ impl Display for PauseMicrovmError {
             StopVcpus(ref e) => write!(f, "Failed to stop vcpus: {}", e),
             SyncMemory(ref e) => write!(f, "Failed to sync memory to snapshot: {:?}", e),
             VcpuPause => write!(f, "vCPUs pause failed."),
+            WriteMemory(ref e) => write!(f, "Failed to write memory file: {}", e),
         }
     }
 }

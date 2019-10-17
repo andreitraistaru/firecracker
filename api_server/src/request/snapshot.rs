@@ -14,6 +14,7 @@ use request::{IntoParsedRequest, ParsedRequest};
 #[serde(deny_unknown_fields)]
 pub struct SnapshotCreateConfig {
     snapshot_path: String,
+    mem_file_path: String,
 }
 
 // We use Serde to transform each associated json body into this.
@@ -33,7 +34,10 @@ impl IntoParsedRequest for SnapshotCreateConfig {
         let (sender, receiver) = oneshot::channel();
         match method {
             Method::Put => Ok(ParsedRequest::Sync(
-                VmmRequest::new(VmmAction::PauseToSnapshot(self.snapshot_path), sender),
+                VmmRequest::new(
+                    VmmAction::PauseToSnapshot(self.snapshot_path, self.mem_file_path),
+                    sender,
+                ),
                 receiver,
             )),
             _ => Err(String::from("Invalid method.")),
@@ -72,12 +76,16 @@ mod tests {
         // Test SnapshotCreateCfg.
         {
             let json = r#"{
-                "snapshot_path": "/foo/bar"
+                "snapshot_path": "/foo/bar",
+                "mem_file_path": "/foo/mem"
             }"#;
 
             let (sender, receiver) = oneshot::channel();
             let req: ParsedRequest = ParsedRequest::Sync(
-                VmmRequest::new(VmmAction::PauseToSnapshot("/foo/bar".to_string()), sender),
+                VmmRequest::new(
+                    VmmAction::PauseToSnapshot("/foo/bar".to_string(), "/foo/mem".to_string()),
+                    sender,
+                ),
                 receiver,
             );
             let result: Result<SnapshotCreateConfig, serde_json::Error> =

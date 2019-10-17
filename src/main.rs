@@ -339,8 +339,8 @@ fn vmm_control_event(
                     .insert_net_device(netif_body)
                     .map(|_| api_server::VmmData::Empty),
                 #[cfg(target_arch = "x86_64")]
-                PauseToSnapshot(snapshot_path) => {
-                    let result = vmm.pause_to_snapshot(snapshot_path);
+                PauseToSnapshot(snapshot_path, mem_file_path) => {
+                    let result = vmm.pause_to_snapshot(snapshot_path, mem_file_path);
                     if result.is_ok() {
                         exit_code = Some(i32::from(vmm::FC_EXIT_CODE_OK));
                     }

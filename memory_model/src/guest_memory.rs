@@ -20,6 +20,8 @@ use DataInit;
 pub enum Error {
     /// Failure in creating guest memory backing file.
     CreateFile(std::io::Error),
+    /// Writing down memory failed for one of the regions.
+    FileIO(std::io::Error),
     /// Invalid size for guest memory backing file.
     FileSize,
     /// Failure in finding a guest address in any memory regions mapped by this guest.
@@ -34,6 +36,10 @@ pub enum Error {
     MemoryNotInitialized,
     /// Two of the memory regions are overlapping.
     MemoryRegionOverlap,
+    /// Reading from guest memory failed.
+    MemoryRead(mmap::Error),
+    /// Taking a snapshot of memory failed.
+    MemorySnapshotFailed,
     /// Syncing memory failed for one of the regions.
     MemorySync(std::io::Error),
     /// No memory regions were provided for initializing the guest memory.

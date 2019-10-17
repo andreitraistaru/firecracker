@@ -1198,7 +1198,8 @@ mod tests {
     fn test_parse_snapshot_req() {
         let snapshot_create_json = Chunk::from(
             r#"{
-                "snapshot_path": "/foo/img"
+                "snapshot_path": "/foo/img",
+                "mem_file_path": "/foo/mem"
               }"#,
         );
         let snapshot_load_json = Chunk::from(
@@ -1240,7 +1241,10 @@ mod tests {
             Ok(pr) => {
                 let (sender, receiver) = oneshot::channel();
                 assert!(pr.eq(&ParsedRequest::Sync(
-                    VmmRequest::new(VmmAction::PauseToSnapshot("/foo/img".to_string()), sender),
+                    VmmRequest::new(
+                        VmmAction::PauseToSnapshot("/foo/img".to_string(), "/foo/mem".to_string()),
+                        sender
+                    ),
                     receiver,
                 )));
             }

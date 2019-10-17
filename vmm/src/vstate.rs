@@ -36,7 +36,7 @@ use kvm_bindings::{
     kvm_pit_state2, kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave,
     KVM_PIT_SPEAKER_DUMMY,
 };
-use logger::{LogOption, Metric, LOGGER, METRICS};
+use logger::{Metric, METRICS};
 use memory_model::{GuestAddress, GuestMemory, GuestMemoryError};
 use sys_util::{register_vcpu_signal_handler, EventFd, Killable};
 #[cfg(target_arch = "x86_64")]
@@ -233,11 +233,8 @@ impl Vm {
             .with_regions(|index, guest_addr, size, host_addr| {
                 info!("Guest memory starts at {:x?}", host_addr);
 
-                let flags = if LOGGER.flags() & LogOption::LogDirtyPages as usize > 0 {
-                    KVM_MEM_LOG_DIRTY_PAGES
-                } else {
-                    0
-                };
+                // mbrooker: Force logging dirty pages to enable snapshots for now.
+                let flags = KVM_MEM_LOG_DIRTY_PAGES;
 
                 let memory_region = kvm_userspace_memory_region {
                     slot: index as u32,

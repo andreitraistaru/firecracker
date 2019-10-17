@@ -74,9 +74,10 @@ pub enum VmmAction {
     /// `VsockDeviceConfig` as input. This action can only be called before the microVM has
     /// booted.
     SetVsockDevice(VsockDeviceConfig),
-    /// Pause the microVM, save its state to the specified file and end this Firecracker process.
+    /// Pause the microVM, save its state and memory to the specified files and end this
+    /// Firecracker process.
     #[cfg(target_arch = "x86_64")]
-    PauseToSnapshot(String),
+    PauseToSnapshot(String, String),
     /// Pause the microVM VCPUs, effectively pausing the guest.
     PauseVCPUs,
     /// Update the size of an existing block device specified by an ID. The ID is the first data

@@ -5,6 +5,8 @@
 ### Added
 
 - Merged Firecracker 0.19.0.
+- New snapshot API parameter `mem_file_path`, representing the path to the
+  incremental guest memory snapshot on disk.
 
 ### Fixed
 

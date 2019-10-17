@@ -50,6 +50,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::fs::{metadata, File, OpenOptions};
 use std::io;
+use std::io::{Seek, SeekFrom};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -82,8 +83,6 @@ use kernel::cmdline as kernel_cmdline;
 use kernel::loader as kernel_loader;
 use kvm::*;
 use logger::error::LoggerError;
-#[cfg(target_arch = "x86_64")]
-use logger::LogOption;
 use logger::{AppInfo, Level, Metric, LOGGER, METRICS};
 use memory_model::{FileMemoryDesc, GuestAddress, GuestMemory, GuestMemoryError};
 use net_util::TapError;
@@ -171,6 +170,7 @@ pub enum Error {
     Poll(io::Error),
     /// Write to the serial console failed.
     Serial(io::Error),
+
     /// Cannot create Timer file descriptor.
     TimerFd(io::Error),
     /// Cannot open the VM file descriptor.
@@ -359,7 +359,8 @@ impl std::convert::From<PauseMicrovmError> for VmmActionError {
             | SaveVcpuState(_)
             | StopVcpus(_)
             | SyncMemory(_)
-            | SignalVcpu(_) => ErrorKind::Internal,
+            | SignalVcpu(_)
+            | WriteMemory(_) => ErrorKind::Internal,
             #[cfg(target_arch = "x86_64")]
             // TODO: some errors are user-initiated and should be differentiated.
             SnapshotBackingFile(_) => ErrorKind::Internal,
@@ -1157,10 +1158,11 @@ impl Vmm {
 
     #[cfg(target_arch = "x86_64")]
     fn log_dirty_pages(&mut self) {
+        // mbrooker hack: Make sure logger is not messing with dirty page count.
         // If we're logging dirty pages, post the metrics on how many dirty pages there are.
-        if LOGGER.flags() | LogOption::LogDirtyPages as usize > 0 {
-            METRICS.memory.dirty_pages.add(self.get_dirty_page_count());
-        }
+        //if LOGGER.flags() | LogOption::LogDirtyPages as usize > 0 {
+        //    METRICS.memory.dirty_pages.add(self.get_dirty_page_count());
+        //}
     }
 
     fn write_metrics(&mut self) -> result::Result<(), LoggerError> {
@@ -1815,6 +1817,7 @@ impl Vmm {
     // Count the number of pages dirtied since the last call to this function.
     // Because this is used for metrics, it swallows most errors and simply doesn't count dirty
     // pages if the KVM operation fails.
+    #[allow(unused)]
     #[cfg(target_arch = "x86_64")]
     fn get_dirty_page_count(&mut self) -> usize {
         let dirty_pages_in_region =
@@ -2443,7 +2446,12 @@ impl Vmm {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn do_pause_to_snapshot(&mut self, snapshot_path: String, extra_info: VmInfo) -> UserResult {
+    fn do_pause_to_snapshot(
+        &mut self,
+        snapshot_path: String,
+        mem_file_path: String,
+        extra_info: VmInfo,
+    ) -> UserResult {
         // Signal vcpus to pause to snapshot.
         self.initiate_vcpu_pause()?;
 
@@ -2508,12 +2516,92 @@ impl Vmm {
             .sync()
             .map_err(PauseMicrovmError::SyncMemory)?;
 
+        // Write the guest memory out to a file.
+        // mbrooker: In reality, we'd support both a SHARED mode and a PRIVATE mode, but for now we
+        // support just the PRIVATE mode.
+        self.snapshot_memory_to_file(mem_file_path)?;
+
+        Ok(())
+    }
+
+    /// Write a snapshot of the guest memory to a file, using the specified dirty bitmap.
+    pub fn snapshot_memory_to_file(&self, file_name: String) -> UserResult {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(file_name.clone())
+            .map_err(PauseMicrovmError::WriteMemory)?;
+
+        // Set the length of the file to the full size of the memory area.
+        file.set_len((self.vm_config.mem_size_mib.unwrap() * 1024 * 1024) as u64)
+            .map_err(PauseMicrovmError::WriteMemory)?;
+
+        // Offset into the file, which essentially skips over gaps in the memory area and provides
+        // a contiguous view of the guest memory.
+        let mut file_offset = 0;
+        // Go through each of the memory regions in turn, getting their bitmaps, and writing down
+        // the changed pages into the underlying file.
+        self.guest_memory().unwrap().with_regions_mut(
+            |n: usize,
+             guest_base: GuestAddress,
+             size: usize,
+             _: usize|
+             -> std::result::Result<(), VmmActionError> {
+                info!("Handling memory region {} of size {}", n, size);
+                // Get the dirty bitmap for this region of guest memory.
+                let bitmap = self
+                    .vm
+                    .get_fd()
+                    .get_dirty_log(n as u32, size)
+                    .map_err(PauseMicrovmError::WriteMemory)?;
+                info!("Got bitmap for region of size {}", bitmap.len());
+
+                let mut written_pages = 0;
+                // Loop over the dirty bitmap, writing to the file for every changed page.
+                for (i, v) in bitmap.iter().enumerate() {
+                    for j in 0..64 {
+                        if ((v >> j) & 1u64) != 0u64 {
+                            let page_offset = ((i * 64) + j) * 4096;
+                            let guest_physical_offset =
+                                guest_base.checked_add(page_offset).unwrap();
+                            // We may have skipped some pages, so seek forward to the new physical
+                            // offset into the underlying file.
+                            file.seek(SeekFrom::Start((file_offset + page_offset) as u64))
+                                .map_err(PauseMicrovmError::WriteMemory)?;
+                            // Tell the memory to write itself down to the snapshot file.
+                            self.guest_memory()
+                                .unwrap()
+                                .write_from_memory(guest_physical_offset, &mut file, 4096)
+                                .map_err(PauseMicrovmError::SyncMemory)?;
+                            written_pages += 1;
+                        }
+                    }
+                }
+                info!(
+                    "Wrote {} dirty pages ({} bytes) to memory file",
+                    written_pages,
+                    written_pages * 4096
+                );
+                // Move file offset up by the size of this region, so the next region follows right
+                // after.
+                file_offset += size;
+                Ok(())
+            },
+        )?;
+        // Loop over the bitmap, and for every set bit (i.e. a dirty page), read the data from user
+        // memory and write it down to the file.
+
         Ok(())
     }
 
     /// Pauses the microVM and saves its state to the snapshot files.
     #[cfg(target_arch = "x86_64")]
-    pub fn pause_to_snapshot(&mut self, snapshot_path: String) -> UserResult {
+    pub fn pause_to_snapshot(
+        &mut self,
+        snapshot_path: String,
+        mem_file_path: String,
+    ) -> UserResult {
         let request_ts = TimestampUs {
             time_us: get_time_us(),
             cputime_us: now_cputime_us(),
@@ -2534,7 +2622,7 @@ impl Vmm {
             )));
         }
 
-        self.do_pause_to_snapshot(snapshot_path, VmInfo::new(mem_size_mib))
+        self.do_pause_to_snapshot(snapshot_path, mem_file_path, VmInfo::new(mem_size_mib))
             .map_err(|e| {
                 self.resume_vcpus()
                     .expect("Failed to resume vCPUs after an unsuccessful pause");
@@ -4505,8 +4593,12 @@ mod tests {
             let stdin_handle = io::stdin();
             stdin_handle.lock().set_canon_mode().unwrap();
 
-            assert!(vmm1.pause_to_snapshot("/foo/bar".to_string()).is_err());
-            assert!(vmm1.pause_to_snapshot(snapshot_filename.clone()).is_ok());
+            assert!(vmm1
+                .pause_to_snapshot("/foo/bar".to_string(), "/foo/mem".to_string())
+                .is_err());
+            assert!(vmm1
+                .pause_to_snapshot(snapshot_filename.clone(), mem_file_path.clone())
+                .is_ok());
         }
 
         // Wait a bit to make sure all the kvm resources associated with this thread are released.
