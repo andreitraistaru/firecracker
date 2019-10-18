@@ -12,6 +12,7 @@ use std;
 use std::io::{self, Read, Write};
 use std::os::unix::io::RawFd;
 use std::ptr::null_mut;
+use std::sync::Mutex;
 
 use libc;
 
@@ -108,6 +109,9 @@ impl FileMemoryDesc {
 pub struct MemoryMapping {
     addr: *mut u8,
     size: usize,
+    // `dirty_areas` tracks the areas of memory which have been written to through the
+    // `MemoryMapping` interface.
+    dirty_areas: Mutex<Bitmap>,
 }
 
 // Send and Sync aren't automatically inherited for the raw address pointer.
@@ -144,6 +148,7 @@ impl MemoryMapping {
         Ok(MemoryMapping {
             addr: addr as *mut u8,
             size: descriptor.size,
+            dirty_areas: Mutex::new(Bitmap::new(descriptor.size, 4096)),
         })
     }
 
@@ -168,6 +173,7 @@ impl MemoryMapping {
         Ok(MemoryMapping {
             addr: addr as *mut u8,
             size,
+            dirty_areas: Mutex::new(Bitmap::new(size, 4096)),
         })
     }
 
@@ -193,6 +199,24 @@ impl MemoryMapping {
         self.size
     }
 
+    /// Get a copy of the dirty bitmap for this region
+    pub fn get_dirty_bitmap(&self) -> Bitmap {
+        let lck = match self.dirty_areas.lock() {
+            Ok(l) => l,
+            Err(l_e) => l_e.into_inner(),
+        };
+        lck.clone()
+    }
+
+    /// Mark the pages dirty in the range from `offset` to `offset+len`
+    fn mark_areas_dirty(&self, offset: usize, len: usize) {
+        let mut lck = match self.dirty_areas.lock() {
+            Ok(l) => l,
+            Err(l_e) => l_e.into_inner(),
+        };
+        lck.set_addr_range(offset, len);
+    }
+
     /// Writes a slice to the memory region at the specified offset.
     /// Returns the number of bytes written.  The number of bytes written can
     /// be less than the length of the slice if there isn't enough room in the
@@ -212,6 +236,7 @@ impl MemoryMapping {
         if offset >= self.size {
             return Err(Error::InvalidAddress);
         }
+        self.mark_areas_dirty(offset, buf.len());
         unsafe {
             // Guest memory can't strictly be modeled as a slice because it is
             // volatile.  Writing to it with what compiles down to a memcpy
@@ -272,8 +297,9 @@ impl MemoryMapping {
                 return Err(Error::InvalidAddress);
             }
             std::ptr::write_volatile(&mut self.as_mut_slice()[offset..] as *mut _ as *mut T, val);
-            Ok(())
         }
+        self.mark_areas_dirty(offset, std::mem::size_of::<T>());
+        Ok(())
     }
 
     /// Reads on object from the memory region at the given offset.
@@ -344,6 +370,7 @@ impl MemoryMapping {
             let dst = &mut self.as_mut_slice()[mem_offset..mem_end];
             src.read_exact(dst).map_err(Error::ReadFromSource)?;
         }
+        self.mark_areas_dirty(mem_offset, count);
         Ok(())
     }
 
@@ -491,6 +518,63 @@ impl Drop for MemoryMapping {
     }
 }
 
+/// `Bitmap` implements a simple bit map on the page level with test and set operations. It is
+/// page-size aware, so it converts addresses to page numbers before setting or clearing the bits.
+#[derive(Debug, Clone)]
+pub struct Bitmap {
+    map: Vec<u64>,
+    size: usize,
+    page_size: usize,
+}
+
+impl Bitmap {
+    /// Create a new bitmap of `byte_size`, with one bit per `page_size`.
+    /// In reality this is rounded up, and you get a new vector of the next multiple of 64 bigger
+    /// than `size` for free.
+    fn new(byte_size: usize, page_size: usize) -> Self {
+        // Bit size is the number of bits in the bitmap, always at least 1 (to store the state of
+        // the '0' address).
+        let bit_size = std::cmp::max(1, byte_size / page_size);
+        Bitmap {
+            map: vec![0; ((bit_size - 1) >> 6) + 1],
+            size: bit_size,
+            page_size,
+        }
+    }
+
+    /// Is bit `n` set?
+    /// If `n` isn't in the range of the bitmap, this will panic.
+    #[inline]
+    fn is_bit_set(&self, n: usize) -> bool {
+        (self.map[n >> 6] & (1 << (n & 63))) != 0
+    }
+
+    /// Is the bit corresponding to address `addr` set?
+    pub fn is_addr_set(&self, addr: usize) -> bool {
+        self.is_bit_set(addr / self.page_size)
+    }
+
+    /// Set a range of bits starting at `start_addr` and continuing for the next `len` bytes.
+    pub fn set_addr_range(&mut self, start_addr: usize, len: usize) {
+        let first_bit = start_addr / self.page_size;
+        let page_count = (len + self.page_size - 1) / self.page_size;
+        for n in first_bit..(first_bit + page_count) {
+            self.map[n >> 6] |= 1 << (n & 63);
+        }
+    }
+
+    /// Get the length of the bitmap in bits (i.e. in how many pages it can represent).
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
+    /// Is the bitmap empty (i.e. has zero size)? This is always false, because we explicitly
+    /// round up the size when creating the bitmap.
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate tempfile;
@@ -509,6 +593,18 @@ mod tests {
                 _ => false,
             })
         }};
+    }
+
+    #[test]
+    fn bitmap_basic() {
+        let mut b = Bitmap::new(1024, 128);
+        assert_eq!(b.is_empty(), false);
+        assert_eq!(b.len(), 8);
+        b.set_addr_range(128, 129);
+        assert!(!b.is_addr_set(0));
+        assert!(b.is_addr_set(128));
+        assert!(b.is_addr_set(256));
+        assert!(!b.is_addr_set(384));
     }
 
     #[test]
@@ -668,6 +764,21 @@ mod tests {
 
         // This should return an error, since 50 + 80 >= 123.
         assert_match!(mm.range_end(50, 80), Err(Error::InvalidAddress));
+    }
+
+    #[test]
+    fn test_dirty_bitmap() {
+        let mem_map = MemoryMapping::new_anon(4096 * 3).unwrap();
+        // write_obj should dirty the bitmap
+        assert!(!mem_map.get_dirty_bitmap().is_addr_set(0));
+        assert!(mem_map.write_obj(55u16, 2).is_ok());
+        assert!(mem_map.get_dirty_bitmap().is_addr_set(0));
+
+        // write_slice should dirty the bitmap
+        let sample_buf = [1, 2, 3];
+        assert!(!mem_map.get_dirty_bitmap().is_addr_set(4096));
+        assert!(mem_map.write_slice(&sample_buf, 4096).is_ok());
+        assert!(mem_map.get_dirty_bitmap().is_addr_set(4096));
     }
 
     #[test]

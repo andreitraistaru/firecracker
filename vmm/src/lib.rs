@@ -83,8 +83,8 @@ use kernel::cmdline as kernel_cmdline;
 use kernel::loader as kernel_loader;
 use kvm::*;
 use logger::error::LoggerError;
-use logger::{AppInfo, Level, Metric, LOGGER, METRICS};
-use memory_model::{FileMemoryDesc, GuestAddress, GuestMemory, GuestMemoryError};
+use logger::{AppInfo, Level, LogOption, Metric, LOGGER, METRICS};
+use memory_model::{Bitmap, FileMemoryDesc, GuestAddress, GuestMemory, GuestMemoryError};
 use net_util::TapError;
 #[cfg(target_arch = "aarch64")]
 use serde_json::Value;
@@ -1158,11 +1158,10 @@ impl Vmm {
 
     #[cfg(target_arch = "x86_64")]
     fn log_dirty_pages(&mut self) {
-        // mbrooker hack: Make sure logger is not messing with dirty page count.
         // If we're logging dirty pages, post the metrics on how many dirty pages there are.
-        //if LOGGER.flags() | LogOption::LogDirtyPages as usize > 0 {
-        //    METRICS.memory.dirty_pages.add(self.get_dirty_page_count());
-        //}
+        if LOGGER.flags() | LogOption::LogDirtyPages as usize > 0 {
+            METRICS.memory.dirty_pages.add(self.get_dirty_page_count());
+        }
     }
 
     fn write_metrics(&mut self) -> result::Result<(), LoggerError> {
@@ -2449,7 +2448,7 @@ impl Vmm {
     fn do_pause_to_snapshot(
         &mut self,
         snapshot_path: String,
-        mem_file_path: String,
+        mem_file_path: Option<String>,
         extra_info: VmInfo,
     ) -> UserResult {
         // Signal vcpus to pause to snapshot.
@@ -2519,13 +2518,21 @@ impl Vmm {
         // Write the guest memory out to a file.
         // mbrooker: In reality, we'd support both a SHARED mode and a PRIVATE mode, but for now we
         // support just the PRIVATE mode.
-        self.snapshot_memory_to_file(mem_file_path)?;
+        if let Some(path) = mem_file_path {
+            self.snapshot_memory_to_file(path)?;
+        }
 
         Ok(())
     }
 
-    /// Write a snapshot of the guest memory to a file, using the specified dirty bitmap.
-    pub fn snapshot_memory_to_file(&self, file_name: String) -> UserResult {
+    /// Write a snapshot of dirty (i.e. changed from zero for non-restored guests, or changed from
+    /// the snapshot for restored guests) guest memory to a file. The file is sparse, so on
+    /// typical Linux filesystems will take up only about as much space as the dirty bytes.
+    ///
+    /// This is done using two dirty bitmaps: one we track inside Firecracker (that captures
+    /// kernel loads and other Firecracker-initiated changes), and KVM's dirty log, which captures
+    /// writes made by the guest. A page is considered dirty if it is written by either path.
+    fn snapshot_memory_to_file(&self, file_name: String) -> UserResult {
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -2536,35 +2543,35 @@ impl Vmm {
         // Set the length of the file to the full size of the memory area.
         file.set_len((self.vm_config.mem_size_mib.unwrap() * 1024 * 1024) as u64)
             .map_err(PauseMicrovmError::WriteMemory)?;
-
-        // Offset into the file, which essentially skips over gaps in the memory area and provides
-        // a contiguous view of the guest memory.
+        // Offset into the file, which essentially skips over gaps between memory regions and
+        // provides a contiguous view of the guest memory.
         let mut file_offset = 0;
         // Go through each of the memory regions in turn, getting their bitmaps, and writing down
         // the changed pages into the underlying file.
-        self.guest_memory().unwrap().with_regions_mut(
+        self.guest_memory().unwrap().with_regions_bitmaps_mut(
             |n: usize,
              guest_base: GuestAddress,
              size: usize,
-             _: usize|
+             fc_bitmap: Bitmap|
              -> std::result::Result<(), VmmActionError> {
                 info!("Handling memory region {} of size {}", n, size);
-                // Get the dirty bitmap for this region of guest memory.
+                // Get the KVM dirty bitmap for this region of guest memory.
                 let bitmap = self
                     .vm
                     .get_fd()
                     .get_dirty_log(n as u32, size)
                     .map_err(PauseMicrovmError::WriteMemory)?;
-                info!("Got bitmap for region of size {}", bitmap.len());
 
                 let mut written_pages = 0;
                 // Loop over the dirty bitmap, writing to the file for every changed page.
                 for (i, v) in bitmap.iter().enumerate() {
                     for j in 0..64 {
-                        if ((v >> j) & 1u64) != 0u64 {
-                            let page_offset = ((i * 64) + j) * 4096;
-                            let guest_physical_offset =
-                                guest_base.checked_add(page_offset).unwrap();
+                        let page_offset = ((i * 64) + j) * 4096;
+                        let guest_physical_offset = guest_base.checked_add(page_offset).unwrap();
+
+                        let is_kvm_dirty = ((v >> j) & 1u64) != 0u64;
+                        let is_firecracker_dirty = fc_bitmap.is_addr_set(page_offset);
+                        if is_kvm_dirty || is_firecracker_dirty {
                             // We may have skipped some pages, so seek forward to the new physical
                             // offset into the underlying file.
                             file.seek(SeekFrom::Start((file_offset + page_offset) as u64))
@@ -2584,13 +2591,11 @@ impl Vmm {
                     written_pages * 4096
                 );
                 // Move file offset up by the size of this region, so the next region follows right
-                // after.
+                // after with no gaps.
                 file_offset += size;
                 Ok(())
             },
         )?;
-        // Loop over the bitmap, and for every set bit (i.e. a dirty page), read the data from user
-        // memory and write it down to the file.
 
         Ok(())
     }
@@ -2600,7 +2605,7 @@ impl Vmm {
     pub fn pause_to_snapshot(
         &mut self,
         snapshot_path: String,
-        mem_file_path: String,
+        mem_file_path: Option<String>,
     ) -> UserResult {
         let request_ts = TimestampUs {
             time_us: get_time_us(),
@@ -2814,6 +2819,7 @@ mod tests {
     use std::io::BufRead;
     use std::io::BufReader;
     use std::sync::atomic::AtomicUsize;
+    use std::thread;
 
     use self::tempfile::NamedTempFile;
     use arch::DeviceType;
@@ -4567,24 +4573,21 @@ mod tests {
         };
     }
 
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn microvm_pause_and_resume_from_snapshot() {
-        let microvm_id = String::from("pause_resume_test");
-        let mut vmm1_wrap = Some(create_vmm_object(InstanceState::Uninitialized));
-        let mut vmm2 = create_vmm_object(InstanceState::Running);
-        // Create microVM and snapshot it.
-        let snapshot_filename = tmp_path();
-        let mem_file_path = tmp_path();
-
+    fn create_and_snapshot_microvm(
+        microvm_id: String,
+        image_path: String,
+        shared_mem_path: String,
+        mem_overlay_path: Option<String>,
+    ) {
         {
+            let mut vmm1_wrap = Some(create_vmm_object(InstanceState::Uninitialized));
             // Take it out of the wrapper so it goes out of scope at the end of this block.
             let mut vmm1 = vmm1_wrap.take().unwrap();
             vmm1.shared_info.write().unwrap().id = microvm_id.clone();
             vmm1.shared_info.write().unwrap().vmm_version = "1.0.1".to_string();
 
             vmm1.default_kernel_config(Some(good_kernel_file()));
-            vmm1.vm_config.mem_file_path = Some(mem_file_path.clone());
+            vmm1.vm_config.mem_file_path = Some(shared_mem_path.clone());
             vmm1.vm_config.shared_mem = true;
             // The kernel provided contains  "return 0" which will make the
             // advanced seccomp filter return bad syscall so we disable it.
@@ -4594,32 +4597,83 @@ mod tests {
             stdin_handle.lock().set_canon_mode().unwrap();
 
             assert!(vmm1
-                .pause_to_snapshot("/foo/bar".to_string(), "/foo/mem".to_string())
+                .pause_to_snapshot("/foo/bar".to_string(), Some("/foo/baz".to_string()))
                 .is_err());
             assert!(vmm1
-                .pause_to_snapshot(snapshot_filename.clone(), mem_file_path.clone())
+                .pause_to_snapshot(image_path.clone(), mem_overlay_path.clone())
                 .is_ok());
         }
+    }
 
-        // Wait a bit to make sure all the kvm resources associated with this thread are released.
-        std::thread::sleep(Duration::from_millis(100));
+    fn resume_from_snapshot(microvm_id: &str, image_path: &str, mem_path: &str) -> Vmm {
+        let mut vmm2 = create_vmm_object(InstanceState::Running);
         // Resume second microVM from snapshot.
         {
-            vmm2.shared_info.write().unwrap().id = microvm_id.clone();
+            vmm2.shared_info.write().unwrap().id = microvm_id.to_string();
             vmm2.shared_info.write().unwrap().vmm_version = "1.0.1".to_string();
             vmm2.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
             assert!(vmm2
-                .resume_from_snapshot(snapshot_filename.clone(), mem_file_path.clone())
+                .resume_from_snapshot(image_path.to_string(), mem_path.to_string())
                 .is_err());
             vmm2.shared_info.write().unwrap().state = InstanceState::Uninitialized;
             assert!(vmm2
-                .resume_from_snapshot(snapshot_filename.clone(), mem_file_path.clone())
+                .resume_from_snapshot(image_path.to_string(), mem_path.to_string())
                 .is_ok());
             let stdin_handle = io::stdin();
             stdin_handle.lock().set_canon_mode().unwrap();
             // Kill vcpus and join spawned threads.
             vmm2.kill_vcpus().expect("failed to kill vcpus");
         }
+        vmm2
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn microvm_pause_and_resume_from_shared_snapshot() {
+        let microvm_id = String::from("pause_resume_test");
+        // Create microVM and snapshot it.
+        let snapshot_filename = tmp_path();
+        let mem_file_path = tmp_path();
+        create_and_snapshot_microvm(
+            microvm_id.clone(),
+            snapshot_filename.clone(),
+            mem_file_path.clone(),
+            None,
+        );
+
+        // Wait a bit to make sure all the kvm resources associated with this thread are released.
+        thread::sleep(Duration::from_millis(100));
+        resume_from_snapshot(&microvm_id, &snapshot_filename, &mem_file_path);
+
+        std::fs::remove_file(snapshot_filename).expect("failed to delete snapshot");
+        std::fs::remove_file(mem_file_path).expect("failed to delete memfile");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn microvm_pause_and_resume_from_overlay_snapshot() {
+        let microvm_id = String::from("pause_resume_test");
+        // Create microVM and snapshot it.
+        let snapshot_filename = tmp_path();
+        let mem_file_path = tmp_path();
+        let mem_overlay_path = tmp_path();
+        create_and_snapshot_microvm(
+            microvm_id.clone(),
+            snapshot_filename.clone(),
+            mem_file_path.clone(),
+            Some(mem_overlay_path.clone()),
+        );
+
+        // Wait a bit to make sure all the kvm resources associated with this thread are released.
+        thread::sleep(Duration::from_millis(100));
+        {
+            let mut vmm2 = resume_from_snapshot(&microvm_id, &snapshot_filename, &mem_overlay_path);
+            // Next we should be able to re-snapshot the new VM to make an overlay
+            assert!(vmm2
+                .pause_to_snapshot(snapshot_filename.clone(), Some(mem_overlay_path.clone()))
+                .is_ok());
+        }
+
         std::fs::remove_file(snapshot_filename).expect("failed to delete snapshot");
         std::fs::remove_file(mem_file_path).expect("failed to delete memfile");
     }

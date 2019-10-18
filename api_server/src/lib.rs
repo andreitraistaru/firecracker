@@ -77,7 +77,7 @@ pub enum VmmAction {
     /// Pause the microVM, save its state and memory to the specified files and end this
     /// Firecracker process.
     #[cfg(target_arch = "x86_64")]
-    PauseToSnapshot(String, String),
+    PauseToSnapshot(String, Option<String>),
     /// Pause the microVM VCPUs, effectively pausing the guest.
     PauseVCPUs,
     /// Update the size of an existing block device specified by an ID. The ID is the first data

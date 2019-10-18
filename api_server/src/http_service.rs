@@ -1242,7 +1242,10 @@ mod tests {
                 let (sender, receiver) = oneshot::channel();
                 assert!(pr.eq(&ParsedRequest::Sync(
                     VmmRequest::new(
-                        VmmAction::PauseToSnapshot("/foo/img".to_string(), "/foo/mem".to_string()),
+                        VmmAction::PauseToSnapshot(
+                            "/foo/img".to_string(),
+                            Some("/foo/mem".to_string())
+                        ),
                         sender
                     ),
                     receiver,

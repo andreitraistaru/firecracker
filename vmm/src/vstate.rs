@@ -233,7 +233,9 @@ impl Vm {
             .with_regions(|index, guest_addr, size, host_addr| {
                 info!("Guest memory starts at {:x?}", host_addr);
 
-                // mbrooker: Force logging dirty pages to enable snapshots for now.
+                // Force logging dirty pages to enable incremental snapshots.
+                // TODO: Consider adding a flag to allow users to disable the ability to take
+                // incremental snapshots, and then only turn this on as needed.
                 let flags = KVM_MEM_LOG_DIRTY_PAGES;
 
                 let memory_region = kvm_userspace_memory_region {

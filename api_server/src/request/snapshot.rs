@@ -14,7 +14,7 @@ use request::{IntoParsedRequest, ParsedRequest};
 #[serde(deny_unknown_fields)]
 pub struct SnapshotCreateConfig {
     snapshot_path: String,
-    mem_file_path: String,
+    mem_file_path: Option<String>,
 }
 
 // We use Serde to transform each associated json body into this.
@@ -76,6 +76,39 @@ mod tests {
         // Test SnapshotCreateCfg.
         {
             let json = r#"{
+                "snapshot_path": "/foo/bar"
+            }"#;
+
+            let (sender, receiver) = oneshot::channel();
+            let req: ParsedRequest = ParsedRequest::Sync(
+                VmmRequest::new(
+                    VmmAction::PauseToSnapshot("/foo/bar".to_string(), None),
+                    sender,
+                ),
+                receiver,
+            );
+            let result: Result<SnapshotCreateConfig, serde_json::Error> =
+                serde_json::from_str(json);
+            assert!(result.is_ok());
+            assert!(result
+                .unwrap()
+                .into_parsed_request(None, Method::Put)
+                .unwrap()
+                .eq(&req));
+
+            // Invalid method
+            match serde_json::from_str::<SnapshotCreateConfig>(json)
+                .unwrap()
+                .into_parsed_request(None, Method::Get)
+            {
+                Ok(_) => unreachable!(),
+                Err(e) => assert_eq!(e, String::from("Invalid method.")),
+            };
+        }
+
+        // Test SnapshotCreateCfg with mem_file_path
+        {
+            let json = r#"{
                 "snapshot_path": "/foo/bar",
                 "mem_file_path": "/foo/mem"
             }"#;
@@ -83,7 +116,10 @@ mod tests {
             let (sender, receiver) = oneshot::channel();
             let req: ParsedRequest = ParsedRequest::Sync(
                 VmmRequest::new(
-                    VmmAction::PauseToSnapshot("/foo/bar".to_string(), "/foo/mem".to_string()),
+                    VmmAction::PauseToSnapshot(
+                        "/foo/bar".to_string(),
+                        Some("/foo/mem".to_string()),
+                    ),
                     sender,
                 ),
                 receiver,

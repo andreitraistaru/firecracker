@@ -60,4 +60,6 @@ pub use guest_address::GuestAddress;
 pub use guest_memory::Error as GuestMemoryError;
 pub use guest_memory::GuestMemory;
 pub use guest_memory::MemoryRegion;
-pub use mmap::{AnonMemoryDesc, Error as MemoryMappingError, FileMemoryDesc, MemoryMapping};
+pub use mmap::{
+    AnonMemoryDesc, Bitmap, Error as MemoryMappingError, FileMemoryDesc, MemoryMapping,
+};

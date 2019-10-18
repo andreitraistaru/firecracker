@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::{mem, result};
 
 use guest_address::GuestAddress;
-use mmap::{self, AnonMemoryDesc, FileMemoryDesc, MemoryMapping};
+use mmap::{self, AnonMemoryDesc, Bitmap, FileMemoryDesc, MemoryMapping};
 use DataInit;
 
 /// Errors associated with handling guest memory regions.
@@ -62,6 +62,11 @@ impl MemoryRegion {
     /// Returns the size of the memory region in bytes.
     pub fn size(&self) -> usize {
         self.mapping.size()
+    }
+
+    /// Returns the dirty bitmap for this region
+    pub fn get_dirty_bitmap(&self) -> mmap::Bitmap {
+        self.mapping.get_dirty_bitmap()
     }
 }
 
@@ -311,6 +316,23 @@ impl GuestMemory {
                 region.guest_base,
                 region.mapping.size(),
                 region.mapping.as_ptr() as usize,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Perform the specified action on each region's addresses mutably, including the dirty
+    /// bitmap for each region.
+    pub fn with_regions_bitmaps_mut<F, E>(&self, mut cb: F) -> result::Result<(), E>
+    where
+        F: FnMut(usize, GuestAddress, usize, Bitmap) -> result::Result<(), E>,
+    {
+        for (index, region) in self.regions.iter().enumerate() {
+            cb(
+                index,
+                region.guest_base,
+                region.mapping.size(),
+                region.mapping.get_dirty_bitmap(),
             )?;
         }
         Ok(())
