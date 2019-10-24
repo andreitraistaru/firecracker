@@ -212,13 +212,13 @@ dependencies = [
 
 [[package]]
 name = "firecracker"
-version = "1.0.1"
+version = "1.1.1"
 dependencies = [
  "api_server 0.1.0",
  "backtrace 0.3.35 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap 2.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "fc_util 0.1.0",
- "jailer 1.0.1",
+ "jailer 1.1.1",
  "logger 0.1.0",
  "mmds 0.1.0",
  "seccomp 0.1.0",
@@ -321,7 +321,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "jailer"
-version = "1.0.1"
+version = "1.1.1"
 dependencies = [
  "clap 2.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "fc_util 0.1.0",
@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "kvm-bindings"
 version = "0.1.1"
-source = "git+https://github.com/aghecenco/kvm-bindings?branch=serde_dev#78e4a7fd7a6fc04e2de090652a4995e9e266fa1b"
+source = "git+https://github.com/aghecenco/kvm-bindings?branch=serde_dev#3d22f54ebfe427f9153b16e38fe8b1ba0d9d67ae"
 dependencies = [
  "libc 0.2.62 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.100 (registry+https://github.com/rust-lang/crates.io-index)",

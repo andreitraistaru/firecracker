@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed a deserialization issue that could cause Firecracker to crash while
+  attempting to load a corrupt snapshot file.
+
 ## [1.1.1]
 
 ### Added
@@ -15,8 +22,8 @@
 ### Changed
 
 - Vsock API call: `PUT /vsocks/{id}` changed to `PUT /vsock` and no longer
-  appear to support multiple vsock devices. Any subsequent calls to this API endpoint
-  will override the previous vsock device configuration.
+  appear to support multiple vsock devices. Any subsequent calls to this API
+  endpoint will override the previous vsock device configuration.
 - Removed unused 'Halting' and 'Halted' instance states and added
   new 'Configuring' state where the microVM resources have been
   partially or fully configured, but the microVM has not been yet
