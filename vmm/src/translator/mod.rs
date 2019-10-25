@@ -47,7 +47,7 @@ pub fn create_snapshot_translator(
 
 #[cfg(test)]
 mod tests {
-    use snapshot::{MicrovmState, SnapshotHdr, Version};
+    use snapshot::{MicrovmState, SnapshotHdr, Version, VmInfo};
     use std::path::PathBuf;
     use std::{fs, io};
     use translator::*;
@@ -201,5 +201,100 @@ mod tests {
             let current_snapshot_bytes = maybe_current_snapshot_bytes.unwrap();
             assert_eq!(&current_snapshot_bytes, old_snapshot_bytes);
         }
+    }
+
+    /// This test generates invalid binary snapshots based on the current binary snapshot saved
+    /// in the `resources` directory. The test verifies that deserialization of a corrupt
+    /// snapshot fails gracefully.
+    ///
+    /// The valid snapshot is corrupted in several ways:
+    /// 1. Truncated to s smaller size
+    /// 2. Extended to a larger size
+    /// 3. Serialized byte array corresponding to a FFI structure (`kvm_pit_state`) is modified
+    ///    so as to have `length=0`
+    ///
+    #[test]
+    fn test_invalid_binary_snapshots() {
+        let vmm_crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let resources_path = vmm_crate_path.join("src/translator/resources");
+
+        // Read the current snapshot bytes.
+        let mut current_snapshot_bytes =
+            fs::read(&resources_path.join("current/binary-vm-snapshot")).unwrap();
+
+        // Build the translator. We'll use a single version.
+        let current_snapshot_hdr =
+            bincode::deserialize::<SnapshotHdr>(&current_snapshot_bytes).unwrap();
+        let translator = create_snapshot_translator(
+            current_snapshot_hdr.app_version(),
+            current_snapshot_hdr.app_version(),
+        )
+        .unwrap();
+
+        // Attempt to deserialize fewer.
+        let truncated_snapshot_bytes =
+            &current_snapshot_bytes.clone()[..current_snapshot_bytes.len() / 2];
+        let ret = translator.deserialize(truncated_snapshot_bytes);
+        assert!(ret.is_err());
+        assert_eq!(
+            format!("{}", ret.err().unwrap()),
+            format!(
+                "Failed to deserialize: {}",
+                bincode::Error::from(bincode::ErrorKind::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "",
+                )))
+            )
+        );
+
+        // Attempt to deserialize more.
+        let extended_snapshot_bytes = &mut current_snapshot_bytes.clone();
+        extended_snapshot_bytes.extend_from_slice(vec![42u8; 100].as_slice());
+        let ret = translator.deserialize(truncated_snapshot_bytes);
+        assert!(ret.is_err());
+        assert_eq!(
+            format!("{}", ret.err().unwrap()),
+            format!(
+                "Failed to deserialize: {}",
+                bincode::Error::from(bincode::ErrorKind::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "",
+                )))
+            )
+        );
+
+        // Corrupt a serialized array.
+
+        // Skip past the header and VM info.
+        let serialized_snapshot_hdr_size =
+            bincode::serialize(&SnapshotHdr::new(Version::new(0, 0, 0)))
+                .unwrap()
+                .len();
+        let serialized_vm_info_size = bincode::serialize(&VmInfo::new(0)).unwrap().len();
+
+        // `bincode` serializes data structures sequentially, so the `VmState` is next.
+        {
+            let vmstate_bytes = &mut current_snapshot_bytes
+                [serialized_snapshot_hdr_size + serialized_vm_info_size..];
+            let size_len = std::mem::size_of::<usize>();
+            let kvm_pit_state2_len_bytes = &mut vmstate_bytes[..size_len];
+
+            // First member is a `kvm_pit_state2`. This is a FFI object; to serialize it, the bytes
+            // that compose it are directly passed to `bincode` as a `&[u8]`. `bincode` encodes slices
+            // by saving the length first, as an `usize`, then each element.
+            // Replacing the length of `kvm_pit_state2`'s byte representation should result in an error.
+            kvm_pit_state2_len_bytes.copy_from_slice(vec![0u8; size_len].as_slice());
+        }
+
+        let ret = translator.deserialize(&current_snapshot_bytes);
+        assert_eq!(
+            format!("{}", ret.err().unwrap()),
+            format!(
+                "Failed to deserialize: {}",
+                bincode::Error::from(bincode::ErrorKind::Custom(
+                    "Incomplete buffer: size 0".to_string()
+                ))
+            )
+        );
     }
 }
