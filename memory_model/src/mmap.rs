@@ -201,20 +201,16 @@ impl MemoryMapping {
 
     /// Get a copy of the dirty bitmap for this region
     pub fn get_dirty_bitmap(&self) -> Bitmap {
-        let lck = match self.dirty_areas.lock() {
-            Ok(l) => l,
-            Err(l_e) => l_e.into_inner(),
-        };
-        lck.clone()
+        // This unwrap() is OK because the only reason it would fail is because another thread
+        // panicked while holding this lock, in which case the FC process would be dead anyway.
+        self.dirty_areas.lock().unwrap().clone()
     }
 
     /// Mark the pages dirty in the range from `offset` to `offset+len`
     fn mark_areas_dirty(&self, offset: usize, len: usize) {
-        let mut lck = match self.dirty_areas.lock() {
-            Ok(l) => l,
-            Err(l_e) => l_e.into_inner(),
-        };
-        lck.set_addr_range(offset, len);
+        // This unwrap() is OK because the only reason it would fail is because another thread
+        // panicked while holding this lock, in which case the FC process would be dead anyway.
+        self.dirty_areas.lock().unwrap().set_addr_range(offset, len);
     }
 
     /// Writes a slice to the memory region at the specified offset.
@@ -542,11 +538,15 @@ impl Bitmap {
         }
     }
 
-    /// Is bit `n` set?
-    /// If `n` isn't in the range of the bitmap, this will panic.
+    /// Is bit `n` set? Bits outside the range of the bitmap are always unset.
     #[inline]
     fn is_bit_set(&self, n: usize) -> bool {
-        (self.map[n >> 6] & (1 << (n & 63))) != 0
+        if n <= self.size {
+            (self.map[n >> 6] & (1 << (n & 63))) != 0
+        } else {
+            // Out-of-range bits are always unset.
+            false
+        }
     }
 
     /// Is the bit corresponding to address `addr` set?
@@ -559,6 +559,10 @@ impl Bitmap {
         let first_bit = start_addr / self.page_size;
         let page_count = (len + self.page_size - 1) / self.page_size;
         for n in first_bit..(first_bit + page_count) {
+            if n > self.size {
+                // Attempts to set bits beyond the end of the bitmap are simply ignored.
+                break;
+            }
             self.map[n >> 6] |= 1 << (n & 63);
         }
     }
@@ -605,6 +609,16 @@ mod tests {
         assert!(b.is_addr_set(128));
         assert!(b.is_addr_set(256));
         assert!(!b.is_addr_set(384));
+    }
+
+    #[test]
+    fn bitmap_out_of_range() {
+        let mut b = Bitmap::new(1024, 128);
+        // Set a partial range that goes beyond the end of the bitmap
+        b.set_addr_range(768, 512);
+        assert!(b.is_addr_set(768));
+        // The bitmap is never set beyond its end
+        assert!(!b.is_addr_set(1152));
     }
 
     #[test]
