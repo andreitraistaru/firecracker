@@ -36,7 +36,7 @@ use kvm_bindings::{
     kvm_pit_state2, kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave,
     KVM_PIT_SPEAKER_DUMMY,
 };
-use logger::{Metric, METRICS};
+use logger::{LogOption, Metric, LOGGER, METRICS};
 use memory_model::{GuestAddress, GuestMemory, GuestMemoryError};
 use sys_util::{register_vcpu_signal_handler, EventFd, Killable};
 #[cfg(target_arch = "x86_64")]
@@ -224,19 +224,26 @@ impl Vm {
         &self.supported_msrs
     }
 
+    /// Get the memory flags to pass to KVM
+    fn get_memory_flags(&self, guest_mem: &GuestMemory) -> u32 {
+        let dirty_page_metrics = LOGGER.flags() & LogOption::LogDirtyPages as usize > 0;
+        let dirty_page_tracking = guest_mem.tracking_dirty_pages();
+        if dirty_page_metrics | dirty_page_tracking {
+            KVM_MEM_LOG_DIRTY_PAGES
+        } else {
+            0
+        }
+    }
+
     /// Initializes the guest memory.
     pub fn memory_init(&mut self, guest_mem: GuestMemory, kvm_context: &KvmContext) -> Result<()> {
         if guest_mem.num_regions() > kvm_context.max_memslots() {
             return Err(Error::NotEnoughMemorySlots);
         }
+        let flags = self.get_memory_flags(&guest_mem);
         guest_mem
             .with_regions(|index, guest_addr, size, host_addr| {
                 info!("Guest memory starts at {:x?}", host_addr);
-
-                // Force logging dirty pages to enable incremental snapshots.
-                // TODO: Consider adding a flag to allow users to disable the ability to take
-                // incremental snapshots, and then only turn this on as needed.
-                let flags = KVM_MEM_LOG_DIRTY_PAGES;
 
                 let memory_region = kvm_userspace_memory_region {
                     slot: index as u32,
@@ -1278,7 +1285,7 @@ mod tests {
     // Auxiliary function being used throughout the tests.
     fn setup_vcpu() -> (Vm, Vcpu) {
         let kvm = KvmContext::new().unwrap();
-        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], false).unwrap();
         let mut vm = Vm::new(kvm.fd()).expect("Cannot create new vm");
         assert!(vm.memory_init(gm, &kvm).is_ok());
 
@@ -1307,7 +1314,8 @@ mod tests {
     fn setup_vcpu_handler() -> (Vm, VcpuHandle, EventFd) {
         let kvm = KvmContext::new().unwrap();
         let mem_size = 64 << 20;
-        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), mem_size)]).unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), mem_size)], false).unwrap();
+        assert_eq!(gm.tracking_dirty_pages(), false);
         let mut vm = Vm::new(kvm.fd()).expect("Cannot create new vm");
         assert!(vm.memory_init(gm, &kvm).is_ok());
 
@@ -1355,7 +1363,8 @@ mod tests {
     #[test]
     fn test_vm_memory_init() {
         let kvm = KvmContext::new().unwrap();
-        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)], true).unwrap();
+        assert_eq!(gm.tracking_dirty_pages(), true);
         let mut vm = Vm::new(kvm.fd()).expect("Cannot create new vm");
         assert!(vm.memory_init(gm, &kvm).is_ok());
         let obj_addr = GuestAddress(0xf0);
@@ -1376,8 +1385,11 @@ mod tests {
         };
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
-        let gm = GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
-            .unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(
+            &[(start_addr1, 0x1000), (start_addr2, 0x1000)],
+            true,
+        )
+        .unwrap();
         assert!(vm.memory_init(gm, &kvm).is_err());
     }
 

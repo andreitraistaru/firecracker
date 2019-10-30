@@ -86,7 +86,7 @@ pub enum VmmAction {
     RescanBlockDevice(String),
     /// Load the microVM state from the snapshot file and resume its operation.
     #[cfg(target_arch = "x86_64")]
-    ResumeFromSnapshot(String, String),
+    ResumeFromSnapshot(String, String, Option<bool>),
     /// Resume the microVM VCPUs, thus resuming a paused guest.
     ResumeVCPUs,
     /// Set the microVM configuration (memory & vcpu) using `VmConfig` as input. This

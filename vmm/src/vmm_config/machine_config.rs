@@ -71,6 +71,9 @@ pub struct VmConfig {
     /// Specifies if the memory is mapped shared or private.
     #[serde(skip)]
     pub shared_mem: bool,
+    /// Enables or disables dirty page tracking. Enabling allows incremental snapshots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_dirty_pages: Option<bool>,
 }
 
 impl Default for VmConfig {
@@ -82,6 +85,7 @@ impl Default for VmConfig {
             cpu_template: None,
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: Some(false),
         }
     }
 }

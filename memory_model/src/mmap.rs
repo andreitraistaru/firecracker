@@ -111,7 +111,7 @@ pub struct MemoryMapping {
     size: usize,
     // `dirty_areas` tracks the areas of memory which have been written to through the
     // `MemoryMapping` interface.
-    dirty_areas: Mutex<Bitmap>,
+    dirty_areas: Option<Mutex<Bitmap>>,
 }
 
 // Send and Sync aren't automatically inherited for the raw address pointer.
@@ -126,7 +126,10 @@ impl MemoryMapping {
     ///
     /// # Arguments
     /// * `descriptor` - `FileMemoryDesc` describing mapping details.
-    pub fn new_file_backed(descriptor: &FileMemoryDesc) -> Result<MemoryMapping> {
+    pub fn new_file_backed(
+        descriptor: &FileMemoryDesc,
+        track_dirty_pages: bool,
+    ) -> Result<MemoryMapping> {
         let addr = unsafe {
             libc::mmap(
                 null_mut(),
@@ -145,10 +148,16 @@ impl MemoryMapping {
         if addr == libc::MAP_FAILED {
             return Err(Error::SystemCallFailed(io::Error::last_os_error()));
         }
+        // If we're tracking dirty pages, then create the bitmap that does the tracking
+        let dirty_areas = if track_dirty_pages {
+            Some(Mutex::new(Bitmap::new(descriptor.size, 4096)))
+        } else {
+            None
+        };
         Ok(MemoryMapping {
             addr: addr as *mut u8,
             size: descriptor.size,
-            dirty_areas: Mutex::new(Bitmap::new(descriptor.size, 4096)),
+            dirty_areas,
         })
     }
 
@@ -156,7 +165,7 @@ impl MemoryMapping {
     ///
     /// # Arguments
     /// * `size` - Size of the memory mapping.
-    pub fn new_anon(size: usize) -> Result<MemoryMapping> {
+    pub fn new_anon(size: usize, track_dirty_pages: bool) -> Result<MemoryMapping> {
         let addr = unsafe {
             libc::mmap(
                 null_mut(),
@@ -170,10 +179,16 @@ impl MemoryMapping {
         if addr == libc::MAP_FAILED {
             return Err(Error::SystemCallFailed(io::Error::last_os_error()));
         }
+        // If we're tracking dirty pages, then create the bitmap that does the tracking
+        let dirty_areas = if track_dirty_pages {
+            Some(Mutex::new(Bitmap::new(size, 4096)))
+        } else {
+            None
+        };
         Ok(MemoryMapping {
             addr: addr as *mut u8,
             size,
-            dirty_areas: Mutex::new(Bitmap::new(size, 4096)),
+            dirty_areas,
         })
     }
 
@@ -200,17 +215,23 @@ impl MemoryMapping {
     }
 
     /// Get a copy of the dirty bitmap for this region
-    pub fn get_dirty_bitmap(&self) -> Bitmap {
+    pub fn get_dirty_bitmap(&self) -> Option<Bitmap> {
         // This unwrap() is OK because the only reason it would fail is because another thread
         // panicked while holding this lock, in which case the FC process would be dead anyway.
-        self.dirty_areas.lock().unwrap().clone()
+        if let Some(dirty_areas) = &self.dirty_areas {
+            Some(dirty_areas.lock().unwrap().clone())
+        } else {
+            None
+        }
     }
 
     /// Mark the pages dirty in the range from `offset` to `offset+len`
     fn mark_areas_dirty(&self, offset: usize, len: usize) {
         // This unwrap() is OK because the only reason it would fail is because another thread
         // panicked while holding this lock, in which case the FC process would be dead anyway.
-        self.dirty_areas.lock().unwrap().set_addr_range(offset, len);
+        if let Some(dirty_areas) = &self.dirty_areas {
+            dirty_areas.lock().unwrap().set_addr_range(offset, len);
+        }
     }
 
     /// Writes a slice to the memory region at the specified offset.
@@ -223,7 +244,7 @@ impl MemoryMapping {
     ///
     /// ```
     /// #   use memory_model::MemoryMapping;
-    /// #   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
+    /// #   let mut mem_map = MemoryMapping::new_anon(1024, true).unwrap();
     ///     let res = mem_map.write_slice(&[1,2,3,4,5], 256);
     ///     assert!(res.is_ok());
     ///     assert_eq!(res.unwrap(), 5);
@@ -252,7 +273,7 @@ impl MemoryMapping {
     ///
     /// ```
     /// #   use memory_model::MemoryMapping;
-    /// #   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
+    /// #   let mut mem_map = MemoryMapping::new_anon(1024, true).unwrap();
     ///     let buf = &mut [0u8; 16];
     ///     let res = mem_map.read_slice(buf, 256);
     ///     assert!(res.is_ok());
@@ -279,7 +300,7 @@ impl MemoryMapping {
     ///
     /// ```
     /// #   use memory_model::MemoryMapping;
-    /// #   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
+    /// #   let mut mem_map = MemoryMapping::new_anon(1024, true).unwrap();
     ///     let res = mem_map.write_obj(55u64, 16);
     ///     assert!(res.is_ok());
     /// ```
@@ -308,7 +329,7 @@ impl MemoryMapping {
     ///
     /// ```
     /// #   use memory_model::MemoryMapping;
-    /// #   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
+    /// #   let mut mem_map = MemoryMapping::new_anon(1024, true).unwrap();
     ///     let res = mem_map.write_obj(55u64, 32);
     ///     assert!(res.is_ok());
     ///     let num: u64 = mem_map.read_obj(32).unwrap();
@@ -344,7 +365,7 @@ impl MemoryMapping {
     /// # use std::fs::File;
     /// # use std::path::Path;
     /// # fn test_read_random() -> Result<u32, ()> {
-    /// #     let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
+    /// #     let mut mem_map = MemoryMapping::new_anon(1024, true).unwrap();
     ///       let mut file = File::open(Path::new("/dev/urandom")).map_err(|_| ())?;
     ///       mem_map.read_to_memory(32, &mut file, 128).map_err(|_| ())?;
     ///       let rand_val: u32 =  mem_map.read_obj(40).map_err(|_| ())?;
@@ -386,7 +407,7 @@ impl MemoryMapping {
     /// # use std::fs::File;
     /// # use std::path::Path;
     /// # fn test_write_null() -> Result<(), ()> {
-    /// #     let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
+    /// #     let mut mem_map = MemoryMapping::new_anon(1024, true).unwrap();
     ///       let mut file = File::open(Path::new("/dev/null")).map_err(|_| ())?;
     ///       mem_map.write_from_memory(32, &mut file, 128).map_err(|_| ())?;
     /// #     Ok(())
@@ -444,7 +465,7 @@ impl MemoryMapping {
     /// # use memory_model::MemoryMapping;
     /// # fn test_dontneed_range() -> Result<(), ()> {
     ///   // Function use for shared anonymous mappings.
-    ///   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
+    ///   let mut mem_map = MemoryMapping::new_anon(1024, true).unwrap();
     ///   assert!(mem_map.write_obj(123u32, 0).is_ok());
     /// # assert_eq!(mem_map.read_obj::<u32>(32).unwrap(), 123u32);
     ///   assert!(mem_map.madvise_range(0, 32, libc::MADV_DONTNEED).is_ok());
@@ -455,7 +476,7 @@ impl MemoryMapping {
     /// # }
     ///
     /// # fn test_remove_range() -> Result<(), ()> {
-    ///   let mut mem_map = MemoryMapping::new_anon(1024).unwrap();
+    ///   let mut mem_map = MemoryMapping::new_anon(1024, true).unwrap();
     ///   assert!(mem_map.write_obj(123u32, 0).is_ok());
     ///   assert!(mem_map.madvise_range(0, 32, libc::MADV_REMOVE).is_ok());
     ///   // The kernel is now advised that the first 32 bytes of `mem_map` can be removed.
@@ -623,13 +644,13 @@ mod tests {
 
     #[test]
     fn basic_map() {
-        let m = MemoryMapping::new_anon(1024).unwrap();
+        let m = MemoryMapping::new_anon(1024, true).unwrap();
         assert_eq!(1024, m.size());
     }
 
     #[test]
     fn map_invalid_size() {
-        let res = MemoryMapping::new_anon(0);
+        let res = MemoryMapping::new_anon(0, true);
         match res {
             Ok(_) => panic!("should panic!"),
             Err(err) => {
@@ -644,7 +665,7 @@ mod tests {
 
     #[test]
     fn test_write_past_end() {
-        let m = MemoryMapping::new_anon(5).unwrap();
+        let m = MemoryMapping::new_anon(5, true).unwrap();
         let res = m.write_slice(&[1, 2, 3, 4, 5, 6], 0);
         assert!(res.is_ok());
         assert_eq!(res.unwrap(), 5);
@@ -652,7 +673,7 @@ mod tests {
 
     #[test]
     fn slice_read_and_write() {
-        let mem_map = MemoryMapping::new_anon(5).unwrap();
+        let mem_map = MemoryMapping::new_anon(5, true).unwrap();
         let sample_buf = [1, 2, 3];
         assert!(mem_map.write_slice(&sample_buf, 5).is_err());
         assert!(mem_map.write_slice(&sample_buf, 2).is_ok());
@@ -664,7 +685,7 @@ mod tests {
 
     #[test]
     fn obj_read_and_write() {
-        let mem_map = MemoryMapping::new_anon(5).unwrap();
+        let mem_map = MemoryMapping::new_anon(5, true).unwrap();
         assert!(mem_map.write_obj(55u16, 4).is_err());
         assert!(mem_map.write_obj(55u16, core::usize::MAX).is_err());
         assert!(mem_map.write_obj(55u16, 2).is_ok());
@@ -675,7 +696,7 @@ mod tests {
 
     #[test]
     fn test_unsupported_madvise() {
-        let mem_map = MemoryMapping::new_anon(1024).unwrap();
+        let mem_map = MemoryMapping::new_anon(1024, false).unwrap();
         let unsupported_madvises = vec![
             libc::MADV_DODUMP,
             libc::MADV_DOFORK,
@@ -702,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_remove_range() {
-        let mem_map = MemoryMapping::new_anon(1024).unwrap();
+        let mem_map = MemoryMapping::new_anon(1024, false).unwrap();
 
         // This should fail, since it's out of the mapping's bounds.
         assert_match!(
@@ -733,7 +754,7 @@ mod tests {
 
     #[test]
     fn test_dontneed_range() {
-        let mem_map = MemoryMapping::new_anon(1024).unwrap();
+        let mem_map = MemoryMapping::new_anon(1024, false).unwrap();
 
         // This should fail, since it's out of the mapping's bounds.
         assert_match!(
@@ -771,7 +792,7 @@ mod tests {
 
     #[test]
     fn test_range_end() {
-        let mm = MemoryMapping::new_anon(123).unwrap();
+        let mm = MemoryMapping::new_anon(123, false).unwrap();
 
         // This should work, since 50 + 50 < 123.
         assert_match!(mm.range_end(50, 50), Ok(100));
@@ -782,22 +803,22 @@ mod tests {
 
     #[test]
     fn test_dirty_bitmap() {
-        let mem_map = MemoryMapping::new_anon(4096 * 3).unwrap();
+        let mem_map = MemoryMapping::new_anon(4096 * 3, true).unwrap();
         // write_obj should dirty the bitmap
-        assert!(!mem_map.get_dirty_bitmap().is_addr_set(0));
+        assert!(!mem_map.get_dirty_bitmap().unwrap().is_addr_set(0));
         assert!(mem_map.write_obj(55u16, 2).is_ok());
-        assert!(mem_map.get_dirty_bitmap().is_addr_set(0));
+        assert!(mem_map.get_dirty_bitmap().unwrap().is_addr_set(0));
 
         // write_slice should dirty the bitmap
         let sample_buf = [1, 2, 3];
-        assert!(!mem_map.get_dirty_bitmap().is_addr_set(4096));
+        assert!(!mem_map.get_dirty_bitmap().unwrap().is_addr_set(4096));
         assert!(mem_map.write_slice(&sample_buf, 4096).is_ok());
-        assert!(mem_map.get_dirty_bitmap().is_addr_set(4096));
+        assert!(mem_map.get_dirty_bitmap().unwrap().is_addr_set(4096));
     }
 
     #[test]
     fn mem_read_and_write() {
-        let mem_map = MemoryMapping::new_anon(5).unwrap();
+        let mem_map = MemoryMapping::new_anon(5, false).unwrap();
         assert!(mem_map.write_obj(!0u32, 1).is_ok());
         let mut file = File::open(Path::new("/dev/zero")).unwrap();
         assert!(mem_map

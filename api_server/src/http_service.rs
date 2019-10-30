@@ -378,6 +378,7 @@ fn parse_machine_config_req<'a>(
                 cpu_template: None,
                 mem_file_path: None,
                 shared_mem: false,
+                track_dirty_pages: None,
             };
             Ok(empty_machine_config
                 .into_parsed_request(None, method)
@@ -1205,7 +1206,8 @@ mod tests {
         let snapshot_load_json = Chunk::from(
             r#"{
                 "snapshot_path": "/foo/img",
-                "mem_file_path": "/foo/mem"
+                "mem_file_path": "/foo/mem",
+                "track_dirty_pages": true
               }"#,
         );
 
@@ -1263,7 +1265,8 @@ mod tests {
                     VmmRequest::new(
                         VmmAction::ResumeFromSnapshot(
                             "/foo/img".to_string(),
-                            "/foo/mem".to_string()
+                            "/foo/mem".to_string(),
+                            Some(true)
                         ),
                         sender
                     ),
@@ -1479,7 +1482,8 @@ mod tests {
                 \"vcpu_count\": 32,
                 \"mem_size_mib\": 1025,
                 \"ht_enabled\": true,
-                \"cpu_template\": \"T2\"
+                \"cpu_template\": \"T2\",
+                \"track_dirty_pages\": true
               }";
         let body: Chunk = Chunk::from(json);
 
@@ -1499,6 +1503,7 @@ mod tests {
             cpu_template: Some(CpuFeaturesTemplate::T2),
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: Some(true),
         };
 
         assert!(vm_config
@@ -1514,6 +1519,7 @@ mod tests {
             cpu_template: None,
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: None,
         };
         let body = r#"{
             "vcpu_count": 32

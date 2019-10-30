@@ -16,6 +16,7 @@ impl GenerateHyperResponse for VmConfig {
         let vcpu_count = self.vcpu_count.unwrap_or(1);
         let mem_size = self.mem_size_mib.unwrap_or(128);
         let ht_enabled = self.ht_enabled.unwrap_or(false);
+        let track_dirty_pages = self.track_dirty_pages.unwrap_or(false);
         let cpu_template = self
             .cpu_template
             .map_or("Uninitialized".to_string(), |c| c.to_string());
@@ -27,8 +28,8 @@ impl GenerateHyperResponse for VmConfig {
         json_response(
             StatusCode::Ok,
             format!(
-                "{{ \"vcpu_count\": {:?}, \"mem_size_mib\": {:?},  \"ht_enabled\": {:?},  \"cpu_template\": {:?}, \"mem_file_path\": {:?} }}",
-                vcpu_count, mem_size, ht_enabled, cpu_template, mem_file_path
+                "{{ \"vcpu_count\": {:?}, \"mem_size_mib\": {:?},  \"ht_enabled\": {:?},  \"cpu_template\": {:?}, \"mem_file_path\": {:?}, \"track_dirty_pages\": {:?} }}",
+                vcpu_count, mem_size, ht_enabled, cpu_template, mem_file_path, track_dirty_pages,
             ),
         )
     }
@@ -52,6 +53,7 @@ impl IntoParsedRequest for VmConfig {
                     && self.cpu_template.is_none()
                     && self.ht_enabled.is_none()
                     && self.mem_file_path.is_none()
+                    && self.track_dirty_pages.is_none()
                 {
                     return Err(String::from("Empty PATCH request."));
                 }
@@ -95,6 +97,7 @@ mod tests {
             cpu_template: Some(CpuFeaturesTemplate::T2),
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: Some(true),
         };
         let (sender, receiver) = oneshot::channel();
         assert!(body
@@ -112,6 +115,7 @@ mod tests {
             cpu_template: None,
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: None,
         };
         assert!(uninitialized
             .clone()
@@ -132,6 +136,7 @@ mod tests {
             cpu_template: Some(CpuFeaturesTemplate::T2),
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: None,
         };
         if let Err(e) = body.clone().into_parsed_request(None, Method::Put) {
             assert_eq!(e, String::from("Missing mandatory fields."));

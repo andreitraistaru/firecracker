@@ -65,7 +65,7 @@ impl MemoryRegion {
     }
 
     /// Returns the dirty bitmap for this region
-    pub fn get_dirty_bitmap(&self) -> mmap::Bitmap {
+    pub fn get_dirty_bitmap(&self) -> Option<mmap::Bitmap> {
         self.mapping.get_dirty_bitmap()
     }
 }
@@ -79,6 +79,7 @@ fn region_end(region: &MemoryRegion) -> GuestAddress {
 #[derive(Clone)]
 pub struct GuestMemory {
     regions: Arc<Vec<MemoryRegion>>,
+    track_dirty_pages: bool,
 }
 
 impl GuestMemory {
@@ -86,7 +87,10 @@ impl GuestMemory {
     ///
     /// # Arguments
     /// * `ranges` - a slice of `FileMemoryDesc` describing the guest memory mappings.
-    pub fn new_file_backed(ranges: &[FileMemoryDesc]) -> Result<GuestMemory> {
+    pub fn new_file_backed(
+        ranges: &[FileMemoryDesc],
+        track_dirty_pages: bool,
+    ) -> Result<GuestMemory> {
         if ranges.is_empty() {
             return Err(Error::NoMemoryRegions);
         }
@@ -103,8 +107,8 @@ impl GuestMemory {
 
         let mut regions = Vec::<MemoryRegion>::with_capacity(ranges.len());
         for range in ranges {
-            let mapping =
-                MemoryMapping::new_file_backed(range).map_err(Error::MemoryMappingFailed)?;
+            let mapping = MemoryMapping::new_file_backed(range, track_dirty_pages)
+                .map_err(Error::MemoryMappingFailed)?;
             regions.push(MemoryRegion {
                 mapping,
                 guest_base: range.gpa,
@@ -113,6 +117,7 @@ impl GuestMemory {
 
         Ok(GuestMemory {
             regions: Arc::new(regions),
+            track_dirty_pages,
         })
     }
 
@@ -120,7 +125,7 @@ impl GuestMemory {
     ///
     /// # Arguments
     /// * `ranges` - a slice of `AnonMemoryDesc` describing guest memory regions.
-    pub fn new_anon(ranges: &[AnonMemoryDesc]) -> Result<GuestMemory> {
+    pub fn new_anon(ranges: &[AnonMemoryDesc], track_dirty_pages: bool) -> Result<GuestMemory> {
         if ranges.is_empty() {
             return Err(Error::NoMemoryRegions);
         }
@@ -137,8 +142,8 @@ impl GuestMemory {
 
         let mut regions = Vec::<MemoryRegion>::with_capacity(ranges.len());
         for range in ranges {
-            let mapping =
-                MemoryMapping::new_anon(range.size).map_err(Error::MemoryMappingFailed)?;
+            let mapping = MemoryMapping::new_anon(range.size, track_dirty_pages)
+                .map_err(Error::MemoryMappingFailed)?;
             regions.push(MemoryRegion {
                 mapping,
                 guest_base: range.gpa,
@@ -147,6 +152,7 @@ impl GuestMemory {
 
         Ok(GuestMemory {
             regions: Arc::new(regions),
+            track_dirty_pages,
         })
     }
 
@@ -154,9 +160,12 @@ impl GuestMemory {
     ///
     /// # Arguments
     /// * `ranges` - a slice of tuples `(GuestAddress, usize)` describing guest memory regions.
-    pub fn new_anon_from_tuples(ranges: &[(GuestAddress, usize)]) -> Result<GuestMemory> {
+    pub fn new_anon_from_tuples(
+        ranges: &[(GuestAddress, usize)],
+        track_dirty_pages: bool,
+    ) -> Result<GuestMemory> {
         let descriptors: Vec<AnonMemoryDesc> = ranges.iter().map(AnonMemoryDesc::from).collect();
-        Self::new_anon(&descriptors)
+        Self::new_anon(&descriptors, track_dirty_pages)
     }
 
     /// Memory syncs the underlying mappings for all regions.
@@ -175,7 +184,7 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory, MemoryMapping};
     /// # fn test_end_addr() -> Result<(), ()> {
     ///     let start_addr = GuestAddress(0x1000);
-    ///     let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    ///     let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)], true).map_err(|_| ())?;
     ///     assert_eq!(start_addr.checked_add(0x400), Some(gm.end_addr()));
     ///     Ok(())
     /// # }
@@ -235,6 +244,11 @@ impl GuestMemory {
         self.regions.len()
     }
 
+    /// Return whether dirty page tracking is enabled
+    pub fn tracking_dirty_pages(&self) -> bool {
+        self.track_dirty_pages
+    }
+
     /// Call madvise on a certain range, with a certain advice.
     ///
     /// Only MADV_DONTNEED and MADV_REMOVE are currently supported.
@@ -256,7 +270,7 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory, MemoryMapping, AnonMemoryDesc};
     /// # fn test_remove_range() -> Result<(), ()> {
     ///    let start_addr = GuestAddress(0x1000);
-    ///    let mut gm = GuestMemory::new_anon(&vec![AnonMemoryDesc { gpa: start_addr, size: 0x400 }]).map_err(|_| ())?;
+    ///    let mut gm = GuestMemory::new_anon(&vec![AnonMemoryDesc { gpa: start_addr, size: 0x400 }], true).map_err(|_| ())?;
     ///    gm.write_obj_at_addr(123, start_addr);
     ///    assert_eq!(gm.read_obj_from_addr::<u32>(start_addr).unwrap(), 123);
     ///    gm.madvise_range(start_addr, 32, libc::MADV_REMOVE);
@@ -267,7 +281,7 @@ impl GuestMemory {
     ///
     /// # fn test_dontneed_range() -> Result<(), ()> {
     ///   let start_addr = GuestAddress(0x2000);
-    ///   let mut gm = GuestMemory::new_anon(&vec![AnonMemoryDesc { gpa: start_addr, size: 0x400 }]).map_err(|_| ())?;
+    ///   let mut gm = GuestMemory::new_anon(&vec![AnonMemoryDesc { gpa: start_addr, size: 0x400 }], true).map_err(|_| ())?;
     ///   gm.write_obj_at_addr(123, start_addr);
     ///   assert_eq!(gm.read_obj_from_addr::<u32>(start_addr).unwrap(), 123);
     ///   gm.madvise_range(start_addr, 32, libc::MADV_DONTNEED);
@@ -325,7 +339,7 @@ impl GuestMemory {
     /// bitmap for each region.
     pub fn with_regions_bitmaps_mut<F, E>(&self, mut cb: F) -> result::Result<(), E>
     where
-        F: FnMut(usize, GuestAddress, usize, Bitmap) -> result::Result<(), E>,
+        F: FnMut(usize, GuestAddress, usize, Option<Bitmap>) -> result::Result<(), E>,
     {
         for (index, region) in self.regions.iter().enumerate() {
             cb(
@@ -350,7 +364,7 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory, MemoryMapping};
     /// # fn test_write_u64() -> Result<(), ()> {
     /// #   let start_addr = GuestAddress(0x1000);
-    /// #   let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    /// #   let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)], true).map_err(|_| ())?;
     ///     let res = gm.write_slice_at_addr(&[1,2,3,4,5], GuestAddress(0x200)).map_err(|_| ())?;
     ///     assert_eq!(5, res);
     ///     Ok(())
@@ -376,7 +390,7 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory, MemoryMapping};
     /// # fn test_write_u64() -> Result<(), ()> {
     /// #   let start_addr = GuestAddress(0x1000);
-    /// #   let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    /// #   let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)], true).map_err(|_| ())?;
     ///     let buf = &mut [0u8; 16];
     ///     let res = gm.read_slice_at_addr(buf, GuestAddress(0x200)).map_err(|_| ())?;
     ///     assert_eq!(16, res);
@@ -407,7 +421,7 @@ impl GuestMemory {
     /// # fn test_read_u64() -> Result<u64, ()> {
     /// #     let start_addr1 = GuestAddress(0x0);
     /// #     let start_addr2 = GuestAddress(0x400);
-    /// #     let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr1, 0x400), (start_addr2, 0x400)])
+    /// #     let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr1, 0x400), (start_addr2, 0x400)], true)
     /// #         .map_err(|_| ())?;
     ///       let num1: u64 = gm.read_obj_from_addr(GuestAddress(32)).map_err(|_| ())?;
     ///       let num2: u64 = gm.read_obj_from_addr(GuestAddress(0x400+32)).map_err(|_| ())?;
@@ -435,7 +449,7 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory, MemoryMapping};
     /// # fn test_write_u64() -> Result<(), ()> {
     /// #   let start_addr = GuestAddress(0x1000);
-    /// #   let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    /// #   let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)], true).map_err(|_| ())?;
     ///     gm.write_obj_at_addr(55u64, GuestAddress(0x1100))
     ///         .map_err(|_| ())
     /// # }
@@ -465,7 +479,7 @@ impl GuestMemory {
     /// # use std::path::Path;
     /// # fn test_read_random() -> Result<u32, ()> {
     /// #     let start_addr = GuestAddress(0x1000);
-    /// #     let gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    /// #     let gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)], true).map_err(|_| ())?;
     ///       let mut file = File::open(Path::new("/dev/urandom")).map_err(|_| ())?;
     ///       let addr = GuestAddress(0x1010);
     ///       gm.read_to_memory(addr, &mut file, 128).map_err(|_| ())?;
@@ -507,7 +521,7 @@ impl GuestMemory {
     /// # use std::path::Path;
     /// # fn test_write_null() -> Result<(), ()> {
     /// #     let start_addr = GuestAddress(0x1000);
-    /// #     let gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)]).map_err(|_| ())?;
+    /// #     let gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x400)], true).map_err(|_| ())?;
     ///       let mut file = File::open(Path::new("/dev/null")).map_err(|_| ())?;
     ///       let addr = GuestAddress(0x1010);
     ///       gm.write_from_memory(addr, &mut file, 128).map_err(|_| ())?;
@@ -548,8 +562,8 @@ impl GuestMemory {
     /// # use memory_model::{GuestAddress, GuestMemory};
     /// # fn test_host_addr() -> Result<(), ()> {
     ///     let start_addr = GuestAddress(0x1000);
-    ///     let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x500)]).map_err(|_| ())?;
-    ///     let addr = gm.get_host_address(GuestAddress(0x1200), 1).unwrap();
+    ///     let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x500)], true).map_err(|_| ())?;
+    ///     let addr = gm.get_host_address(GuestAddress(0x1200)).unwrap();
     ///     println!("Host address is {:p}", addr);
     ///     Ok(())
     /// # }
@@ -583,7 +597,7 @@ impl GuestMemory {
     /// # fn test_map_fold() -> Result<(), ()> {
     ///     let start_addr1 = GuestAddress(0x0);
     ///     let start_addr2 = GuestAddress(0x400);
-    ///     let mem = GuestMemory::new_anon_from_tuples(&vec![(start_addr1, 1024), (start_addr2, 2048)]).unwrap();
+    ///     let mem = GuestMemory::new_anon_from_tuples(&vec![(start_addr1, 1024), (start_addr2, 2048)], true).unwrap();
     ///     let total_size = mem.map_and_fold(
     ///         0,
     ///         |(_, region)| region.size() / 1024,
@@ -649,7 +663,7 @@ mod tests {
         assert_eq!(
             format!(
                 "{:?}",
-                GuestMemory::new_anon_from_tuples(&[]).err().unwrap()
+                GuestMemory::new_anon_from_tuples(&[], false).err().unwrap()
             ),
             format!("{:?}", Error::NoMemoryRegions)
         );
@@ -657,7 +671,7 @@ mod tests {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x800);
         let guest_mem =
-            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x400), (start_addr2, 0x400)])
+            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x400), (start_addr2, 0x400)], false)
                 .unwrap();
         assert_eq!(guest_mem.num_regions(), 2);
         assert!(guest_mem.address_in_range(GuestAddress(0x200)));
@@ -716,8 +730,10 @@ mod tests {
     fn overlap_memory() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
-        let res =
-            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x2000), (start_addr2, 0x2000)]);
+        let res = GuestMemory::new_anon_from_tuples(
+            &[(start_addr1, 0x2000), (start_addr2, 0x2000)],
+            false,
+        );
         assert_eq!(
             format!("{:?}", res.err().unwrap()),
             format!("{:?}", Error::MemoryRegionOverlap)
@@ -731,8 +747,11 @@ mod tests {
         let bad_addr = GuestAddress(0x2001);
         let bad_addr2 = GuestAddress(0x1ffc);
 
-        let gm = GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
-            .unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(
+            &[(start_addr1, 0x1000), (start_addr2, 0x1000)],
+            false,
+        )
+        .unwrap();
 
         let val1: u64 = 0xaa55_aa55_aa55_aa55;
         let val2: u64 = 0x55aa_55aa_55aa_55aa;
@@ -765,7 +784,7 @@ mod tests {
     #[test]
     fn write_and_read_slice() {
         let mut start_addr = GuestAddress(0x1000);
-        let gm = GuestMemory::new_anon_from_tuples(&[(start_addr, 0x400)]).unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&[(start_addr, 0x400)], false).unwrap();
         let sample_buf = &[1, 2, 3, 4, 5];
 
         assert_eq!(gm.write_slice_at_addr(sample_buf, start_addr).unwrap(), 5);
@@ -782,7 +801,8 @@ mod tests {
 
     #[test]
     fn read_to_and_write_from_mem() {
-        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0x1000), 0x400)]).unwrap();
+        let gm =
+            GuestMemory::new_anon_from_tuples(&[(GuestAddress(0x1000), 0x400)], false).unwrap();
         let addr = GuestAddress(0x1010);
         gm.write_obj_at_addr(!0u32, addr).unwrap();
         gm.read_to_memory(
@@ -808,7 +828,7 @@ mod tests {
             (GuestAddress(0x1000), region_size),
         ];
         let mut iterated_regions = Vec::new();
-        let gm = GuestMemory::new_anon_from_tuples(&regions).unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&regions, false).unwrap();
 
         let res: Result<()> = gm.with_regions(|_, _, size, _| {
             assert_eq!(size, region_size);
@@ -835,8 +855,9 @@ mod tests {
     fn guest_to_host() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x100);
-        let mem = GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x100), (start_addr2, 0x400)])
-            .unwrap();
+        let mem =
+            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x100), (start_addr2, 0x400)], false)
+                .unwrap();
 
         assert!(mem.get_host_address(start_addr1, 0x100).is_ok());
         // Error because we go past the end of the first region.
@@ -880,7 +901,8 @@ mod tests {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x400);
         let mem =
-            GuestMemory::new_anon_from_tuples(&[(start_addr1, 1024), (start_addr2, 2048)]).unwrap();
+            GuestMemory::new_anon_from_tuples(&[(start_addr1, 1024), (start_addr2, 2048)], false)
+                .unwrap();
 
         assert_eq!(
             mem.map_and_fold(
@@ -903,7 +925,7 @@ mod tests {
             offset: 0,
             shared: false,
         }];
-        let mem = GuestMemory::new_file_backed(&ranges).unwrap();
+        let mem = GuestMemory::new_file_backed(&ranges, false).unwrap();
         assert!(mem.sync().is_ok());
 
         // Force munmap() memory so that sync() fails.
@@ -928,7 +950,7 @@ mod tests {
             shared: false,
         };
         ranges.push(range);
-        assert!(GuestMemory::new_file_backed(&ranges).is_err());
+        assert!(GuestMemory::new_file_backed(&ranges, false).is_err());
     }
 
     #[test]
@@ -943,7 +965,7 @@ mod tests {
             shared: false,
         };
         ranges.push(range);
-        let mem = GuestMemory::new_file_backed(&ranges);
+        let mem = GuestMemory::new_file_backed(&ranges, false);
         assert!(mem.is_err());
 
         let mut ranges = Vec::new();
@@ -956,7 +978,7 @@ mod tests {
         };
 
         ranges.push(range);
-        let mem = GuestMemory::new_file_backed(&ranges);
+        let mem = GuestMemory::new_file_backed(&ranges, false);
         assert!(mem.is_err());
     }
 
@@ -976,7 +998,7 @@ mod tests {
             };
             ranges.push(range);
         }
-        let mem = GuestMemory::new_file_backed(&ranges);
+        let mem = GuestMemory::new_file_backed(&ranges, false);
         assert!(mem.is_ok());
         assert_eq!(mem.unwrap().num_regions(), num_ranges);
     }
@@ -1011,7 +1033,7 @@ mod tests {
             shared: false,
         };
         invalid_gpa_ranges.push(invalid_range);
-        let mem = GuestMemory::new_file_backed(&invalid_gpa_ranges);
+        let mem = GuestMemory::new_file_backed(&invalid_gpa_ranges, false);
         assert!(mem.is_err());
         assert_eq!(
             format!("{:?}", mem.err().unwrap()),
@@ -1027,7 +1049,7 @@ mod tests {
             shared: false,
         };
         invalid_offset_ranges.push(invalid_range);
-        let mem = GuestMemory::new_file_backed(&invalid_offset_ranges);
+        let mem = GuestMemory::new_file_backed(&invalid_offset_ranges, false);
         assert!(mem.is_err());
         assert_eq!(
             format!("{:?}", mem.err().unwrap()),
@@ -1038,10 +1060,13 @@ mod tests {
     #[test]
     fn test_remove_range() {
         let start_addr = GuestAddress(0x0);
-        let mem = GuestMemory::new_anon(&[AnonMemoryDesc {
-            gpa: start_addr,
-            size: 1024,
-        }])
+        let mem = GuestMemory::new_anon(
+            &[AnonMemoryDesc {
+                gpa: start_addr,
+                size: 1024,
+            }],
+            false,
+        )
         .unwrap();
 
         // Bad range leads to appropriate error.
@@ -1068,10 +1093,13 @@ mod tests {
     #[test]
     fn test_unsupported_madvise() {
         let start_addr = GuestAddress(0x0);
-        let mem = GuestMemory::new_anon(&[AnonMemoryDesc {
-            gpa: start_addr,
-            size: 1024,
-        }])
+        let mem = GuestMemory::new_anon(
+            &[AnonMemoryDesc {
+                gpa: start_addr,
+                size: 1024,
+            }],
+            false,
+        )
         .unwrap();
         let unsupported_madvises = vec![
             libc::MADV_DODUMP,
@@ -1105,10 +1133,13 @@ mod tests {
     #[test]
     fn test_dontneed_range() {
         let start_addr = GuestAddress(0x0);
-        let mem = GuestMemory::new_anon(&[AnonMemoryDesc {
-            gpa: start_addr,
-            size: 1024,
-        }])
+        let mem = GuestMemory::new_anon(
+            &[AnonMemoryDesc {
+                gpa: start_addr,
+                size: 1024,
+            }],
+            false,
+        )
         .unwrap();
 
         // Bad range leads to appropriate error.

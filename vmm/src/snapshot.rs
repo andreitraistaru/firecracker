@@ -428,7 +428,7 @@ mod tests {
     // Auxiliary function being used throughout the tests.
     fn setup_vcpu() -> (Vm, Vcpu) {
         let kvm = KvmContext::new().unwrap();
-        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let gm = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let mut vm = Vm::new(kvm.fd()).expect("Cannot create new vm");
         assert!(vm.memory_init(gm, &kvm).is_ok());
 

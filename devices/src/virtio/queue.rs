@@ -608,10 +608,10 @@ pub mod tests {
 
     #[test]
     fn test_checked_new_descriptor_chain() {
-        let m = &GuestMemory::new_anon_from_tuples(&[
-            (GuestAddress(0), 0x10000),
-            (GuestAddress(0x20000), 0x2000),
-        ])
+        let m = &GuestMemory::new_anon_from_tuples(
+            &[(GuestAddress(0), 0x10000), (GuestAddress(0x20000), 0x2000)],
+            true,
+        )
         .unwrap();
         let vq = VirtQueue::new(GuestAddress(0), m, 16);
 
@@ -679,7 +679,7 @@ pub mod tests {
 
     #[test]
     fn test_queue_validation() {
-        let m = &GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let m = &GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let vq = VirtQueue::new(GuestAddress(0), m, 16);
 
         let mut q = vq.create_queue();
@@ -730,7 +730,7 @@ pub mod tests {
 
     #[test]
     fn test_queue_processing() {
-        let m = &GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let m = &GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let vq = VirtQueue::new(GuestAddress(0), m, 16);
         let mut q = vq.create_queue();
 
@@ -798,7 +798,7 @@ pub mod tests {
 
     #[test]
     fn test_add_used() {
-        let m = &GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let m = &GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let vq = VirtQueue::new(GuestAddress(0), m, 16);
 
         let mut q = vq.create_queue();

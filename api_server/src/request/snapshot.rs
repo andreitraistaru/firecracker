@@ -23,6 +23,7 @@ pub struct SnapshotCreateConfig {
 pub struct SnapshotLoadConfig {
     snapshot_path: String,
     mem_file_path: String,
+    track_dirty_pages: Option<bool>,
 }
 
 impl IntoParsedRequest for SnapshotCreateConfig {
@@ -55,7 +56,11 @@ impl IntoParsedRequest for SnapshotLoadConfig {
         match method {
             Method::Put => Ok(ParsedRequest::Sync(
                 VmmRequest::new(
-                    VmmAction::ResumeFromSnapshot(self.snapshot_path, self.mem_file_path),
+                    VmmAction::ResumeFromSnapshot(
+                        self.snapshot_path,
+                        self.mem_file_path,
+                        self.track_dirty_pages,
+                    ),
                     sender,
                 ),
                 receiver,
@@ -147,13 +152,18 @@ mod tests {
         {
             let json = r#"{
                 "snapshot_path": "/foo/img",
-                "mem_file_path": "/foo/mem"
+                "mem_file_path": "/foo/mem",
+                "track_dirty_pages": true
             }"#;
 
             let (sender, receiver) = oneshot::channel();
             let req: ParsedRequest = ParsedRequest::Sync(
                 VmmRequest::new(
-                    VmmAction::ResumeFromSnapshot("/foo/img".to_string(), "/foo/mem".to_string()),
+                    VmmAction::ResumeFromSnapshot(
+                        "/foo/img".to_string(),
+                        "/foo/mem".to_string(),
+                        Some(true),
+                    ),
                     sender,
                 ),
                 receiver,

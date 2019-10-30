@@ -352,8 +352,9 @@ fn vmm_control_event(
                     .map(|_| api_server::VmmData::Empty),
                 ResumeVCPUs => vmm.resume_vcpus().map(|_| api_server::VmmData::Empty),
                 #[cfg(target_arch = "x86_64")]
-                ResumeFromSnapshot(snapshot_path, mem_file_path) => {
-                    let result = vmm.resume_from_snapshot(snapshot_path, mem_file_path);
+                ResumeFromSnapshot(snapshot_path, mem_file_path, track_dirty_pages) => {
+                    let result =
+                        vmm.resume_from_snapshot(snapshot_path, mem_file_path, track_dirty_pages);
                     if result.is_err() {
                         error!("Failed to resume from snapshot. Will terminate the VM.");
                         exit_code = Some(i32::from(vmm::FC_EXIT_CODE_RESUME_ERROR));

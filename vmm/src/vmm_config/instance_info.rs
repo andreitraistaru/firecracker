@@ -97,6 +97,8 @@ impl Display for KillVcpusError {
 /// Errors associated with pausing the microVM.
 #[derive(Debug)]
 pub enum PauseMicrovmError {
+    /// We are not tracking dirty pages, or dirty page metrics have corrupted our tracking.
+    DirtyPageTracking,
     /// Invalid snapshot header.
     #[cfg(target_arch = "x86_64")]
     InvalidHeader(snapshot::Error),
@@ -133,6 +135,10 @@ impl Display for PauseMicrovmError {
     fn fmt(&self, f: &mut Formatter) -> Result {
         use self::PauseMicrovmError::*;
         match *self {
+            DirtyPageTracking => write!(
+                f,
+                "Dirty page tracking is disabled or cannot give correct result."
+            ),
             #[cfg(target_arch = "x86_64")]
             InvalidHeader(ref e) => write!(f, "Failed to sync snapshot: {}", e),
             MicroVMInvalidState(ref e) => write!(f, "{}", e),

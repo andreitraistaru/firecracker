@@ -1210,7 +1210,7 @@ mod tests {
     }
 
     fn activate_some_net(n: &mut Net, bad_qlen: bool, bad_evtlen: bool) -> ActivateResult {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let interrupt_evt = EventFd::new().unwrap();
         let status = Arc::new(AtomicUsize::new(0));
 
@@ -1427,7 +1427,7 @@ mod tests {
 
     #[test]
     fn test_mmds_detour_and_injection() {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, _txq, _rxq) = default_test_netepollhandler(&mem, TestMutators::default());
 
         let sha = MacAddr::parse_str("11:11:11:11:11:11").unwrap();
@@ -1490,7 +1490,7 @@ mod tests {
 
     #[test]
     fn test_mac_spoofing_detection() {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, _txq, _rxq) = default_test_netepollhandler(&mem, TestMutators::default());
 
         let guest_mac = MacAddr::parse_str("11:11:11:11:11:11").unwrap();
@@ -1559,7 +1559,7 @@ mod tests {
 
     #[test]
     fn test_handler_error_cases() {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, _txq, _rxq) = default_test_netepollhandler(&mem, TestMutators::default());
 
         // RX rate limiter events should error since the limiter is not blocked.
@@ -1581,7 +1581,7 @@ mod tests {
 
     #[test]
     fn test_invalid_event_handler() {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, _txq, _rxq) = default_test_netepollhandler(&mem, TestMutators::default());
 
         let bad_event = 1000;
@@ -1605,7 +1605,7 @@ mod tests {
         let test_mutators = TestMutators {
             tap_read_fail: true,
         };
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, _txq, rxq) = default_test_netepollhandler(&mem, test_mutators);
         h.register_tap_rx_listener().unwrap();
 
@@ -1636,7 +1636,7 @@ mod tests {
 
     #[test]
     fn test_rx_rate_limited_event_handler() {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, _txq, _rxq) = default_test_netepollhandler(&mem, TestMutators::default());
         let rl = RateLimiter::new(0, None, 0, 0, None, 0).unwrap();
         h.set_rx_rate_limiter(rl);
@@ -1649,7 +1649,7 @@ mod tests {
 
     #[test]
     fn test_tx_rate_limited_event_handler() {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, _txq, _rxq) = default_test_netepollhandler(&mem, TestMutators::default());
         let rl = RateLimiter::new(0, None, 0, 0, None, 0).unwrap();
         h.set_tx_rate_limiter(rl);
@@ -1662,7 +1662,7 @@ mod tests {
 
     #[test]
     fn test_handler() {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, txq, rxq) = default_test_netepollhandler(&mem, TestMutators::default());
 
         let daddr = 0x2000;
@@ -1802,7 +1802,8 @@ mod tests {
             let test_mutators = TestMutators {
                 tap_read_fail: true,
             };
-            let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+            let mem =
+                GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
             let (mut h, _txq, _rxq) = default_test_netepollhandler(&mem, test_mutators);
 
             check_metric_after_block!(&METRICS.net.rx_fails, 1, h.process_rx());
@@ -1811,7 +1812,7 @@ mod tests {
 
     #[test]
     fn test_bandwidth_rate_limiter() {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, txq, rxq) = default_test_netepollhandler(&mem, TestMutators::default());
 
         let daddr = 0x2000;
@@ -1919,7 +1920,7 @@ mod tests {
 
     #[test]
     fn test_ops_rate_limiter() {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, txq, rxq) = default_test_netepollhandler(&mem, TestMutators::default());
 
         let daddr = 0x2000;
@@ -2029,7 +2030,7 @@ mod tests {
 
     #[test]
     fn test_patch_rate_limiters() {
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, _, _) = default_test_netepollhandler(&mem, TestMutators::default());
 
         h.set_rx_rate_limiter(RateLimiter::new(10, None, 10, 2, None, 2).unwrap());
@@ -2186,7 +2187,7 @@ mod tests {
             allow_mmds_requests: false,
         };
 
-        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (net_state, tap_if_name) = {
             let (handler, _, _) = default_test_netepollhandler(&m, TestMutators::default());
             (

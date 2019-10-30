@@ -365,7 +365,9 @@ impl std::convert::From<PauseMicrovmError> for VmmActionError {
             // TODO: some errors are user-initiated and should be differentiated.
             SnapshotBackingFile(_) => ErrorKind::Internal,
             #[cfg(target_arch = "x86_64")]
-            MissingSnapshot | SerializeMicrovmState(_) | InvalidHeader(_) => ErrorKind::Internal,
+            MissingSnapshot | SerializeMicrovmState(_) | InvalidHeader(_) | DirtyPageTracking => {
+                ErrorKind::Internal
+            }
         };
         VmmActionError::PauseMicrovm(kind, e)
     }
@@ -1159,7 +1161,7 @@ impl Vmm {
     #[cfg(target_arch = "x86_64")]
     fn log_dirty_pages(&mut self) {
         // If we're logging dirty pages, post the metrics on how many dirty pages there are.
-        if LOGGER.flags() | LogOption::LogDirtyPages as usize > 0 {
+        if LOGGER.flags() & LogOption::LogDirtyPages as usize > 0 {
             METRICS.memory.dirty_pages.add(self.get_dirty_page_count());
         }
     }
@@ -1215,12 +1217,19 @@ impl Vmm {
                         });
                         region_offset += size;
                     }
-                    GuestMemory::new_file_backed(&ranges).map_err(StartMicrovmError::GuestMemory)?
+                    GuestMemory::new_file_backed(
+                        &ranges,
+                        self.vm_config.track_dirty_pages.unwrap_or(false),
+                    )
+                    .map_err(StartMicrovmError::GuestMemory)?
                 }
                 None => {
                     info!("No memory file specified, defaulting to using anonymous memory.");
-                    GuestMemory::new_anon_from_tuples(&arch_mem_regions)
-                        .map_err(StartMicrovmError::GuestMemory)?
+                    GuestMemory::new_anon_from_tuples(
+                        &arch_mem_regions,
+                        self.vm_config.track_dirty_pages.unwrap_or(false),
+                    )
+                    .map_err(StartMicrovmError::GuestMemory)?
                 }
             };
             self.set_guest_memory(guest_memory);
@@ -1890,6 +1899,10 @@ impl Vmm {
             .ht_enabled
             .unwrap_or_else(|| self.vm_config.ht_enabled.unwrap());
 
+        let track_dirty_pages = machine_config
+            .track_dirty_pages
+            .unwrap_or_else(|| self.vm_config.track_dirty_pages.unwrap());
+
         let vcpu_count_value = machine_config
             .vcpu_count
             .unwrap_or_else(|| self.vm_config.vcpu_count.unwrap());
@@ -1903,6 +1916,7 @@ impl Vmm {
         // Update all the fields that have a new value.
         self.vm_config.vcpu_count = Some(vcpu_count_value);
         self.vm_config.ht_enabled = Some(ht_enabled);
+        self.vm_config.track_dirty_pages = Some(track_dirty_pages);
 
         if machine_config.mem_size_mib.is_some() {
             self.vm_config.mem_size_mib = machine_config.mem_size_mib;
@@ -2515,11 +2529,21 @@ impl Vmm {
             .sync()
             .map_err(PauseMicrovmError::SyncMemory)?;
 
-        // Write the guest memory out to a file.
-        // mbrooker: In reality, we'd support both a SHARED mode and a PRIVATE mode, but for now we
-        // support just the PRIVATE mode.
+        // Write the guest memory out to a file, if there is a `mem_file_path` included in the API
+        // request. The file contains only changes to the guest memory (see
+        // `snapshot_memory_to_file` for the definition of changes).
         if let Some(path) = mem_file_path {
-            self.snapshot_memory_to_file(path)?;
+            if self.vm_config.track_dirty_pages.unwrap_or(false) {
+                self.snapshot_memory_to_file(path)?;
+            } else if LOGGER.flags() & LogOption::LogDirtyPages as usize > 0 {
+                warn!(
+                    "Incremental snapshots are not available when dirty page metrics are enabled"
+                );
+                return Err(PauseMicrovmError::DirtyPageTracking.into());
+            } else {
+                warn!("Incremental snapshots are not available when track_dirty_pages is disabled");
+                return Err(PauseMicrovmError::DirtyPageTracking.into());
+            }
         }
 
         Ok(())
@@ -2552,9 +2576,13 @@ impl Vmm {
             |n: usize,
              guest_base: GuestAddress,
              size: usize,
-             fc_bitmap: Bitmap|
+             fc_bitmap_opt: Option<Bitmap>|
              -> std::result::Result<(), VmmActionError> {
                 info!("Handling memory region {} of size {}", n, size);
+
+                let fc_bitmap = fc_bitmap_opt
+                    .expect("BUG: Bitmaps should exist for all areas if tracking is enabled");
+
                 // Get the KVM dirty bitmap for this region of guest memory.
                 let bitmap = self
                     .vm
@@ -2645,6 +2673,7 @@ impl Vmm {
         &mut self,
         snapshot_path: String,
         mem_file_path: String,
+        track_dirty_pages: Option<bool>,
     ) -> UserResult {
         let request_ts = TimestampUs {
             time_us: get_time_us(),
@@ -2673,6 +2702,8 @@ impl Vmm {
         self.vm_config.mem_file_path = Some(mem_file_path);
         // Hardcoded for cloning - could be configurable in the future for other use cases.
         self.vm_config.shared_mem = false;
+        // Should we track dirty pages in the resulting VM
+        self.vm_config.track_dirty_pages = track_dirty_pages;
 
         self.init_guest_memory()?;
 
@@ -3427,6 +3458,7 @@ mod tests {
             cpu_template: None,
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: Some(false),
         };
         assert!(vmm.set_vm_configuration(machine_config).is_ok());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
@@ -3446,11 +3478,13 @@ mod tests {
             cpu_template: None,
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: Some(true),
         };
         assert!(vmm.set_vm_configuration(machine_config).is_ok());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
         assert_eq!(vmm.vm_config.mem_size_mib, Some(256));
         assert_eq!(vmm.vm_config.ht_enabled, Some(false));
+        assert_eq!(vmm.vm_config.track_dirty_pages, Some(true));
 
         // Test Error case for put machine configuration with pre-existing memory file.
         {
@@ -3463,6 +3497,7 @@ mod tests {
                 cpu_template: None,
                 mem_file_path: Some(tmp_path.to_str().unwrap().to_string()),
                 shared_mem: false,
+                track_dirty_pages: Some(false),
             };
             assert!(vmm.set_vm_configuration(machine_config).is_err());
             assert_eq!(vmm.vm_config.mem_file_path, None);
@@ -3478,6 +3513,7 @@ mod tests {
             cpu_template: None,
             mem_file_path: Some(mem_file_path.clone()),
             shared_mem: false,
+            track_dirty_pages: Some(false),
         };
         assert!(vmm.set_vm_configuration(machine_config).is_ok());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
@@ -3495,6 +3531,7 @@ mod tests {
             cpu_template: None,
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: Some(false),
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
@@ -3508,11 +3545,13 @@ mod tests {
             cpu_template: Some(CpuFeaturesTemplate::T2),
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: Some(false),
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
         assert_eq!(vmm.vm_config.vcpu_count, Some(3));
         assert_eq!(vmm.vm_config.mem_size_mib, Some(256));
         assert_eq!(vmm.vm_config.ht_enabled, Some(false));
+        assert_eq!(vmm.vm_config.track_dirty_pages, Some(false));
         assert!(vmm.vm_config.cpu_template.is_none());
 
         // 2. Test with hyperthreading enabled
@@ -3525,6 +3564,7 @@ mod tests {
             cpu_template: None,
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: Some(false),
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
         assert_eq!(vmm.vm_config.ht_enabled, Some(false));
@@ -3537,6 +3577,7 @@ mod tests {
             cpu_template: Some(CpuFeaturesTemplate::T2),
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: Some(false),
         };
         assert!(vmm.set_vm_configuration(machine_config).is_ok());
         assert_eq!(vmm.vm_config.vcpu_count, Some(2));
@@ -3552,6 +3593,7 @@ mod tests {
             cpu_template: Some(CpuFeaturesTemplate::T2),
             mem_file_path: None,
             shared_mem: false,
+            track_dirty_pages: Some(false),
         };
         assert!(vmm.set_vm_configuration(machine_config).is_err());
     }
@@ -4549,7 +4591,7 @@ mod tests {
 
         // Resume should not be allowed if instance has been configured.
         match vmm
-            .resume_from_snapshot("dummy".to_string(), "dummy".to_string())
+            .resume_from_snapshot("dummy".to_string(), "dummy".to_string(), Some(true))
             .unwrap_err()
         {
             VmmActionError::ResumeMicrovm(
@@ -4562,7 +4604,7 @@ mod tests {
         vmm.set_instance_state(InstanceState::Running);
         // Resume should not be allowed if instance has been started.
         match vmm
-            .resume_from_snapshot("dummy".to_string(), "dummy".to_string())
+            .resume_from_snapshot("dummy".to_string(), "dummy".to_string(), Some(true))
             .unwrap_err()
         {
             VmmActionError::ResumeMicrovm(
@@ -4589,6 +4631,7 @@ mod tests {
             vmm1.default_kernel_config(Some(good_kernel_file()));
             vmm1.vm_config.mem_file_path = Some(shared_mem_path.clone());
             vmm1.vm_config.shared_mem = true;
+            vmm1.vm_config.track_dirty_pages = Some(true);
             // The kernel provided contains  "return 0" which will make the
             // advanced seccomp filter return bad syscall so we disable it.
             vmm1.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
@@ -4613,11 +4656,11 @@ mod tests {
             vmm2.shared_info.write().unwrap().vmm_version = "1.0.1".to_string();
             vmm2.seccomp_level = seccomp::SECCOMP_LEVEL_NONE;
             assert!(vmm2
-                .resume_from_snapshot(image_path.to_string(), mem_path.to_string())
+                .resume_from_snapshot(image_path.to_string(), mem_path.to_string(), Some(true))
                 .is_err());
             vmm2.shared_info.write().unwrap().state = InstanceState::Uninitialized;
             assert!(vmm2
-                .resume_from_snapshot(image_path.to_string(), mem_path.to_string())
+                .resume_from_snapshot(image_path.to_string(), mem_path.to_string(), Some(true))
                 .is_ok());
             let stdin_handle = io::stdin();
             stdin_handle.lock().set_canon_mode().unwrap();
@@ -5568,7 +5611,8 @@ mod tests {
 
         assert!(vmm.guest_memory().is_none());
 
-        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0x1000), 0x100)]).unwrap();
+        let mem =
+            GuestMemory::new_anon_from_tuples(&[(GuestAddress(0x1000), 0x100)], false).unwrap();
         vmm.set_guest_memory(mem);
 
         let mem_ref = vmm.guest_memory().unwrap();

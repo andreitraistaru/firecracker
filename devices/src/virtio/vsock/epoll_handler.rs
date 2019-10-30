@@ -526,11 +526,14 @@ mod tests {
         const MIB: usize = 1 << 20;
 
         let mut test_ctx = TestContext::new();
-        test_ctx.mem = GuestMemory::new_anon_from_tuples(&[
-            (GuestAddress(0), 8 * MIB),
-            (GuestAddress(GAP_START_ADDR - MIB), MIB),
-            (GuestAddress(FIRST_AFTER_GAP), MIB),
-        ])
+        test_ctx.mem = GuestMemory::new_anon_from_tuples(
+            &[
+                (GuestAddress(0), 8 * MIB),
+                (GuestAddress(GAP_START_ADDR - MIB), MIB),
+                (GuestAddress(FIRST_AFTER_GAP), MIB),
+            ],
+            false,
+        )
         .unwrap();
 
         // The default configured descriptor chains are valid.

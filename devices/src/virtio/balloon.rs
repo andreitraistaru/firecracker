@@ -630,10 +630,13 @@ mod tests {
         bad_qlen: bool,
         bad_evtlen: bool,
     ) -> ActivateResult {
-        let m = GuestMemory::new_anon(&[AnonMemoryDesc {
-            gpa: GuestAddress(0),
-            size: 0x10000,
-        }])
+        let m = GuestMemory::new_anon(
+            &[AnonMemoryDesc {
+                gpa: GuestAddress(0),
+                size: 0x10000,
+            }],
+            true,
+        )
         .unwrap();
         let ievt = EventFd::new().unwrap();
         let stat = Arc::new(AtomicUsize::new(0));
@@ -696,10 +699,13 @@ mod tests {
 
     #[test]
     fn test_update_balloon_size() {
-        let mem = GuestMemory::new_anon(&[AnonMemoryDesc {
-            gpa: GuestAddress(0),
-            size: 0x10000,
-        }])
+        let mem = GuestMemory::new_anon(
+            &[AnonMemoryDesc {
+                gpa: GuestAddress(0),
+                size: 0x10000,
+            }],
+            true,
+        )
         .unwrap();
         let (mut h, _, _) = make_test_balloonepollhandler(&mem, 100);
 
@@ -722,10 +728,13 @@ mod tests {
         // madvise to remove memory).
 
         // Create a balloon epoll handler.
-        let mem = GuestMemory::new_anon(&[AnonMemoryDesc {
-            gpa: GuestAddress(0),
-            size: 0x10000,
-        }])
+        let mem = GuestMemory::new_anon(
+            &[AnonMemoryDesc {
+                gpa: GuestAddress(0),
+                size: 0x10000,
+            }],
+            true,
+        )
         .unwrap();
         let (mut h, infq, _) = make_test_balloonepollhandler(&mem, 100);
 
@@ -875,7 +884,7 @@ mod tests {
         info!("Hello");
 
         // Create a balloon epoll handler.
-        let mem = GuestMemory::new_file_backed(&ranges).unwrap();
+        let mem = GuestMemory::new_file_backed(&ranges, true).unwrap();
         assert!(mem.sync().is_ok());
         let (mut h, infq, _) = make_test_balloonepollhandler(&mem, 100);
 
@@ -1004,10 +1013,13 @@ mod tests {
     #[test]
     fn test_handle_deflate_event() {
         // Create a balloon epoll handler.
-        let mem = GuestMemory::new_anon(&[AnonMemoryDesc {
-            gpa: GuestAddress(0),
-            size: 0x10000,
-        }])
+        let mem = GuestMemory::new_anon(
+            &[AnonMemoryDesc {
+                gpa: GuestAddress(0),
+                size: 0x10000,
+            }],
+            true,
+        )
         .unwrap();
         let (mut h, _, defq) = make_test_balloonepollhandler(&mem, 100);
 
@@ -1058,10 +1070,13 @@ mod tests {
     #[test]
     fn test_handle_invalid_event() {
         // Create a balloon epoll handler.
-        let mem = GuestMemory::new_anon(&[AnonMemoryDesc {
-            gpa: GuestAddress(0),
-            size: 0x10000,
-        }])
+        let mem = GuestMemory::new_anon(
+            &[AnonMemoryDesc {
+                gpa: GuestAddress(0),
+                size: 0x10000,
+            }],
+            true,
+        )
         .unwrap();
         let (mut h, _, _) = make_test_balloonepollhandler(&mem, 100);
 

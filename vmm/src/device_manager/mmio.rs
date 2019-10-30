@@ -496,9 +496,11 @@ mod tests {
     fn test_register_virtio_device() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
-        let guest_mem =
-            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
-                .unwrap();
+        let guest_mem = GuestMemory::new_anon_from_tuples(
+            &[(start_addr1, 0x1000), (start_addr2, 0x1000)],
+            true,
+        )
+        .unwrap();
         let mut device_manager =
             MMIODeviceManager::new(guest_mem, &mut 0xd000_0000, (arch::IRQ_BASE, arch::IRQ_MAX));
 
@@ -516,9 +518,11 @@ mod tests {
     fn test_register_too_many_devices() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
-        let guest_mem =
-            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
-                .unwrap();
+        let guest_mem = GuestMemory::new_anon_from_tuples(
+            &[(start_addr1, 0x1000), (start_addr2, 0x1000)],
+            true,
+        )
+        .unwrap();
         let mut device_manager =
             MMIODeviceManager::new(guest_mem, &mut 0xd000_0000, (arch::IRQ_BASE, arch::IRQ_MAX));
 
@@ -562,7 +566,7 @@ mod tests {
         assert_eq!(dummy.queue_max_sizes(), QUEUE_SIZES);
 
         // test activate
-        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)], true).unwrap();
         let ievt = EventFd::new().unwrap();
         let stat = Arc::new(AtomicUsize::new(0));
         let queue_evts = vec![EventFd::new().unwrap()];
@@ -574,9 +578,11 @@ mod tests {
     fn test_error_messages() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
-        let guest_mem =
-            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
-                .unwrap();
+        let guest_mem = GuestMemory::new_anon_from_tuples(
+            &[(start_addr1, 0x1000), (start_addr2, 0x1000)],
+            true,
+        )
+        .unwrap();
         let device_manager =
             MMIODeviceManager::new(guest_mem, &mut 0xd000_0000, (arch::IRQ_BASE, arch::IRQ_MAX));
         let mut cmdline = kernel_cmdline::Cmdline::new(4096);
@@ -648,9 +654,11 @@ mod tests {
     fn test_update_drive() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
-        let guest_mem =
-            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
-                .unwrap();
+        let guest_mem = GuestMemory::new_anon_from_tuples(
+            &[(start_addr1, 0x1000), (start_addr2, 0x1000)],
+            true,
+        )
+        .unwrap();
         let mut device_manager =
             MMIODeviceManager::new(guest_mem, &mut 0xd000_0000, (arch::IRQ_BASE, arch::IRQ_MAX));
         let mut cmdline = kernel_cmdline::Cmdline::new(4096);
@@ -672,9 +680,11 @@ mod tests {
     fn test_device_info() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
-        let guest_mem =
-            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
-                .unwrap();
+        let guest_mem = GuestMemory::new_anon_from_tuples(
+            &[(start_addr1, 0x1000), (start_addr2, 0x1000)],
+            true,
+        )
+        .unwrap();
         let mut device_manager =
             MMIODeviceManager::new(guest_mem, &mut 0xd000_0000, (arch::IRQ_BASE, arch::IRQ_MAX));
         let mut cmdline = kernel_cmdline::Cmdline::new(4096);
@@ -712,9 +722,11 @@ mod tests {
     fn test_raw_io_device() {
         let start_addr1 = GuestAddress(0x0);
         let start_addr2 = GuestAddress(0x1000);
-        let guest_mem =
-            GuestMemory::new_anon_from_tuples(&[(start_addr1, 0x1000), (start_addr2, 0x1000)])
-                .unwrap();
+        let guest_mem = GuestMemory::new_anon_from_tuples(
+            &[(start_addr1, 0x1000), (start_addr2, 0x1000)],
+            true,
+        )
+        .unwrap();
         let mut device_manager =
             MMIODeviceManager::new(guest_mem, &mut 0xd000_0000, (arch::IRQ_BASE, arch::IRQ_MAX));
         let dummy_device = Arc::new(Mutex::new(DummyDevice { dummy: 0 }));

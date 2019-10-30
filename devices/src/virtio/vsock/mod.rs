@@ -300,7 +300,8 @@ mod tests {
             let (sender, _handler_receiver) = mpsc::channel();
             Self {
                 cid: CID,
-                mem: GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), MEM_SIZE)]).unwrap(),
+                mem: GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), MEM_SIZE)], true)
+                    .unwrap(),
                 mem_size: MEM_SIZE,
                 device: Vsock::new(
                     CID,

@@ -671,6 +671,9 @@ definitions:
       mem_file_path:
         type: string
         description: Optional path to guest memory backing file.
+      track_dirty_pages:
+        type: boolean
+        description: Enable dirty page tracking. If this is enabled, then incremental VM snapshots can be created.
 
   NetworkInterface:
     type: object
@@ -760,6 +763,9 @@ definitions:
         type: string
       mem_file_path:
         type: string
+      track_dirty_pages:
+        type: bool
+        description: Should the resulting VM track dirty pages, to be snapshotted again later.
 
   TokenBucket:
     type: object
