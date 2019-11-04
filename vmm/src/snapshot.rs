@@ -10,6 +10,7 @@
 extern crate kvm_bindings;
 
 use std::fmt::{self, Display, Formatter};
+use std::fs::File;
 use std::io;
 use std::path::Path;
 
@@ -72,6 +73,7 @@ impl Display for Error {
 type Result<T> = std::result::Result<T, Error>;
 
 /// Version struct composed of major, minor and build numbers.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
 pub struct Version {
     major: u16,
@@ -123,7 +125,12 @@ const FIRST_SUPPORTED_APP_VERSION: Version = Version {
 
 /// The header of a Firecracker snapshot image.
 /// It strictly contains the most basic info needed to identify a Snapshot
-/// and to understand how to read it. This should never change.
+/// and select the proper deserialization logic.
+///
+/// *** Please do not change this header definition. ***
+/// If you are thinking to add other fields here consider adding them in
+/// a different struct.
+#[repr(C)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SnapshotHdr {
     /** SNAPSHOT_IMAGE_MAGIC */
@@ -132,6 +139,13 @@ pub struct SnapshotHdr {
     snapshot_version: Version,
     /** Firecracker version **/
     app_version: Version,
+}
+
+// Declare this FFI extern function that takes a pointer to `SnapshotHdr` to force the
+// compiler to check whether it is FFI-safe and warn us if its layout is not fixed.
+#[allow(dead_code)]
+extern "C" {
+    fn test_header(ptr: *const SnapshotHdr);
 }
 
 impl SnapshotHdr {
@@ -250,18 +264,26 @@ impl SnapshotEngine {
         path: P,
         current_app_version: Version,
     ) -> Result<MicrovmState> {
-        let bytes = std::fs::read(path).map_err(Error::IO)?;
+        let mut file = File::open(path.as_ref()).map_err(Error::IO)?;
 
         // Deserialize just the header first and check if it's valid.
-        let header: SnapshotHdr = bincode::deserialize(&bytes).map_err(Error::Deserialize)?;
+        let header: SnapshotHdr = bincode::config()
+            .limit(std::mem::size_of::<SnapshotHdr>() as u64)
+            .deserialize_from(file)
+            .map_err(Error::Deserialize)?;
         Self::validate_header(&header, current_app_version)?;
+
+        // Reopen the file as it was consumed by deserialize_from above.
+        file = File::open(path.as_ref()).map_err(Error::IO)?;
 
         // If the header is valid deserialize the entire snapshot.
         // The header will be deserialized again with the rest of the snapshot.
         // We can afford doing this for convenience since it's very small.
         let translator = create_snapshot_translator(header.app_version, current_app_version)
             .map_err(Error::Translate)?;
-        Ok(translator.deserialize(&bytes).map_err(Error::Translate)?)
+        Ok(translator
+            .deserialize(Box::new(file))
+            .map_err(Error::Translate)?)
     }
 
     pub fn serialize<P: AsRef<Path>>(
@@ -548,7 +570,7 @@ mod tests {
             assert!(ret.is_err());
             assert_eq!(
                 format!("{}", ret.err().unwrap()),
-                "Input/output error. Is a directory (os error 21)"
+                "Failed to deserialize: io error: Is a directory (os error 21)"
             );
 
             // Test error case: path points to an invalid snapshot.

@@ -28,8 +28,7 @@ impl Display for Error {
 
 pub trait SnapshotTranslator {
     fn serialize(&self, microvm_state: &MicrovmState) -> Result<Vec<u8>, Error>;
-
-    fn deserialize(&self, bytes: &[u8]) -> Result<MicrovmState, Error>;
+    fn deserialize(&self, input: Box<dyn std::io::Read>) -> Result<MicrovmState, Error>;
 }
 
 pub fn create_snapshot_translator(
@@ -47,7 +46,10 @@ pub fn create_snapshot_translator(
 
 #[cfg(test)]
 mod tests {
+    extern crate tempfile;
+    use self::tempfile::NamedTempFile;
     use snapshot::{MicrovmState, SnapshotHdr, Version, VmInfo};
+    use std::io::{Seek, SeekFrom, Write};
     use std::path::PathBuf;
     use std::{fs, io};
     use translator::*;
@@ -160,16 +162,12 @@ mod tests {
         );
 
         // Read all the older snapshots from "firecracker/vmm/src/translator/resources/older".
-        let mut older_snapshots = vec![];
         let dir = fs::read_dir(&resources_path.join("older")).unwrap();
         for subdir in dir {
             let subdir_path = subdir.unwrap().path();
-            let snapshot_bytes = fs::read(subdir_path.join("binary-vm-snapshot")).unwrap();
-            older_snapshots.push(snapshot_bytes);
-        }
+            let snapshot_path = subdir_path.join("binary-vm-snapshot");
+            let old_snapshot_bytes = fs::read(subdir_path.join("binary-vm-snapshot")).unwrap();
 
-        // For each old snapshot:
-        for old_snapshot_bytes in &older_snapshots {
             let old_snapshot_hdr =
                 bincode::deserialize::<SnapshotHdr>(&old_snapshot_bytes).unwrap();
             let translator = create_snapshot_translator(
@@ -180,7 +178,8 @@ mod tests {
 
             // Try to deserialize each old snapshot to the current snapshot format
             // and check the result.
-            let maybe_old_snapshot = translator.deserialize(old_snapshot_bytes);
+            let maybe_old_snapshot =
+                translator.deserialize(Box::new(std::fs::File::open(snapshot_path).unwrap()));
             assert!(maybe_old_snapshot.is_ok());
             let old_snapshot = maybe_old_snapshot.unwrap();
             assert_eq!(
@@ -192,15 +191,22 @@ mod tests {
             let maybe_reserialized_snapshot_bytes = translator.serialize(&old_snapshot);
             assert!(maybe_reserialized_snapshot_bytes.is_ok());
             let reserialized_snapshot_bytes = maybe_reserialized_snapshot_bytes.unwrap();
-            assert_eq!(&reserialized_snapshot_bytes, old_snapshot_bytes);
+            assert_eq!(reserialized_snapshot_bytes, old_snapshot_bytes);
 
             // Try to serialize the current snapshot into each older snapshot format
             // and check the result.
             let maybe_current_snapshot_bytes = translator.serialize(&current_snapshot);
             assert!(maybe_current_snapshot_bytes.is_ok());
             let current_snapshot_bytes = maybe_current_snapshot_bytes.unwrap();
-            assert_eq!(&current_snapshot_bytes, old_snapshot_bytes);
+            assert_eq!(current_snapshot_bytes, old_snapshot_bytes);
         }
+    }
+
+    fn file_len(file: &mut fs::File) -> Result<u64, std::io::Error> {
+        let len = file.seek(SeekFrom::End(0))?;
+        file.seek(SeekFrom::Start(0))?;
+
+        Ok(len)
     }
 
     /// This test generates invalid binary snapshots based on the current binary snapshot saved
@@ -218,52 +224,68 @@ mod tests {
         let vmm_crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let resources_path = vmm_crate_path.join("src/translator/resources");
 
-        // Read the current snapshot bytes.
-        let mut current_snapshot_bytes =
-            fs::read(&resources_path.join("current/binary-vm-snapshot")).unwrap();
+        let mut tmp_snapshot = NamedTempFile::new().unwrap();
+        fs::copy(
+            &resources_path.join("current/binary-vm-snapshot"),
+            &tmp_snapshot.path(),
+        )
+        .unwrap();
 
         // Build the translator. We'll use a single version.
-        let current_snapshot_hdr =
-            bincode::deserialize::<SnapshotHdr>(&current_snapshot_bytes).unwrap();
+        let current_snapshot_hdr: SnapshotHdr = bincode::deserialize_from(tmp_snapshot).unwrap();
         let translator = create_snapshot_translator(
             current_snapshot_hdr.app_version(),
             current_snapshot_hdr.app_version(),
         )
         .unwrap();
 
-        // Attempt to deserialize fewer.
-        let truncated_snapshot_bytes =
-            &current_snapshot_bytes.clone()[..current_snapshot_bytes.len() / 2];
-        let ret = translator.deserialize(truncated_snapshot_bytes);
+        // Attempt to deserialize a truncated snapshot.
+        tmp_snapshot = NamedTempFile::new().unwrap();
+        fs::copy(
+            &resources_path.join("current/binary-vm-snapshot"),
+            &tmp_snapshot.path(),
+        )
+        .unwrap();
+
+        let mut truncated_snapshot = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tmp_snapshot.path())
+            .unwrap();
+        let new_len = file_len(&mut truncated_snapshot).unwrap() / 2;
+        truncated_snapshot.set_len(new_len).unwrap();
+
+        let ret = translator.deserialize(Box::new(truncated_snapshot));
         assert!(ret.is_err());
         assert_eq!(
             format!("{}", ret.err().unwrap()),
-            format!(
-                "Failed to deserialize: {}",
-                bincode::Error::from(bincode::ErrorKind::Io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "",
-                )))
-            )
+            "Failed to deserialize: io error: failed to fill whole buffer"
         );
 
-        // Attempt to deserialize more.
-        let extended_snapshot_bytes = &mut current_snapshot_bytes.clone();
-        extended_snapshot_bytes.extend_from_slice(vec![42u8; 100].as_slice());
-        let ret = translator.deserialize(truncated_snapshot_bytes);
-        assert!(ret.is_err());
-        assert_eq!(
-            format!("{}", ret.err().unwrap()),
-            format!(
-                "Failed to deserialize: {}",
-                bincode::Error::from(bincode::ErrorKind::Io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "",
-                )))
-            )
-        );
+        // Attempt to deserialize from a larger snapshot.
+        tmp_snapshot = NamedTempFile::new().unwrap();
+        fs::copy(
+            &resources_path.join("current/binary-vm-snapshot"),
+            &tmp_snapshot.path(),
+        )
+        .unwrap();
+        let mut extended_snapshot = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tmp_snapshot.path())
+            .unwrap();
+
+        let new_len = file_len(&mut extended_snapshot).unwrap() + 100;
+        extended_snapshot.set_len(new_len).unwrap();
+
+        let ret = translator.deserialize(Box::new(extended_snapshot));
+        assert!(ret.is_ok());
 
         // Corrupt a serialized array.
+
+        // Read the current snapshot bytes.
+        let mut current_snapshot_bytes =
+            fs::read(&resources_path.join("current/binary-vm-snapshot")).unwrap();
 
         // Skip past the header and VM info.
         let serialized_snapshot_hdr_size =
@@ -285,8 +307,25 @@ mod tests {
             // Replacing the length of `kvm_pit_state2`'s byte representation should result in an error.
             kvm_pit_state2_len_bytes.copy_from_slice(vec![0u8; size_len].as_slice());
         }
+        tmp_snapshot = NamedTempFile::new().unwrap();
+        fs::copy(
+            &resources_path.join("current/binary-vm-snapshot"),
+            &tmp_snapshot.path(),
+        )
+        .unwrap();
+        let mut corrupted_snapshot = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tmp_snapshot.path())
+            .unwrap();
 
-        let ret = translator.deserialize(&current_snapshot_bytes);
+        corrupted_snapshot.set_len(0).unwrap();
+        corrupted_snapshot
+            .write_all(&current_snapshot_bytes)
+            .unwrap();
+        corrupted_snapshot.seek(SeekFrom::Start(0)).unwrap();
+
+        let ret = translator.deserialize(Box::new(corrupted_snapshot));
         assert_eq!(
             format!("{}", ret.err().unwrap()),
             format!(
