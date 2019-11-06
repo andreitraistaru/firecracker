@@ -8,6 +8,7 @@ use translator::identity_snapshot_translator::IdentitySnapshotTranslator;
 pub enum Error {
     Deserialize(bincode::Error),
     Serialize(bincode::Error),
+    SnapshotTooBig(u64, u64),
     UnimplementedSnapshotTranslator((Version, Version)),
 }
 
@@ -22,6 +23,9 @@ impl Display for Error {
                 "Unimplemented snapshot translator between versions {} and {}.",
                 from, to
             ),
+            SnapshotTooBig(size, max_size) => {
+                write!(f, "Snapshot too big: {} > {}.", size, max_size)
+            }
         }
     }
 }

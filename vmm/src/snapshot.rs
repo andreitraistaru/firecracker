@@ -552,6 +552,27 @@ mod tests {
                 APP_VER
             )
             .is_ok());
+
+            // Negative test: snapshot size exceeds limit.
+            let huge_state = MicrovmState::new(
+                APP_VER,
+                extra_info.clone(),
+                vm_state.clone(),
+                // 1024 cpus will generate a huge MicrovmState.
+                vec![vcpu_state.clone(); 1024],
+                Default::default(),
+                vec![],
+            );
+
+            let serialized_huge_state = SnapshotEngine::serialize(
+                NamedTempFile::new().unwrap().into_temp_path(),
+                &huge_state,
+                APP_VER,
+            );
+            assert_eq!(
+                serialized_huge_state.err().unwrap(),
+                Error::Translate(translator::Error::SnapshotTooBig(0, 0))
+            );
         }
 
         // Restore snapshot.
@@ -677,6 +698,29 @@ mod tests {
                 assert!(ret.is_ok());
             }
 
+            // Test restore from a trucated snapshot.
+            {
+                let corrupted_state = NamedTempFile::new().unwrap();
+                let corrupted_path = corrupted_state.path();
+
+                assert!(SnapshotEngine::serialize(
+                    corrupted_path,
+                    &MicrovmState::new(
+                        APP_VER,
+                        extra_info.clone(),
+                        vm_state.clone(),
+                        vec![vcpu_state.clone()],
+                        Default::default(),
+                        vec![]
+                    ),
+                    APP_VER
+                )
+                .is_ok());
+
+                corrupted_state.as_file().set_len(1024).unwrap();
+
+                assert!(SnapshotEngine::deserialize(corrupted_path, APP_VER).is_err());
+            }
             // Verify header deserialization.
             assert!(header.eq(&microvm_state.header));
 

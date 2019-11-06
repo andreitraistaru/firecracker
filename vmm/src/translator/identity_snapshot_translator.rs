@@ -16,9 +16,18 @@ impl IdentitySnapshotTranslator {
         1024 * 1024 * 2
     }
 }
+
 impl SnapshotTranslator for IdentitySnapshotTranslator {
     fn serialize(&self, microvm_state: &MicrovmState) -> Result<Vec<u8>, Error> {
-        Ok(bincode::serialize(microvm_state).map_err(Error::Serialize)?)
+        let output_bytes = bincode::serialize(microvm_state).map_err(Error::Serialize)?;
+        let limit = self.get_snapshot_size_limit() as usize;
+        let size = output_bytes.len();
+
+        if size > limit {
+            Err(Error::SnapshotTooBig(size as u64, limit as u64))
+        } else {
+            Ok(output_bytes)
+        }
     }
 
     fn deserialize(&self, input: Box<dyn std::io::Read>) -> Result<MicrovmState, Error> {
