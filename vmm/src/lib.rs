@@ -2506,6 +2506,25 @@ impl Vmm {
             .mmio_device_states()
             .map_err(PauseMicrovmError::SaveMmioDeviceState)?;
 
+        // Write the guest memory out to a file, if there is a `mem_file_path` included in the API
+        // request. The file contains only changes to the guest memory (see
+        // `snapshot_memory_to_file` for the definition of changes).
+        if let Some(path) = mem_file_path {
+            if LOGGER.flags() & LogOption::LogDirtyPages as usize > 0 {
+                info!(
+                    "Incremental snapshots are not available when dirty page metrics are enabled"
+                );
+                return Err(PauseMicrovmError::DirtyPageTracking.into());
+            } else if self.vm_config.track_dirty_pages.unwrap_or(false) {
+                self.snapshot_memory_to_file(path)?;
+            } else {
+                info!("Incremental snapshots are not available when track_dirty_pages is disabled");
+                return Err(PauseMicrovmError::DirtyPageTracking.into());
+            }
+        }
+
+        // Write out the VM state snapshot, including VM state, device state, and VCPU state. This
+        // is used by both types of snapshots (shared and incremental) when restoring the VM.
         SnapshotEngine::serialize(
             snapshot_path,
             &MicrovmState::new(
@@ -2520,7 +2539,8 @@ impl Vmm {
         )
         .map_err(PauseMicrovmError::SerializeMicrovmState)?;
 
-        // Sync guest memory.
+        // Sync guest memory, which (in shared mode) makes sure that the mmap() file that backs the
+        // VMs memory is consistent on disk.
         self.guest_memory
             .as_ref()
             .ok_or(PauseMicrovmError::SyncMemory(
@@ -2528,23 +2548,6 @@ impl Vmm {
             ))?
             .sync()
             .map_err(PauseMicrovmError::SyncMemory)?;
-
-        // Write the guest memory out to a file, if there is a `mem_file_path` included in the API
-        // request. The file contains only changes to the guest memory (see
-        // `snapshot_memory_to_file` for the definition of changes).
-        if let Some(path) = mem_file_path {
-            if self.vm_config.track_dirty_pages.unwrap_or(false) {
-                self.snapshot_memory_to_file(path)?;
-            } else if LOGGER.flags() & LogOption::LogDirtyPages as usize > 0 {
-                warn!(
-                    "Incremental snapshots are not available when dirty page metrics are enabled"
-                );
-                return Err(PauseMicrovmError::DirtyPageTracking.into());
-            } else {
-                warn!("Incremental snapshots are not available when track_dirty_pages is disabled");
-                return Err(PauseMicrovmError::DirtyPageTracking.into());
-            }
-        }
 
         Ok(())
     }
