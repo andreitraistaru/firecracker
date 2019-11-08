@@ -1,6 +1,7 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
 use std::rc::Rc;
 use std::result;
 use std::str;
@@ -81,6 +82,31 @@ enum Error<'a> {
     InvalidPathMethod(&'a str, Method),
     // An error occurred when deserializing the json body of a request.
     SerdeJson(serde_json::Error),
+}
+
+impl<'a> fmt::Display for Error<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Error::Generic(ref sc, ref desc) => {
+                write!(f, "Error: status-code: {}, reason: {}", sc, desc)
+            }
+            Error::EmptyID => write!(f, "Error: The resource ID is empty."),
+            Error::InvalidID => write!(
+                f,
+                "Error: The resource ID must only contain alphanumeric characters and '_'."
+            ),
+            Error::InvalidPathMethod(path, ref method) => write!(
+                f,
+                "The HTTP method '{}' and request path '{}' combination is not valid.",
+                method, path
+            ),
+            Error::SerdeJson(ref e) => write!(
+                f,
+                "Error: An error occurred when deserializing the json body of a request {}",
+                e
+            ),
+        }
+    }
 }
 
 // It's convenient to turn errors into HTTP responses directly.
@@ -473,6 +499,7 @@ fn parse_request<'a>(method: Method, path: &'a str, body: &Chunk) -> Result<'a, 
     */
 
     if !path.starts_with('/') {
+        log_received_api_request(describe(&method, &path, None));
         return Err(Error::InvalidPathMethod(path, method));
     }
 
@@ -480,12 +507,24 @@ fn parse_request<'a>(method: Method, path: &'a str, body: &Chunk) -> Result<'a, 
     let path_tokens: Vec<&str> = path[1..].split_terminator('/').collect();
 
     if path_tokens.is_empty() {
+        log_received_api_request(describe(&method, &path, None));
         if method == Method::Get {
             return Ok(ParsedRequest::GetInstanceInfo);
         } else {
             return Err(Error::InvalidPathMethod(path, method));
         }
     }
+
+    log_received_api_request(describe(
+        &method,
+        &path,
+        match path_tokens[0] {
+            // Requests on /mmds should not have the body in the logs as the data
+            // store contains customer data.
+            "mmds" => None,
+            _ => Some(String::from_utf8_lossy(&body.to_vec()).to_string()),
+        },
+    ));
 
     match path_tokens[0] {
         "actions" => parse_actions_req(path, method, body),
@@ -575,7 +614,6 @@ impl hyper::server::Service for ApiServerHttpService {
                 Ok(parsed_req) => match parsed_req {
                     GetInstanceInfo => {
                         METRICS.get_api_requests.instance_info_count.inc();
-                        log_received_api_request(describe(&method_copy, &path, &None));
                         // unwrap() to crash if the other thread poisoned this lock
                         let shared_info = shared_info_lock
                             .read()
@@ -595,9 +633,6 @@ impl hyper::server::Service for ApiServerHttpService {
                         }
                     }
                     PatchMMDS(json_value) => {
-                        // Requests on /mmds should not have the body in the logs as the data
-                        // store contains customer data.
-                        log_received_api_request(describe(&method_copy, &path, &None));
                         let response = mmds_info
                             .lock()
                             .expect("Failed to acquire lock on MMDS info")
@@ -621,9 +656,6 @@ impl hyper::server::Service for ApiServerHttpService {
                         }
                     }
                     PutMMDS(json_value) => {
-                        // Requests on /mmds should not have the body in the logs as the data
-                        // store contains customer data.
-                        log_received_api_request(describe(&method_copy, &path, &None));
                         let response = mmds_info
                             .lock()
                             .expect("Failed to acquire lock on MMDS info")
@@ -637,7 +669,6 @@ impl hyper::server::Service for ApiServerHttpService {
                         }
                     }
                     GetMMDS => {
-                        log_received_api_request(describe(&method_copy, &path, &None));
                         Either::A(future::ok(json_response(
                             StatusCode::Ok,
                             mmds_info
@@ -647,26 +678,20 @@ impl hyper::server::Service for ApiServerHttpService {
                         )))
                     }
                     Sync(vmm_req, response_receiver) => {
-                        // It only makes sense that we firstly log the incoming API request and
-                        // only after that we forward it to the VMM.
-                        let body_desc = match method_copy {
-                            Method::Get => None,
-                            _ => Some(String::from_utf8_lossy(&b.to_vec()).to_string()),
-                        };
-                        log_received_api_request(describe(&method_copy, &path, &body_desc));
-
                         if send_to_vmm(vmm_req, &api_request_sender, &vmm_send_event).is_err() {
                             METRICS.api_server.sync_vmm_send_timeout_count.inc();
                             return Either::A(future::err(hyper::Error::Timeout));
                         }
 
-                        // metric-logging related variables for being able to log response details
-                        let path_copy = path.clone();
-
                         // We need to clone the description of the request because these are moved
                         // in the below closure.
-                        let path_copy_err = path_copy.clone();
+                        let path_copy_err = path.clone();
                         let method_copy_err = method_copy.clone();
+
+                        let body_desc = match method_copy {
+                            Method::Get => None,
+                            _ => Some(String::from_utf8_lossy(&b.to_vec()).to_string()),
+                        };
                         let body_desc_err = body_desc.clone();
 
                         // Sync requests don't receive a response until the response is returned.
@@ -676,7 +701,7 @@ impl hyper::server::Service for ApiServerHttpService {
                             response_receiver
                                 .map(move |result| {
                                     let description =
-                                        describe(&method_copy, &path_copy, &body_desc);
+                                        describe(&method_copy, &path, body_desc);
                                     // `generate_response` and `err` both consume the inner error.
                                     // Errors aren't `Clone`-able so we can't back it up either,
                                     // so we'll rely on the fact that the error was previously
@@ -704,7 +729,7 @@ impl hyper::server::Service for ApiServerHttpService {
                                 .map_err(move |_| {
                                     error!(
                                         "Timeout on {}",
-                                        describe(&method_copy_err, &path_copy_err, &body_desc_err)
+                                        describe(&method_copy_err, &path_copy_err, body_desc_err)
                                     );
                                     METRICS.api_server.sync_response_fails.inc();
                                     hyper::Error::Timeout
@@ -712,7 +737,10 @@ impl hyper::server::Service for ApiServerHttpService {
                         )
                     }
                 },
-                Err(e) => Either::A(future::ok(e.into())),
+                Err(e) => {
+                    info!("{}", e);
+                    Either::A(future::ok(e.into()))
+                },
             }
         }))
     }
@@ -734,13 +762,10 @@ fn log_received_api_request(api_description: String) {
 /// * `path` - path of the API request
 /// * `body` - body of the API request
 ///
-fn describe(method: &Method, path: &str, body: &Option<String>) -> String {
+fn describe(method: &Method, path: &str, body: Option<String>) -> String {
     match body {
-        Some(value) => format!(
-            "synchronous {:?} request on {:?} with body {:?}",
-            method, path, value
-        ),
-        None => format!("synchronous {:?} request on {:?}", method, path),
+        Some(value) => format!("{:?} request on {:?} with body {:?}", method, path, value),
+        None => format!("{:?} request on {:?}", method, path),
     }
 }
 
@@ -1768,17 +1793,17 @@ mod tests {
     #[test]
     fn test_describe() {
         let body: String = String::from("{ \"foo\": \"bar\" }");
-        let msj = describe(&Method::Get, &String::from("/foo/bar"), &Some(body.clone()));
+        let msg = describe(&Method::Get, &String::from("/foo/bar"), Some(body.clone()));
         assert_eq!(
-            msj,
-            "synchronous Get request on \"/foo/bar\" with body \"{ \\\"foo\\\": \\\"bar\\\" }\""
+            msg,
+            "Get request on \"/foo/bar\" with body \"{ \\\"foo\\\": \\\"bar\\\" }\""
         );
-        let msj = describe(&Method::Put, &String::from("/foo/bar"), &Some(body));
+        let msg = describe(&Method::Put, &String::from("/foo/bar"), Some(body));
         assert_eq!(
-            msj,
-            "synchronous Put request on \"/foo/bar\" with body \"{ \\\"foo\\\": \\\"bar\\\" }\""
+            msg,
+            "Put request on \"/foo/bar\" with body \"{ \\\"foo\\\": \\\"bar\\\" }\""
         );
-        let msj = describe(&Method::Patch, &String::from("/foo/bar"), &None);
-        assert_eq!(msj, "synchronous Patch request on \"/foo/bar\"")
+        let msg = describe(&Method::Patch, &String::from("/foo/bar"), None);
+        assert_eq!(msg, "Patch request on \"/foo/bar\"")
     }
 }
