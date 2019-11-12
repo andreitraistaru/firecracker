@@ -12,7 +12,7 @@ use std;
 use std::io::{self, Read, Write};
 use std::os::unix::io::RawFd;
 use std::ptr::null_mut;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use libc;
 
@@ -111,7 +111,7 @@ pub struct MemoryMapping {
     size: usize,
     // `dirty_areas` tracks the areas of memory which have been written to through the
     // `MemoryMapping` interface.
-    dirty_areas: Option<Mutex<Bitmap>>,
+    dirty_areas: Option<Bitmap>,
 }
 
 // Send and Sync aren't automatically inherited for the raw address pointer.
@@ -150,7 +150,7 @@ impl MemoryMapping {
         }
         // If we're tracking dirty pages, then create the bitmap that does the tracking
         let dirty_areas = if track_dirty_pages {
-            Some(Mutex::new(Bitmap::new(descriptor.size, 4096)))
+            Some(Bitmap::new(descriptor.size, 4096))
         } else {
             None
         };
@@ -181,7 +181,7 @@ impl MemoryMapping {
         }
         // If we're tracking dirty pages, then create the bitmap that does the tracking
         let dirty_areas = if track_dirty_pages {
-            Some(Mutex::new(Bitmap::new(size, 4096)))
+            Some(Bitmap::new(size, 4096))
         } else {
             None
         };
@@ -219,7 +219,7 @@ impl MemoryMapping {
         // This unwrap() is OK because the only reason it would fail is because another thread
         // panicked while holding this lock, in which case the FC process would be dead anyway.
         if let Some(dirty_areas) = &self.dirty_areas {
-            Some(dirty_areas.lock().unwrap().clone())
+            Some(dirty_areas.clone())
         } else {
             None
         }
@@ -230,7 +230,7 @@ impl MemoryMapping {
         // This unwrap() is OK because the only reason it would fail is because another thread
         // panicked while holding this lock, in which case the FC process would be dead anyway.
         if let Some(dirty_areas) = &self.dirty_areas {
-            dirty_areas.lock().unwrap().set_addr_range(offset, len);
+            dirty_areas.set_addr_range(offset, len);
         }
     }
 
@@ -539,7 +539,7 @@ impl Drop for MemoryMapping {
 /// page-size aware, so it converts addresses to page numbers before setting or clearing the bits.
 #[derive(Debug, Clone)]
 pub struct Bitmap {
-    map: Vec<u64>,
+    map: Vec<AtomicU64>,
     size: usize,
     page_size: usize,
 }
@@ -552,8 +552,16 @@ impl Bitmap {
         // Bit size is the number of bits in the bitmap, always at least 1 (to store the state of
         // the '0' address).
         let bit_size = std::cmp::max(1, byte_size / page_size);
+        // Create the map of `AtomicU64`, allowing the bit set operations to be done on a non-mut
+        // `Bitmap`, avoiding the need for a Mutex or other serialization.
+        let map_size = ((bit_size - 1) >> 6) + 1;
+        let map = (0..map_size).map(|_| AtomicU64::new(0)).collect();
+        for _ in 0..map_size {
+            map.push(AtomicU64::new(0));
+        }
+
         Bitmap {
-            map: vec![0; ((bit_size - 1) >> 6) + 1],
+            map,
             size: bit_size,
             page_size,
         }
@@ -563,7 +571,7 @@ impl Bitmap {
     #[inline]
     fn is_bit_set(&self, n: usize) -> bool {
         if n <= self.size {
-            (self.map[n >> 6] & (1 << (n & 63))) != 0
+            (self.map[n >> 6].load(Ordering::SeqCst) & (1 << (n & 63))) != 0
         } else {
             // Out-of-range bits are always unset.
             false
@@ -576,7 +584,7 @@ impl Bitmap {
     }
 
     /// Set a range of bits starting at `start_addr` and continuing for the next `len` bytes.
-    pub fn set_addr_range(&mut self, start_addr: usize, len: usize) {
+    pub fn set_addr_range(&self, start_addr: usize, len: usize) {
         let first_bit = start_addr / self.page_size;
         let page_count = (len + self.page_size - 1) / self.page_size;
         for n in first_bit..(first_bit + page_count) {
@@ -584,7 +592,7 @@ impl Bitmap {
                 // Attempts to set bits beyond the end of the bitmap are simply ignored.
                 break;
             }
-            self.map[n >> 6] |= 1 << (n & 63);
+            self.map[n >> 6].fetch_or(1 << (n & 63), Ordering::SeqCst);
         }
     }
 
@@ -597,6 +605,26 @@ impl Bitmap {
     /// round up the size when creating the bitmap.
     pub fn is_empty(&self) -> bool {
         false
+    }
+}
+
+/// Implementing `Clone` for `Bitmap` allows us to return a deep copy of the bitmap for taking
+/// snapshots and other metrics. This copy is sequentially consistent (in that it reflects all
+/// changes that happen-before the clone), but not consistent in the face of concurrent writes
+/// (i.e. any writes that happen concurrently with .clone() may or may not be reflected).
+impl Clone for Bitmap {
+    fn clone(&self) -> Self {
+        let map = self
+            .map
+            .iter()
+            .map(|i| i.load(Ordering::SeqCst))
+            .map(AtomicU64::new)
+            .collect();
+        Bitmap {
+            map,
+            size: self.size,
+            page_size: self.page_size,
+        }
     }
 }
 
@@ -622,7 +650,7 @@ mod tests {
 
     #[test]
     fn bitmap_basic() {
-        let mut b = Bitmap::new(1024, 128);
+        let b = Bitmap::new(1024, 128);
         assert_eq!(b.is_empty(), false);
         assert_eq!(b.len(), 8);
         b.set_addr_range(128, 129);
@@ -630,11 +658,15 @@ mod tests {
         assert!(b.is_addr_set(128));
         assert!(b.is_addr_set(256));
         assert!(!b.is_addr_set(384));
+
+        let copy_b = b.clone();
+        assert!(copy_b.is_addr_set(256));
+        assert!(!copy_b.is_addr_set(384));
     }
 
     #[test]
     fn bitmap_out_of_range() {
-        let mut b = Bitmap::new(1024, 128);
+        let b = Bitmap::new(1024, 128);
         // Set a partial range that goes beyond the end of the bitmap
         b.set_addr_range(768, 512);
         assert!(b.is_addr_set(768));
