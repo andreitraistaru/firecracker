@@ -246,7 +246,6 @@ impl Vm {
                     userspace_addr: host_addr as u64,
                     flags,
                 };
-
                 self.fd.set_user_memory_region(memory_region)
             })
             .map_err(Error::SetUserMemoryRegion)?;
@@ -488,10 +487,9 @@ impl VcpuHandle {
 
     pub fn validate_active(&self) -> Result<()> {
         match self.state {
-            VcpuHandleState::Active(_) => (),
-            _ => Err(Error::VcpuInvalidState)?,
-        };
-        Ok(())
+            VcpuHandleState::Active(_) => Ok(()),
+            _ => Err(Error::VcpuInvalidState),
+        }
     }
 
     /// Configures a vcpu for a fresh boot of the guest.
@@ -510,10 +508,10 @@ impl VcpuHandle {
         match self.state {
             VcpuHandleState::Inactive(ref mut vcpu) => {
                 vcpu.configure(machine_config, kernel_load_addr, vm)?;
+                Ok(())
             }
-            _ => Err(Error::VcpuInvalidState)?,
-        };
-        Ok(())
+            _ => Err(Error::VcpuInvalidState),
+        }
     }
 
     /// Starts the vcpu on its own thread.
@@ -543,7 +541,7 @@ impl VcpuHandle {
             _ => {
                 // Revert the swap.
                 std::mem::swap(&mut self.state, &mut state);
-                Err(Error::VcpuInvalidState)?;
+                return Err(Error::VcpuInvalidState);
             }
         };
 
@@ -553,7 +551,7 @@ impl VcpuHandle {
     pub fn send_event(&self, event: VcpuEvent) -> Result<()> {
         let thread = match self.state {
             VcpuHandleState::Active(ref thread) => thread,
-            _ => Err(Error::VcpuInvalidState)?,
+            _ => return Err(Error::VcpuInvalidState),
         };
         // Use expect() to crash if the other thread closed this channel.
         self.event_sender
@@ -1201,10 +1199,12 @@ mod tests {
         pub fn join_vcpu_thread(self) -> Result<()> {
             match self.state {
                 // Use expect() to crash the other thread had panicked.
-                VcpuHandleState::Active(thread) => thread.join().expect("vcpu thread panicked"),
-                _ => Err(Error::VcpuInvalidState)?,
-            };
-            Ok(())
+                VcpuHandleState::Active(thread) => {
+                    thread.join().expect("vcpu thread panicked");
+                    Ok(())
+                }
+                _ => Err(Error::VcpuInvalidState),
+            }
         }
     }
 
@@ -1598,7 +1598,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn invalid_seccomp_lvl() {
+    fn test_vcpu_run_failed() {
         let (_, mut vcpu) = setup_vcpu();
         // Setting an invalid seccomp level should panic.
         vcpu.run(seccomp::SECCOMP_LEVEL_ADVANCED + 10);

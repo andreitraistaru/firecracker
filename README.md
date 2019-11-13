@@ -19,9 +19,11 @@ the Linux Kernel Virtual Machine (KVM) to create and run microVMs. Firecracker
 has a minimalist design. It excludes unnecessary devices and guest-facing
 functionality to reduce the memory footprint and attack surface area of each
 microVM. This improves security, decreases the startup time, and increases
-hardware utilization. Firecracker currently supports Intel CPUs, with planned
-AMD and Arm support. Firecracker will also be integrated with popular container
-runtimes.
+hardware utilization. Firecracker currently supports Intel, AMD (preview) and
+Arm (preview) CPUs. Firecracker has also been integrated in container runtimes,
+for example
+[Kata Containers](https://github.com/kata-containers/documentation/wiki/Initial-release-of-Kata-Containers-with-Firecracker-support)
+and [Weaveworks Ignite](https://github.com/weaveworks/ignite).
 
 Firecracker was developed at Amazon Web Services to accelerate the speed and
 efficiency of services like [AWS Lambda](https://aws.amazon.com/lambda/) and
@@ -34,7 +36,8 @@ To read more about Firecracker, check out
 ## Getting Started
 
 To get started with Firecracker, download the latest
-[release](https://github.com/firecracker-microvm/firecracker/releases) binaries or build it from source.
+[release](https://github.com/firecracker-microvm/firecracker/releases) binaries
+or build it from source.
 
 You can build Firecracker on any system that has Docker running (we use a
 development container) as follows:
@@ -43,10 +46,12 @@ development container) as follows:
 git clone https://github.com/firecracker-microvm/firecracker
 cd firecracker
 tools/devtool build
+toolchain="$(uname -m)-unkown-linux-musl"
 ```
 
-The Firecracker binary will be placed at `build/debug/firecracker`. For more
-information on building, testing, and running Firecracker, go to the
+The Firecracker binary will be placed at
+`build/cargo_target/${toolchain}/debug/firecracker`. For more information on
+building, testing, and running Firecracker, go to the
 [quickstart guide](docs/getting-started.md).
 
 The overall security of Firecracker microVMs, including the ability to meet the
@@ -134,8 +139,8 @@ Frequently asked questions are collected in our [FAQ doc](FAQ.md).
 You can get in touch with the Firecracker community in the following ways:
 - Security-related issues, see our [security policy document](SECURITY-POLICY.md).
 - Chat with us on our
-  [Slack workspace](https://tinyurl.com/firecracker-microvm). _Note: most of the
-  maintainers are on a European time zone._
+  [Slack workspace](https://join.slack.com/t/firecracker-microvm/shared_invite/enQtNDY2NTUwMzQ3MDE1LWIwMzA0OWFkMTZhMTlmMDZiMmFkYjMyODMxMGQ1ZjliMzJjNjJiNWRhNWNkOGEyNmUxNmRkMjZhYTc3MmVjZjM).
+  _Note: most of the maintainers are on a European time zone._
 - Open a GitHub issue in this repository.
 - Email the maintainers at
   [firecracker-maintainers@amazon.com](mailto:firecracker-maintainers@amazon.com).

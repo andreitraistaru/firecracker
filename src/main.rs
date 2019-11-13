@@ -12,25 +12,29 @@ extern crate jailer;
 extern crate logger;
 extern crate mmds;
 extern crate seccomp;
+extern crate sys_util;
 extern crate vmm;
 
 use backtrace::Backtrace;
 use clap::{App, Arg};
 
 use std::fs;
-use std::io::ErrorKind;
+use std::io;
 use std::panic;
 use std::path::PathBuf;
 use std::process;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, RwLock};
+use std::thread;
 
 use api_server::{ApiServer, Error};
 use fc_util::validators::validate_instance_id;
 use logger::{Metric, LOGGER, METRICS};
 use mmds::MMDS;
+use sys_util::{EventFd, Terminal};
 use vmm::signal_handler::register_signal_handlers;
 use vmm::vmm_config::instance_info::{InstanceInfo, InstanceState};
+use vmm::{EventLoopExitReason, Vmm};
 
 const DEFAULT_API_SOCK_PATH: &str = "/tmp/firecracker.socket";
 const DEFAULT_INSTANCE_ID: &str = "anonymous-instance";
@@ -44,6 +48,10 @@ fn main() {
         error!("Failed to register signal handlers: {}", e);
         process::exit(i32::from(vmm::FC_EXIT_CODE_GENERIC_ERROR));
     }
+
+    // We need this so that we can reset terminal to canonical mode if panic occurs.
+    let stdin = io::stdin();
+
     // Start firecracker by setting up a panic hook, which will be called before
     // terminating as we're building with panic = "abort".
     // It's worth noting that the abort is caused by sending a SIG_ABORT signal to the process.
@@ -52,6 +60,13 @@ fn main() {
         // origin of the panic, including the payload passed to panic! and the source code location
         // from which the panic originated.
         error!("Firecracker {}", info);
+        if let Err(e) = stdin.lock().set_canon_mode() {
+            error!(
+                "Failure while trying to reset stdin to canonical mode: {}",
+                e
+            );
+        }
+
         METRICS.vmm.panic_count.inc();
         let bt = Backtrace::new();
         error!("{:?}", bt);
@@ -116,6 +131,14 @@ fn main() {
                 .takes_value(true)
                 .required(false),
         )
+        .arg(
+            Arg::with_name("no-api")
+                .long("no-api")
+                .help("Optional parameter which allows starting and using a microVM without an active API socket.")
+                .takes_value(false)
+                .required(false)
+                .requires("config-file")
+        )
         .get_matches();
 
     let bind_path = cmd_arguments
@@ -155,41 +178,226 @@ fn main() {
         .map(fs::read_to_string)
         .map(|x| x.expect("Unable to open or read from the configuration file"));
 
-    let shared_info = Arc::new(RwLock::new(InstanceInfo {
+    let no_api = cmd_arguments.is_present("no-api");
+
+    let api_shared_info = Arc::new(RwLock::new(InstanceInfo {
         state: InstanceState::Uninitialized,
         id: instance_id,
         vmm_version: crate_version!().to_string(),
     }));
-    let mmds_info = MMDS.clone();
+
     let (to_vmm, from_api) = channel();
-    let server =
-        ApiServer::new(mmds_info, shared_info.clone(), to_vmm).expect("Cannot create API server");
+    let api_event_fd = EventFd::new()
+        .map_err(Error::Eventfd)
+        .expect("Cannot create API Eventfd.");
 
-    let api_event_fd = server
-        .get_event_fd_clone()
-        .expect("Cannot clone API eventFD.");
+    // Api enabled.
+    if !no_api {
+        // MMDS only supported with API.
+        let mmds_info = MMDS.clone();
 
-    let _vmm_thread_handle = vmm::start_vmm_thread(
-        shared_info,
+        let kick_vmm_efd = api_event_fd.try_clone().expect("cannot clone Eventfd.");
+        let vmm_shared_info = api_shared_info.clone();
+
+        thread::Builder::new()
+            .name("fc_api".to_owned())
+            .spawn(move || {
+                match ApiServer::new(mmds_info, vmm_shared_info, to_vmm, kick_vmm_efd)
+                    .expect("Cannot create API server")
+                    .bind_and_run(bind_path, start_time_us, start_time_cpu_us, seccomp_level)
+                {
+                    Ok(_) => (),
+                    Err(Error::Io(inner)) => match inner.kind() {
+                        io::ErrorKind::AddrInUse => {
+                            panic!("Failed to open the API socket: {:?}", Error::Io(inner))
+                        }
+                        _ => panic!(
+                            "Failed to communicate with the API socket: {:?}",
+                            Error::Io(inner)
+                        ),
+                    },
+                    Err(eventfd_err @ Error::Eventfd(_)) => {
+                        panic!("Failed to open the API socket: {:?}", eventfd_err)
+                    }
+                }
+            })
+            .expect("API thread spawn failed.");
+    }
+
+    start_vmm(
+        api_shared_info,
         api_event_fd,
         from_api,
         seccomp_level,
         vmm_config_json,
     );
+}
 
-    match server.bind_and_run(bind_path, start_time_us, start_time_cpu_us, seccomp_level) {
-        Ok(_) => (),
-        Err(Error::Io(inner)) => match inner.kind() {
-            ErrorKind::AddrInUse => panic!("Failed to open the API socket: {:?}", Error::Io(inner)),
-            _ => panic!(
-                "Failed to communicate with the API socket: {:?}",
-                Error::Io(inner)
-            ),
-        },
-        Err(eventfd_err @ Error::Eventfd(_)) => {
-            panic!("Failed to open the API socket: {:?}", eventfd_err)
-        }
+/// Creates and starts a vmm.
+///
+/// # Arguments
+///
+/// * `api_shared_info` - A parameter for storing information on the VMM (e.g the current state).
+/// * `api_event_fd` - An event fd used for receiving API associated events.
+/// * `from_api` - The receiver end point of the communication channel.
+/// * `seccomp_level` - The level of seccomp filtering used. Filters are loaded before executing
+///                     guest code. Can be one of 0 (seccomp disabled), 1 (filter by syscall
+///                     number) or 2 (filter by syscall number and argument values).
+/// * `config_json` - Optional parameter that can be used to configure the guest machine without
+///                   using the API socket.
+fn start_vmm(
+    api_shared_info: Arc<RwLock<InstanceInfo>>,
+    api_event_fd: EventFd,
+    from_api: Receiver<api_server::VmmRequest>,
+    seccomp_level: u32,
+    config_json: Option<String>,
+) {
+    // If this fails, consider it fatal. Use expect().
+    let mut vmm =
+        Vmm::new(api_shared_info, &api_event_fd, seccomp_level).expect("Cannot create VMM");
+
+    if let Some(json) = config_json {
+        vmm.configure_from_json(json).unwrap_or_else(|err| {
+            error!(
+                "Setting configuration for VMM from one single json failed: {}",
+                err
+            );
+            process::exit(i32::from(vmm::FC_EXIT_CODE_BAD_CONFIGURATION));
+        });
+        vmm.start_microvm().unwrap_or_else(|err| {
+            error!(
+                "Starting microvm that was configured from one single json failed: {}",
+                err
+            );
+            process::exit(i32::from(vmm::FC_EXIT_CODE_UNEXPECTED_ERROR));
+        });
+        info!("Successfully started microvm that was configured from one single json");
     }
+
+    let exit_code = loop {
+        match vmm.run_event_loop() {
+            Err(e) => {
+                error!("Abruptly exited VMM control loop: {:?}", e);
+                break vmm::FC_EXIT_CODE_GENERIC_ERROR;
+            }
+            Ok(exit_reason) => match exit_reason {
+                EventLoopExitReason::Break => {
+                    info!("Gracefully terminated VMM control loop");
+                    break vmm::FC_EXIT_CODE_OK;
+                }
+                EventLoopExitReason::ControlAction => {
+                    if let Err(exit_code) = vmm_control_event(&mut vmm, &api_event_fd, &from_api) {
+                        break exit_code;
+                    }
+                }
+            },
+        };
+    };
+
+    vmm.stop(i32::from(exit_code));
+}
+
+/// Handles the control event.
+/// Receives and runs the Vmm action and sends back a response.
+/// Provides program exit codes on errors.
+fn vmm_control_event(
+    vmm: &mut Vmm,
+    api_event_fd: &EventFd,
+    from_api: &Receiver<api_server::VmmRequest>,
+) -> Result<(), u8> {
+    api_event_fd.read().map_err(|e| {
+        error!("Error reading VMM API event_fd {:?}", e);
+        vmm::FC_EXIT_CODE_GENERIC_ERROR
+    })?;
+
+    match from_api.try_recv() {
+        Ok(vmm_request) => {
+            use api_server::VmmAction::*;
+            let (action_request, sender) = vmm_request.unpack();
+            let mut exit_code: Option<i32> = None;
+            let response = match action_request {
+                ConfigureBootSource(boot_source_body) => vmm
+                    .configure_boot_source(
+                        boot_source_body.kernel_image_path,
+                        boot_source_body.boot_args,
+                    )
+                    .map(|_| api_server::VmmData::Empty),
+                ConfigureLogger(logger_description) => vmm
+                    .init_logger(logger_description)
+                    .map(|_| api_server::VmmData::Empty),
+                FlushMetrics => vmm.flush_metrics().map(|_| api_server::VmmData::Empty),
+                GetVmConfiguration => Ok(api_server::VmmData::MachineConfiguration(
+                    vmm.vm_config().clone(),
+                )),
+                InsertBalloon(balloon_config) => vmm
+                    .insert_balloon(balloon_config)
+                    .map(|_| api_server::VmmData::Empty),
+                InsertBlockDevice(block_device_config) => vmm
+                    .insert_block_device(block_device_config)
+                    .map(|_| api_server::VmmData::Empty),
+                InsertNetworkDevice(netif_body) => vmm
+                    .insert_net_device(netif_body)
+                    .map(|_| api_server::VmmData::Empty),
+                #[cfg(target_arch = "x86_64")]
+                PauseToSnapshot(snapshot_path) => {
+                    let result = vmm.pause_to_snapshot(snapshot_path);
+                    if result.is_ok() {
+                        exit_code = Some(i32::from(vmm::FC_EXIT_CODE_OK));
+                    }
+                    result.map(|_| api_server::VmmData::Empty)
+                }
+                PauseVCPUs => vmm.pause_vcpus().map(|_| api_server::VmmData::Empty),
+                RescanBlockDevice(drive_id) => vmm
+                    .rescan_block_device(&drive_id)
+                    .map(|_| api_server::VmmData::Empty),
+                ResumeVCPUs => vmm.resume_vcpus().map(|_| api_server::VmmData::Empty),
+                #[cfg(target_arch = "x86_64")]
+                ResumeFromSnapshot(snapshot_path, mem_file_path) => {
+                    let result = vmm.resume_from_snapshot(snapshot_path, mem_file_path);
+                    if result.is_err() {
+                        error!("Failed to resume from snapshot. Will terminate the VM.");
+                        exit_code = Some(i32::from(vmm::FC_EXIT_CODE_RESUME_ERROR));
+                    }
+                    result.map(|_| api_server::VmmData::Empty)
+                }
+                SetVsockDevice(vsock_cfg) => vmm
+                    .set_vsock_device(vsock_cfg)
+                    .map(|_| api_server::VmmData::Empty),
+                StartMicroVm => vmm.start_microvm().map(|_| api_server::VmmData::Empty),
+                SendCtrlAltDel => vmm.send_ctrl_alt_del().map(|_| api_server::VmmData::Empty),
+                SetVmConfiguration(machine_config_body) => vmm
+                    .set_vm_configuration(machine_config_body)
+                    .map(|_| api_server::VmmData::Empty),
+                UpdateBlockDevicePath(drive_id, path_on_host) => vmm
+                    .set_block_device_path(drive_id, path_on_host)
+                    .map(|_| api_server::VmmData::Empty),
+                UpdateBalloon(balloon_config) => vmm
+                    .update_balloon(balloon_config)
+                    .map(|_| api_server::VmmData::Empty),
+                UpdateNetworkInterface(netif_update) => vmm
+                    .update_net_device(netif_update)
+                    .map(|_| api_server::VmmData::Empty),
+            };
+            // Run the requested action and send back the result.
+            sender
+                .send(response)
+                .map_err(|_| ())
+                .expect("one-shot channel closed");
+
+            if let Some(code) = exit_code {
+                // Allow the API server to deliver its response.
+                thread::sleep(std::time::Duration::from_millis(150));
+                vmm.stop(code);
+            }
+        }
+        Err(TryRecvError::Empty) => {
+            warn!("Got a spurious notification from api thread");
+        }
+        Err(TryRecvError::Disconnected) => {
+            panic!("The channel's sending half was disconnected. Cannot receive data.");
+        }
+    };
+    Ok(())
 }
 
 #[cfg(test)]
@@ -237,7 +445,6 @@ mod tests {
         false
     }
 
-    #[allow(clippy::unit_cmp)]
     #[test]
     fn test_main() {
         const FIRECRACKER_INIT_TIMEOUT_MILLIS: u64 = 150;
@@ -269,10 +476,8 @@ mod tests {
         LOGGER
             .init(
                 &AppInfo::new("Firecracker", "1.0"),
-                "TEST-ID",
-                log_file_temp.path().to_str().unwrap().to_string(),
-                metrics_file_temp.path().to_str().unwrap().to_string(),
-                &[],
+                Box::new(log_file_temp),
+                Box::new(metrics_file_temp),
             )
             .expect("Could not initialize logger.");
 
@@ -287,16 +492,21 @@ mod tests {
         fs::remove_file(DEFAULT_API_SOCK_PATH).expect("failure in removing socket file");
 
         // Look for the expected backtrace inside the log
-        assert!(
-            validate_backtrace(
-                log_file.as_str(),
-                &[
-                    // Lines containing these words should have appeared in the log, in this order
-                    ("ERROR", "main.rs", "Firecracker panicked at"),
-                    ("ERROR", "main.rs", "stack backtrace:"),
-                    ("0:", "0x", "firecracker::main::"),
-                ],
-            ) || println!("Could not validate backtrace!\n {:?}", Backtrace::new()) != ()
+        let backtrace_check_result = validate_backtrace(
+            log_file.as_str(),
+            &[
+                // Lines containing these words should have appeared in the log, in this order
+                ("ERROR", "main.rs", "Firecracker panicked at"),
+                ("ERROR", "main.rs", "stack backtrace:"),
+                ("0:", "0x", "firecracker::main::"),
+            ],
         );
+
+        // Since here we have bound `stderr` to a file as a result of initializing the logger,
+        // we need to output debugging info on test failure to `stdout` instead.
+        if !backtrace_check_result {
+            println!("Could not validate backtrace!\n {:?}", Backtrace::new());
+            panic!();
+        }
     }
 }

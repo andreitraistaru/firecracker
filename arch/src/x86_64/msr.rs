@@ -15,6 +15,7 @@ pub enum Error {
     SetModelSpecificRegisters(io::Error),
 }
 
+/// Result wrapper of MSR related errors.
 pub type Result<T> = result::Result<T, Error>;
 
 /// MSR range
@@ -70,7 +71,7 @@ macro_rules! MSR_RANGE {
 }
 
 // List of MSRs that can be serialized. List is sorted in ascending order of MSRs addresses.
-static WHITELISTED_MSR_RANGES: &'static [MsrRange] = &[
+static WHITELISTED_MSR_RANGES: &[MsrRange] = &[
     SINGLE_MSR!(MSR_IA32_P5_MC_ADDR),
     SINGLE_MSR!(MSR_IA32_P5_MC_TYPE),
     SINGLE_MSR!(MSR_IA32_TSC),
@@ -224,6 +225,7 @@ pub fn setup_msrs_for_boot(vcpu: &VcpuFd) -> Result<()> {
         .map_err(Error::SetModelSpecificRegisters)
 }
 
+/// Gets the list of MSRs to be serialized.
 pub fn supported_guest_msrs(kvm_fd: &Kvm) -> io::Result<MsrList> {
     let mut msr_list = kvm_fd.get_msr_index_list()?;
 

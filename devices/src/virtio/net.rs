@@ -10,7 +10,6 @@ use std::cmp;
 use std::io::Read;
 use std::io::{self, Write};
 use std::mem;
-use std::net::Ipv4Addr;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -62,10 +61,6 @@ pub const NET_EVENTS_COUNT: usize = 5;
 pub enum Error {
     /// Open tap device failed.
     TapOpen(TapError),
-    /// Setting tap IP failed.
-    TapSetIp(TapError),
-    /// Setting tap netmask failed.
-    TapSetNetmask(TapError),
     /// Setting tap interface offload flags failed.
     TapSetOffload(TapError),
     /// Setting vnet header size failed.
@@ -664,11 +659,15 @@ pub struct EpollConfig {
     rx_rate_limiter_token: u64,
     tx_rate_limiter_token: u64,
     epoll_raw_fd: RawFd,
-    sender: mpsc::Sender<Box<EpollHandler>>,
+    sender: mpsc::Sender<Box<dyn EpollHandler>>,
 }
 
 impl EpollConfigConstructor for EpollConfig {
-    fn new(first_token: u64, epoll_raw_fd: RawFd, sender: mpsc::Sender<Box<EpollHandler>>) -> Self {
+    fn new(
+        first_token: u64,
+        epoll_raw_fd: RawFd,
+        sender: mpsc::Sender<Box<dyn EpollHandler>>,
+    ) -> Self {
         EpollConfig {
             rx_tap_token: first_token + u64::from(RX_TAP_EVENT),
             rx_queue_token: first_token + u64::from(RX_QUEUE_EVENT),
@@ -747,32 +746,6 @@ impl Net {
         })
     }
 
-    /// Create a new virtio network device with the given IP address and
-    /// netmask.
-    pub fn new(
-        ip_addr: Ipv4Addr,
-        netmask: Ipv4Addr,
-        guest_mac: Option<&MacAddr>,
-        epoll_config: EpollConfig,
-        rx_rate_limiter: Option<RateLimiter>,
-        tx_rate_limiter: Option<RateLimiter>,
-        allow_mmds_requests: bool,
-    ) -> Result<Self> {
-        let tap = Tap::new().map_err(Error::TapOpen)?;
-        tap.set_ip_addr(ip_addr).map_err(Error::TapSetIp)?;
-        tap.set_netmask(netmask).map_err(Error::TapSetNetmask)?;
-        tap.enable().map_err(Error::TapEnable)?;
-
-        Self::new_with_tap(
-            tap,
-            guest_mac,
-            epoll_config,
-            rx_rate_limiter,
-            tx_rate_limiter,
-            allow_mmds_requests,
-        )
-    }
-
     fn guest_mac(&self) -> Option<MacAddr> {
         if self.config_space.len() < MAC_ADDR_LEN {
             None
@@ -793,35 +766,16 @@ impl VirtioDevice for Net {
         QUEUE_SIZES
     }
 
-    fn features(&self, page: u32) -> u32 {
-        match page {
-            0 => self.avail_features as u32,
-            1 => (self.avail_features >> 32) as u32,
-            _ => {
-                warn!("Received request for unknown features page: {}", page);
-                0u32
-            }
-        }
+    fn avail_features(&self) -> u64 {
+        self.avail_features
     }
 
-    fn ack_features(&mut self, page: u32, value: u32) {
-        let mut v = match page {
-            0 => u64::from(value),
-            1 => u64::from(value) << 32,
-            _ => {
-                warn!("Cannot acknowledge unknown features page: {}", page);
-                0u64
-            }
-        };
+    fn acked_features(&self) -> u64 {
+        self.acked_features
+    }
 
-        // Check if the guest is ACK'ing a feature that we didn't claim to have.
-        let unrequested_features = v & !self.avail_features;
-        if unrequested_features != 0 {
-            warn!("Received acknowledge request for unknown feature: {:x}", v);
-            // Don't count these features as acked.
-            v &= !unrequested_features;
-        }
-        self.acked_features |= v;
+    fn set_acked_features(&mut self, acked_features: u64) {
+        self.acked_features = acked_features;
     }
 
     fn read_config(&self, offset: u64, mut data: &mut [u8]) {
@@ -993,14 +947,6 @@ impl VirtioDevice for Net {
         Err(ActivateError::BadActivate)
     }
 
-    fn avail_features(&self) -> u64 {
-        self.avail_features
-    }
-
-    fn acked_features(&self) -> u64 {
-        self.acked_features
-    }
-
     fn config_space(&self) -> Vec<u8> {
         self.config_space.to_vec()
     }
@@ -1016,8 +962,8 @@ pub struct NetState {
 
 impl NetState {
     pub fn new(
-        device: &VirtioDevice,
-        maybe_handler: Option<&EpollHandler>,
+        device: &dyn VirtioDevice,
+        maybe_handler: Option<&dyn EpollHandler>,
     ) -> result::Result<NetState, SpecificVirtioDeviceStateError> {
         let net_device = device
             .as_any()
@@ -1057,11 +1003,11 @@ impl NetState {
         &self,
         generic_virtio_device_state: &GenericVirtioDeviceState,
         epoll_config: EpollConfig,
-    ) -> Result<Box<VirtioDevice>> {
+    ) -> Result<Box<dyn VirtioDevice>> {
         // Create Net device.
         let tap = match &self.tap_if_name {
             Some(tap_if_name) => Tap::open_named(tap_if_name).map_err(Error::TapOpen)?,
-            None => Tap::new().map_err(Error::TapOpen)?,
+            None => return Err(Error::TapOpen(TapError::InvalidIfname)),
         };
         let mut net = Net::new_with_tap(
             tap,
@@ -1101,6 +1047,7 @@ impl NetState {
 // don't implement the trait.
 #[allow(clippy::assertions_on_constants)]
 mod tests {
+    use std::net::Ipv4Addr;
     use std::sync::mpsc::{channel, Receiver};
     use std::thread;
     use std::time::Duration;
@@ -1117,6 +1064,8 @@ mod tests {
 
     const EPOLLIN: epoll::Events = epoll::Events::EPOLLIN;
 
+    static NEXT_INDEX: AtomicUsize = AtomicUsize::new(1);
+
     /// Will read $metric, run the code in $block, then assert metric has increased by $delta.
     macro_rules! check_metric_after_block {
         ($metric:expr, $delta:expr, $block:expr) => {{
@@ -1124,6 +1073,26 @@ mod tests {
             let _ = $block;
             assert_eq!($metric.count(), before + $delta, "unexpected metric value");
         }};
+    }
+    fn create_net(
+        guest_mac: Option<&MacAddr>,
+        epoll_config: EpollConfig,
+        rx_rate_limiter: Option<RateLimiter>,
+        tx_rate_limiter: Option<RateLimiter>,
+        allow_mmds_requests: bool,
+    ) -> Result<Net> {
+        let next_tap = NEXT_INDEX.fetch_add(1, Ordering::SeqCst);
+        let tap = Tap::open_named(&format!("net{}", next_tap)).map_err(Error::TapOpen)?;
+        tap.enable().map_err(Error::TapEnable)?;
+
+        Net::new_with_tap(
+            tap,
+            guest_mac,
+            epoll_config,
+            rx_rate_limiter,
+            tx_rate_limiter,
+            allow_mmds_requests,
+        )
     }
 
     pub struct TestMutators {
@@ -1141,7 +1110,7 @@ mod tests {
     struct DummyNet {
         net: Net,
         epoll_raw_fd: i32,
-        _receiver: Receiver<Box<EpollHandler>>,
+        _receiver: Receiver<Box<dyn EpollHandler>>,
     }
 
     impl DummyNet {
@@ -1151,9 +1120,7 @@ mod tests {
             let epoll_config = EpollConfig::new(0, epoll_raw_fd, sender);
 
             DummyNet {
-                net: Net::new(
-                    "192.168.249.1".parse().unwrap(),
-                    "255.255.255.0".parse().unwrap(),
+                net: create_net(
                     guest_mac,
                     epoll_config,
                     // rate limiters present but with _very high_ allowed rate
@@ -1364,14 +1331,14 @@ mod tests {
                 | 1 << VIRTIO_NET_F_HOST_UFO
                 | 1 << VIRTIO_F_VERSION_1;
 
-            assert_eq!(n.features(0), features as u32);
-            assert_eq!(n.features(1), (features >> 32) as u32);
+            assert_eq!(n.avail_features_by_page(0), features as u32);
+            assert_eq!(n.avail_features_by_page(1), (features >> 32) as u32);
             for i in 2..10 {
-                assert_eq!(n.features(i), 0u32);
+                assert_eq!(n.avail_features_by_page(i), 0u32);
             }
 
             for i in 0..10 {
-                n.ack_features(i, u32::MAX);
+                n.ack_features_by_page(i, u32::MAX);
             }
 
             assert_eq!(n.acked_features, features);
@@ -1456,46 +1423,6 @@ mod tests {
             n.read_config(0, &mut new_config_read);
             assert_eq!(new_config, new_config_read);
         }
-    }
-
-    #[test]
-    fn test_error_tap_set_ip() {
-        let epoll_raw_fd = epoll::create(true).unwrap();
-        let (sender, _receiver) = mpsc::channel();
-        let epoll_config = EpollConfig::new(0, epoll_raw_fd, sender);
-
-        match Net::new(
-            "255.255.255.255".parse().unwrap(),
-            "0.0.0.0".parse().unwrap(),
-            None,
-            epoll_config,
-            None,
-            None,
-            false,
-        ) {
-            Err(Error::TapSetIp(_)) => (),
-            _ => assert!(false),
-        };
-    }
-
-    #[test]
-    fn test_error_tap_set_netmask() {
-        let epoll_raw_fd = epoll::create(true).unwrap();
-        let (sender, _receiver) = mpsc::channel();
-        let epoll_config = EpollConfig::new(0, epoll_raw_fd, sender);
-
-        match Net::new(
-            "0.0.0.0".parse().unwrap(),
-            "0.0.0.255".parse().unwrap(),
-            None,
-            epoll_config,
-            None,
-            None,
-            false,
-        ) {
-            Err(Error::TapSetNetmask(_)) => (),
-            _ => assert!(false),
-        };
     }
 
     #[test]
@@ -1686,6 +1613,15 @@ mod tests {
         match h.handle_event(RX_TAP_EVENT, epoll::Events::EPOLLIN) {
             Err(DeviceError::NoAvailBuffers) => (),
             _ => panic!("invalid"),
+        }
+        // Since the RX was empty, we shouldn't be listening for tap RX events.
+        assert!(!h.rx_tap_listening);
+
+        // Fake an avail buffer; this time, tap reading should error out.
+        rxq.avail.idx.set(1);
+        match h.handle_event(RX_TAP_EVENT, epoll::Events::EPOLLIN) {
+            Err(DeviceError::FailedReadTap) => (),
+            other => panic!("invalid: {:?}", other),
         }
         // Since the RX was empty, we shouldn't be listening for tap RX events.
         assert!(!h.rx_tap_listening);
@@ -2197,41 +2133,41 @@ mod tests {
             None,
         );
 
-        let (sender, _receiver) = channel();
-        let epoll_config = EpollConfig::new(0, 0, sender);
-        let mut net = Net {
-            tap: None,
-            avail_features: 0,
-            acked_features: 0,
-            config_space: vec![],
-            epoll_config,
-            rx_rate_limiter: None,
-            tx_rate_limiter: None,
-            allow_mmds_requests: false,
+        let (net_state, rx_lt, tx_lt, rx_lt_state, tx_lt_state) = {
+            let (sender, _receiver) = channel();
+            let epoll_config = EpollConfig::new(0, 0, sender);
+
+            let rx_limiter = RateLimiter::new(100, None, 100, 100, None, 100).unwrap();
+            let tx_limiter = RateLimiter::new(100, None, 100, 100, None, 100).unwrap();
+            let rx_lt_state = RateLimiterState::new(&rx_limiter);
+            let tx_lt_state = RateLimiterState::new(&tx_limiter);
+            let net = Net {
+                tap: Some(Tap::open_named("test_tap").unwrap()),
+                avail_features: 0,
+                acked_features: 0,
+                config_space: vec![],
+                epoll_config,
+                rx_rate_limiter: Some(rx_limiter),
+                tx_rate_limiter: Some(tx_limiter),
+                allow_mmds_requests: false,
+            };
+            (
+                NetState::new(&net, None).expect("Error creating BlockState instance"),
+                net.rx_rate_limiter.unwrap(),
+                net.tx_rate_limiter.unwrap(),
+                rx_lt_state,
+                tx_lt_state,
+            )
         };
 
-        let net_state = NetState::new(&net, None).expect("Error creating BlockState instance");
         check_net_state(
             &net_state,
-            net.allow_mmds_requests,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-
-        net.rx_rate_limiter = Some(RateLimiter::new(100, None, 100, 100, None, 100).unwrap());
-        net.tx_rate_limiter = Some(RateLimiter::new(100, None, 100, 100, None, 100).unwrap());
-        let net_state = NetState::new(&net, None).expect("Error creating BlockState instance");
-        check_net_state(
-            &net_state,
-            net.allow_mmds_requests,
-            None,
-            Some(RateLimiterState::new(net.rx_rate_limiter.as_ref().unwrap())),
-            Some(&net.rx_rate_limiter.unwrap()),
-            Some(RateLimiterState::new(net.tx_rate_limiter.as_ref().unwrap())),
-            Some(&net.tx_rate_limiter.unwrap()),
+            false,
+            Some("test_tap\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}".to_string()),
+            Some(rx_lt_state),
+            Some(&rx_lt),
+            Some(tx_lt_state),
+            Some(&tx_lt),
         );
     }
 

@@ -309,7 +309,7 @@ impl KvmRunWrapper {
     /// # Arguments
     /// * `fd` - File descriptor to mmap from.
     /// * `size` - Size of memory region in bytes.
-    pub fn from_fd(fd: &AsRawFd, size: usize) -> Result<KvmRunWrapper> {
+    pub fn from_fd(fd: &dyn AsRawFd, size: usize) -> Result<KvmRunWrapper> {
         // This is safe because we are creating a mapping in a place not already used by any other
         // area in this process.
         let addr = unsafe {
@@ -1771,7 +1771,7 @@ mod tests {
             for cpu_idx in 0..nr_vcpus {
                 let vcpu = vm.create_vcpu(cpu_idx as u8).unwrap();
                 vcpu.set_cpuid2(&cpuid).unwrap();
-                let mut retrieved_cpuid = vcpu.get_cpuid2(ncpuids).unwrap();
+                let retrieved_cpuid = vcpu.get_cpuid2(ncpuids).unwrap();
                 // Only check the first few leafs as some (e.g. 13) are reserved.
                 assert_eq!(
                     cpuid.as_entries_slice()[..3],

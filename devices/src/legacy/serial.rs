@@ -66,11 +66,11 @@ pub struct Serial {
     scratch: u8,
     baud_divisor: u16,
     in_buffer: VecDeque<u8>,
-    out: Option<Box<io::Write + Send>>,
+    out: Option<Box<dyn io::Write + Send>>,
 }
 
 impl Serial {
-    fn new(interrupt_evt: EventFd, out: Option<Box<io::Write + Send>>) -> Serial {
+    fn new(interrupt_evt: EventFd, out: Option<Box<dyn io::Write + Send>>) -> Serial {
         let interrupt_enable = match out {
             Some(_) => IER_RECV_BIT,
             None => 0,
@@ -92,7 +92,7 @@ impl Serial {
     }
 
     /// Constructs a Serial port ready for output.
-    pub fn new_out(interrupt_evt: EventFd, out: Box<io::Write + Send>) -> Serial {
+    pub fn new_out(interrupt_evt: EventFd, out: Box<dyn io::Write + Send>) -> Serial {
         Self::new(interrupt_evt, Some(out))
     }
 

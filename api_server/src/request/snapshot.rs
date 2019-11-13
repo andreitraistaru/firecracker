@@ -6,8 +6,8 @@ use std::result;
 use futures::sync::oneshot;
 use hyper::Method;
 
+use super::{VmmAction, VmmRequest};
 use request::{IntoParsedRequest, ParsedRequest};
-use vmm::VmmAction;
 
 // We use Serde to transform each associated json body into this.
 #[derive(Deserialize)]
@@ -33,7 +33,7 @@ impl IntoParsedRequest for SnapshotCreateConfig {
         let (sender, receiver) = oneshot::channel();
         match method {
             Method::Put => Ok(ParsedRequest::Sync(
-                VmmAction::PauseToSnapshot(self.snapshot_path, sender),
+                VmmRequest::new(VmmAction::PauseToSnapshot(self.snapshot_path), sender),
                 receiver,
             )),
             _ => Err(String::from("Invalid method.")),
@@ -50,7 +50,10 @@ impl IntoParsedRequest for SnapshotLoadConfig {
         let (sender, receiver) = oneshot::channel();
         match method {
             Method::Put => Ok(ParsedRequest::Sync(
-                VmmAction::ResumeFromSnapshot(self.snapshot_path, self.mem_file_path, sender),
+                VmmRequest::new(
+                    VmmAction::ResumeFromSnapshot(self.snapshot_path, self.mem_file_path),
+                    sender,
+                ),
                 receiver,
             )),
             _ => Err(String::from("Invalid method.")),
@@ -74,7 +77,7 @@ mod tests {
 
             let (sender, receiver) = oneshot::channel();
             let req: ParsedRequest = ParsedRequest::Sync(
-                VmmAction::PauseToSnapshot("/foo/bar".to_string(), sender),
+                VmmRequest::new(VmmAction::PauseToSnapshot("/foo/bar".to_string()), sender),
                 receiver,
             );
             let result: Result<SnapshotCreateConfig, serde_json::Error> =
@@ -105,9 +108,8 @@ mod tests {
 
             let (sender, receiver) = oneshot::channel();
             let req: ParsedRequest = ParsedRequest::Sync(
-                VmmAction::ResumeFromSnapshot(
-                    "/foo/img".to_string(),
-                    "/foo/mem".to_string(),
+                VmmRequest::new(
+                    VmmAction::ResumeFromSnapshot("/foo/img".to_string(), "/foo/mem".to_string()),
                     sender,
                 ),
                 receiver,

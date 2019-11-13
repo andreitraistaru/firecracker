@@ -10,7 +10,6 @@ byteorder = ">=1.2.1"
 epoll = "=4.0.1"
 libc = ">=0.2.39"
 serde = { version = ">=1.0.27", features = ["derive"] }
-time = ">=0.1.39"
 
 dumbo = { path = "../dumbo" }
 fc_util = { path = "../fc_util" }

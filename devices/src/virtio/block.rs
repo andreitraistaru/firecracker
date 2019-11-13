@@ -233,13 +233,12 @@ impl Request {
         Ok(req)
     }
 
-    #[allow(clippy::ptr_arg)]
     fn execute<T: Seek + Read + Write>(
         &self,
         disk: &mut T,
         disk_nsectors: u64,
         mem: &GuestMemory,
-        disk_id: &Vec<u8>,
+        disk_id: &[u8],
     ) -> result::Result<u32, ExecuteError> {
         let mut top: u64 = u64::from(self.data_len) / SECTOR_SIZE;
         if u64::from(self.data_len) % SECTOR_SIZE != 0 {
@@ -280,7 +279,7 @@ impl Request {
                 if (self.data_len as usize) < disk_id.len() {
                     return Err(ExecuteError::BadRequest(Error::InvalidOffset));
                 }
-                mem.write_slice_at_addr(&disk_id.as_slice(), self.data_addr)
+                mem.write_slice_at_addr(disk_id, self.data_addr)
                     .map_err(ExecuteError::Write)?;
             }
             RequestType::Unsupported(t) => return Err(ExecuteError::Unsupported(t)),
@@ -450,11 +449,15 @@ pub struct EpollConfig {
     q_avail_token: u64,
     rate_limiter_token: u64,
     epoll_raw_fd: RawFd,
-    sender: mpsc::Sender<Box<EpollHandler>>,
+    sender: mpsc::Sender<Box<dyn EpollHandler>>,
 }
 
 impl EpollConfigConstructor for EpollConfig {
-    fn new(first_token: u64, epoll_raw_fd: RawFd, sender: mpsc::Sender<Box<EpollHandler>>) -> Self {
+    fn new(
+        first_token: u64,
+        epoll_raw_fd: RawFd,
+        sender: mpsc::Sender<Box<dyn EpollHandler>>,
+    ) -> Self {
         EpollConfig {
             q_avail_token: first_token + u64::from(QUEUE_AVAIL_EVENT),
             rate_limiter_token: first_token + u64::from(RATE_LIMITER_EVENT),
@@ -545,38 +548,16 @@ impl VirtioDevice for Block {
         QUEUE_SIZES
     }
 
-    fn features(&self, page: u32) -> u32 {
-        match page {
-            // Get the lower 32-bits of the features bitfield.
-            0 => self.avail_features as u32,
-            // Get the upper 32-bits of the features bitfield.
-            1 => (self.avail_features >> 32) as u32,
-            _ => {
-                warn!("Received request for unknown features page.");
-                0u32
-            }
-        }
+    fn avail_features(&self) -> u64 {
+        self.avail_features
     }
 
-    fn ack_features(&mut self, page: u32, value: u32) {
-        let mut v = match page {
-            0 => u64::from(value),
-            1 => u64::from(value) << 32,
-            _ => {
-                warn!("Cannot acknowledge unknown features page.");
-                0u64
-            }
-        };
+    fn acked_features(&self) -> u64 {
+        self.acked_features
+    }
 
-        // Check if the guest is ACK'ing a feature that we didn't claim to have.
-        let unrequested_features = v & !self.avail_features;
-        if unrequested_features != 0 {
-            warn!("Received acknowledge request for unknown feature.");
-
-            // Don't count these features as acked.
-            v &= !unrequested_features;
-        }
-        self.acked_features |= v;
+    fn set_acked_features(&mut self, acked_features: u64) {
+        self.acked_features = acked_features;
     }
 
     fn read_config(&self, offset: u64, mut data: &mut [u8]) {
@@ -678,14 +659,6 @@ impl VirtioDevice for Block {
         Err(ActivateError::BadActivate)
     }
 
-    fn avail_features(&self) -> u64 {
-        self.avail_features
-    }
-
-    fn acked_features(&self) -> u64 {
-        self.acked_features
-    }
-
     fn config_space(&self) -> Vec<u8> {
         self.config_space.to_vec()
     }
@@ -700,8 +673,8 @@ pub struct BlockState {
 
 impl BlockState {
     pub fn new(
-        device: &VirtioDevice,
-        maybe_handler: Option<&EpollHandler>,
+        device: &dyn VirtioDevice,
+        maybe_handler: Option<&dyn EpollHandler>,
     ) -> Result<BlockState, SpecificVirtioDeviceStateError> {
         let block_device = device
             .as_any()
@@ -732,7 +705,7 @@ impl BlockState {
         &self,
         generic_virtio_device_state: &GenericVirtioDeviceState,
         epoll_config: EpollConfig,
-    ) -> Result<Box<VirtioDevice>, BlockError> {
+    ) -> Result<Box<dyn VirtioDevice>, BlockError> {
         // Create block device.
         let mut block = Block::new(
             &self.disk_image_path,
@@ -801,7 +774,7 @@ mod tests {
     struct DummyBlock {
         block: Block,
         epoll_raw_fd: i32,
-        _receiver: Receiver<Box<EpollHandler>>,
+        _receiver: Receiver<Box<dyn EpollHandler>>,
     }
 
     impl DummyBlock {
@@ -840,10 +813,7 @@ mod tests {
         }
     }
 
-    #[allow(clippy::needless_lifetimes)]
-    fn default_test_blockepollhandler<'a>(
-        mem: &'a GuestMemory,
-    ) -> (BlockEpollHandler, VirtQueue<'a>) {
+    fn default_test_blockepollhandler(mem: &GuestMemory) -> (BlockEpollHandler, VirtQueue) {
         let mut dummy = DummyBlock::new(false);
         let b = dummy.block();
         let vq = VirtQueue::new(GuestAddress(0), &mem, 16);
@@ -1125,14 +1095,14 @@ mod tests {
                 | (1u64 << VIRTIO_F_VERSION_1)
                 | (1u64 << VIRTIO_BLK_F_FLUSH);
 
-            assert_eq!(b.features(0), features as u32);
-            assert_eq!(b.features(1), (features >> 32) as u32);
+            assert_eq!(b.avail_features_by_page(0), features as u32);
+            assert_eq!(b.avail_features_by_page(1), (features >> 32) as u32);
             for i in 2..10 {
-                assert_eq!(b.features(i), 0u32);
+                assert_eq!(b.avail_features_by_page(i), 0u32);
             }
 
             for i in 0..10 {
-                b.ack_features(i, u32::MAX);
+                b.ack_features_by_page(i, u32::MAX);
             }
             assert_eq!(b.acked_features, features);
         }

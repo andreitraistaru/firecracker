@@ -14,7 +14,7 @@ mod unix;
 pub use self::defs::uapi::VIRTIO_ID_VSOCK as TYPE_VSOCK;
 pub use self::defs::EVENT_COUNT as VSOCK_EVENTS_COUNT;
 pub use self::device::Vsock;
-pub use self::unix::VsockUnixBackend;
+pub use self::unix::{Error as VsockUnixBackendError, VsockUnixBackend};
 
 use std::os::unix::io::RawFd;
 use std::sync::mpsc;
@@ -130,11 +130,15 @@ pub struct EpollConfig {
     evq_token: u64,
     backend_token: u64,
     epoll_raw_fd: RawFd,
-    sender: mpsc::Sender<Box<EpollHandler>>,
+    sender: mpsc::Sender<Box<dyn EpollHandler>>,
 }
 
 impl EpollConfigConstructor for EpollConfig {
-    fn new(first_token: u64, epoll_raw_fd: RawFd, sender: mpsc::Sender<Box<EpollHandler>>) -> Self {
+    fn new(
+        first_token: u64,
+        epoll_raw_fd: RawFd,
+        sender: mpsc::Sender<Box<dyn EpollHandler>>,
+    ) -> Self {
         EpollConfig {
             rxq_token: first_token + u64::from(defs::RXQ_EVENT),
             txq_token: first_token + u64::from(defs::TXQ_EVENT),
@@ -278,7 +282,7 @@ mod tests {
         pub device: Vsock<TestBackend>,
 
         // This needs to live here, so that sending the handler, at device activation, works.
-        _handler_receiver: mpsc::Receiver<Box<EpollHandler>>,
+        _handler_receiver: mpsc::Receiver<Box<dyn EpollHandler>>,
     }
 
     impl TestContext {

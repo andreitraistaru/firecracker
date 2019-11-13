@@ -42,7 +42,7 @@ fn default_allow_mmds_requests() -> bool {
 
 impl NetworkInterfaceConfig {
     /// Returns the tap device that `host_dev_name` refers to.
-    pub fn get_tap(&self) -> result::Result<Tap, NetworkInterfaceError> {
+    pub fn open_tap(&self) -> result::Result<Tap, NetworkInterfaceError> {
         Tap::open_named(self.host_dev_name.as_str()).map_err(NetworkInterfaceError::OpenTap)
     }
 
@@ -215,7 +215,7 @@ impl NetworkInterfaceConfigs {
         self.if_list[index] = updated_netif_config;
 
         // Check that the tap can be opened.
-        self.if_list[index].get_tap().map(|_| ())
+        self.if_list[index].open_tap().map(|_| ())
     }
 
     fn validate_create(
@@ -244,7 +244,7 @@ impl NetworkInterfaceConfigs {
         }
 
         // Check that the tap refered to in `new_config` can be opened.
-        new_config.get_tap().map(|_| ())
+        new_config.open_tap().map(|_| ())
     }
 
     fn create(
@@ -253,6 +253,7 @@ impl NetworkInterfaceConfigs {
     ) -> result::Result<(), NetworkInterfaceError> {
         self.validate_create(&netif_config)?;
         self.if_list.push(netif_config);
+
         Ok(())
     }
 }

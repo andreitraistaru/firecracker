@@ -89,7 +89,7 @@ pub struct MMIODeviceManager {
     irq: u32,
     last_irq: u32,
     id_to_dev_info: HashMap<(DeviceType, String), MMIODeviceInfo>,
-    raw_io_handlers: HashMap<(DeviceType, String), Arc<Mutex<RawIOHandler>>>,
+    raw_io_handlers: HashMap<(DeviceType, String), Arc<Mutex<dyn RawIOHandler>>>,
 }
 
 impl MMIODeviceManager {
@@ -161,7 +161,7 @@ impl MMIODeviceManager {
     pub fn register_virtio_device(
         &mut self,
         vm: &VmFd,
-        device: Box<devices::virtio::VirtioDevice>,
+        device: Box<dyn devices::virtio::VirtioDevice>,
         cmdline: &mut kernel_cmdline::Cmdline,
         type_id: u32,
         device_id: &str,
@@ -193,7 +193,7 @@ impl MMIODeviceManager {
     pub fn reregister_virtio_device(
         &mut self,
         vm: &VmFd,
-        device: Box<devices::virtio::VirtioDevice>,
+        device: Box<dyn devices::virtio::VirtioDevice>,
         device_state: &devices::virtio::MmioDeviceState,
     ) -> Result<u64> {
         // Check if the device will be added to the correct address
@@ -239,6 +239,9 @@ impl MMIODeviceManager {
             com_evt.try_clone().map_err(Error::EventFd)?,
             Box::new(io::stdout()),
         );
+
+        let bus_device = Arc::new(Mutex::new(device));
+        let raw_io_device = bus_device.clone();
 
         let bus_device = Arc::new(Mutex::new(device));
         let raw_io_device = bus_device.clone();
@@ -319,7 +322,7 @@ impl MMIODeviceManager {
         &self,
         device_type: DeviceType,
         device_id: &str,
-    ) -> Option<&Mutex<BusDevice>> {
+    ) -> Option<&Mutex<dyn BusDevice>> {
         if let Some(dev_info) = self
             .id_to_dev_info
             .get(&(device_type, device_id.to_string()))
@@ -333,7 +336,10 @@ impl MMIODeviceManager {
 
     // Used only on 'aarch64', but needed by unit tests on all platforms.
     #[allow(dead_code)]
-    pub fn get_raw_io_device(&self, device_type: DeviceType) -> Option<&Arc<Mutex<RawIOHandler>>> {
+    pub fn get_raw_io_device(
+        &self,
+        device_type: DeviceType,
+    ) -> Option<&Arc<Mutex<dyn RawIOHandler>>> {
         self.raw_io_handlers
             .get(&(device_type, device_type.to_string()))
     }
@@ -396,7 +402,6 @@ mod tests {
     use kernel_cmdline;
     use memory_model::{GuestAddress, GuestMemory};
     use std::sync::atomic::AtomicUsize;
-    use std::sync::mpsc::channel;
     use std::sync::{Arc, RwLock};
     use sys_util::EventFd;
     const QUEUE_SIZES: &[u16] = &[64];
@@ -427,10 +432,20 @@ mod tests {
             QUEUE_SIZES
         }
 
-        fn ack_features(&mut self, page: u32, value: u32) {
+        fn ack_features_by_page(&mut self, page: u32, value: u32) {
             let _ = page;
             let _ = value;
         }
+
+        fn avail_features(&self) -> u64 {
+            0
+        }
+
+        fn acked_features(&self) -> u64 {
+            0
+        }
+
+        fn set_acked_features(&mut self, _: u64) {}
 
         fn read_config(&self, offset: u64, data: &mut [u8]) {
             let _ = offset;
@@ -455,14 +470,6 @@ mod tests {
             Ok(())
         }
 
-        fn avail_features(&self) -> u64 {
-            unimplemented!()
-        }
-
-        fn acked_features(&self) -> u64 {
-            unimplemented!()
-        }
-
         fn config_space(&self) -> Vec<u8> {
             unimplemented!()
         }
@@ -477,13 +484,10 @@ mod tests {
             vmm_version: "1.0".to_string(),
         }));
 
-        let (_to_vmm, from_api) = channel();
         Vmm::new(
             shared_info,
             &EventFd::new().expect("cannot create eventFD"),
-            from_api,
             0,
-            kvm::Kvm::new().expect("Cannot create KVM object"),
         )
         .expect("Cannot Create VMM")
     }

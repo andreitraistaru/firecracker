@@ -38,7 +38,7 @@ pub trait SnapshotTranslator {
 pub fn create_snapshot_translator(
     current_app_version: Version,
     other_app_version: Version,
-) -> Result<Box<SnapshotTranslator>, Error> {
+) -> Result<Box<dyn SnapshotTranslator>, Error> {
     match current_app_version.major() {
         v if v == other_app_version.major() => Ok(Box::new(IdentitySnapshotTranslator {})),
         _ => Err(Error::UnimplementedSnapshotTranslator((

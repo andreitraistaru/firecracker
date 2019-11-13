@@ -296,11 +296,15 @@ pub struct EpollConfig {
     inflate_token: u64,
     deflate_token: u64,
     epoll_raw_fd: RawFd,
-    sender: mpsc::Sender<Box<EpollHandler>>,
+    sender: mpsc::Sender<Box<dyn EpollHandler>>,
 }
 
 impl EpollConfigConstructor for EpollConfig {
-    fn new(first_token: u64, epoll_raw_fd: RawFd, sender: mpsc::Sender<Box<EpollHandler>>) -> Self {
+    fn new(
+        first_token: u64,
+        epoll_raw_fd: RawFd,
+        sender: mpsc::Sender<Box<dyn EpollHandler>>,
+    ) -> Self {
         EpollConfig {
             inflate_token: first_token + u64::from(BALLOON_INFLATE_EVENT),
             deflate_token: first_token + u64::from(BALLOON_DEFLATE_EVENT),
@@ -363,6 +367,10 @@ impl VirtioDevice for Balloon {
         self.acked_features
     }
 
+    fn set_acked_features(&mut self, acked_features: u64) {
+        self.acked_features = acked_features;
+    }
+
     fn config_space(&self) -> Vec<u8> {
         let mut ret = vec![0u8; 8];
         // These writes can't fail as they fit in the declared array;
@@ -374,40 +382,6 @@ impl VirtioDevice for Balloon {
             .write_u32::<LittleEndian>(self.actual_pages.load(Ordering::SeqCst) as u32)
             .unwrap();
         ret
-    }
-
-    fn features(&self, page: u32) -> u32 {
-        match page {
-            // Get the lower 32-bits of the features bitfield.
-            0 => self.avail_features as u32,
-            // Get the upper 32-bits of the features bitfield.
-            1 => (self.avail_features >> 32) as u32,
-            _ => {
-                warn!("Received request for unknown features page.");
-                0u32
-            }
-        }
-    }
-
-    fn ack_features(&mut self, page: u32, value: u32) {
-        let mut v = match page {
-            0 => u64::from(value),
-            1 => u64::from(value) << 32,
-            _ => {
-                warn!("Cannot acknowledge unknown features page.");
-                0u64
-            }
-        };
-
-        // Check if the guest is ACK'ing a feature that we didn't claim to have.
-        let unrequested_features = v & !self.avail_features;
-        if unrequested_features != 0 {
-            warn!("Received acknowledge request for unknown feature.");
-
-            // Don't count these features as acked.
-            v &= !unrequested_features;
-        }
-        self.acked_features |= v;
     }
 
     fn read_config(&self, offset: u64, mut data: &mut [u8]) {
@@ -510,8 +484,8 @@ pub struct BalloonState {}
 
 impl BalloonState {
     pub fn new(
-        _device: &VirtioDevice,
-        _handler: Option<&EpollHandler>,
+        _device: &dyn VirtioDevice,
+        _handler: Option<&dyn EpollHandler>,
     ) -> std::result::Result<BalloonState, SpecificVirtioDeviceStateError> {
         Ok(BalloonState {})
     }
@@ -519,7 +493,7 @@ impl BalloonState {
         &self,
         generic_virtio_device_state: &GenericVirtioDeviceState,
         epoll_config: EpollConfig,
-    ) -> Result<Box<VirtioDevice>, DeviceError> {
+    ) -> Result<Box<dyn VirtioDevice>, DeviceError> {
         let avail_features = generic_virtio_device_state.avail_features();
         let config_space = generic_virtio_device_state.config_space();
 
@@ -534,7 +508,7 @@ impl BalloonState {
             epoll_config,
         );
 
-        balloon.map(|b| Box::new(b) as Box<VirtioDevice>)
+        balloon.map(|b| Box::new(b) as Box<dyn VirtioDevice>)
     }
 }
 
@@ -610,7 +584,7 @@ mod tests {
     struct DummyBalloon {
         balloon: Balloon,
         epoll_raw_fd: i32,
-        _receiver: Receiver<Box<EpollHandler>>,
+        _receiver: Receiver<Box<dyn EpollHandler>>,
     }
 
     impl DummyBalloon {
@@ -1127,17 +1101,20 @@ mod tests {
                 // First page will contain VIRTIO_BALLOON_F_MUST_TELL_HOST
                 // and VIRTIO_BALLOON_F_DEFLATE_ON_OOM.
                 assert_eq!(
-                    b.features(0),
+                    b.avail_features_by_page(0),
                     ((if *must_tell_host { 1 } else { 0 }) as u32)
                         << VIRTIO_BALLOON_F_MUST_TELL_HOST
                         | ((if *deflate_on_oom { 1 } else { 0 }) as u32)
                             << VIRTIO_BALLOON_F_DEFLATE_ON_OOM
                 );
                 // Second page contains VIRTIO_F_VERSION_1.
-                assert_eq!(b.features(1), (1 << (VIRTIO_F_VERSION_1 - 32) as u32));
+                assert_eq!(
+                    b.avail_features_by_page(1),
+                    (1 << (VIRTIO_F_VERSION_1 - 32) as u32)
+                );
 
                 // Other pages should return 0.
-                assert_eq!(b.features(2), 0 as u32);
+                assert_eq!(b.avail_features_by_page(2), 0 as u32);
             }
         }
     }
@@ -1176,14 +1153,14 @@ mod tests {
 
                 // Try to acknowledge all features, even those that aren't
                 // present.
-                b.ack_features(
+                b.ack_features_by_page(
                     0,
                     1 << VIRTIO_BALLOON_F_MUST_TELL_HOST | 1 << VIRTIO_BALLOON_F_DEFLATE_ON_OOM,
                 );
                 // Try to acknowledge inexistent feature from real page.
-                b.ack_features(1, 54);
+                b.ack_features_by_page(1, 54);
                 // Try to acknowledge features from inexistent pages.
-                b.ack_features(3, 123);
+                b.ack_features_by_page(3, 123);
 
                 // Only those present should be acknowledged.
                 assert_eq!(

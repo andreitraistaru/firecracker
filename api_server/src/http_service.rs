@@ -13,6 +13,7 @@ use futures::{Future, Stream};
 use hyper::{self, Chunk, Headers, Method, StatusCode};
 use serde_json;
 
+use super::VmmRequest;
 use logger::{Metric, METRICS};
 use mmds::data_store::{self, Mmds};
 use request::actions::ActionBody;
@@ -28,7 +29,6 @@ use vmm::vmm_config::logger::LoggerConfig;
 use vmm::vmm_config::machine_config::VmConfig;
 use vmm::vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceUpdateConfig};
 use vmm::vmm_config::vsock::VsockDeviceConfig;
-use vmm::VmmAction;
 
 fn build_response_base<B: Into<hyper::Body>>(
     status: StatusCode,
@@ -452,7 +452,7 @@ fn parse_vsock_req<'a>(path: &'a str, method: Method, body: &Chunk) -> Result<'a
 
 // This turns an incoming HTTP request into a ParsedRequest, which is an item containing both the
 // message to be passed to the VMM, and associated entities, such as channels which allow the
-// reception of the outcome back from the VMM.
+// reception of the response back from the VMM.
 // TODO: finish implementing/parsing all possible requests.
 fn parse_request<'a>(method: Method, path: &'a str, body: &Chunk) -> Result<'a, ParsedRequest> {
     // Commenting this out for now.
@@ -505,11 +505,11 @@ fn parse_request<'a>(method: Method, path: &'a str, body: &Chunk) -> Result<'a, 
 // A helper function which is always used when a message is placed into the communication channel
 // with the VMM (so we don't forget to write to the EventFd).
 fn send_to_vmm(
-    req: VmmAction,
-    sender: &mpsc::Sender<Box<VmmAction>>,
+    req: VmmRequest,
+    sender: &mpsc::Sender<VmmRequest>,
     send_event: &EventFd,
 ) -> result::Result<(), ()> {
-    sender.send(Box::new(req)).map_err(|_| ())?;
+    sender.send(req).map_err(|_| ())?;
     send_event.write(1).map_err(|_| ())
 }
 
@@ -523,7 +523,7 @@ pub struct ApiServerHttpService {
     // This allows sending messages to the VMM thread. It makes sense to use a Rc for the sender
     // (instead of cloning) because everything happens on a single thread, so there's no risk of
     // having races (if that was even a problem to begin with).
-    api_request_sender: Rc<mpsc::Sender<Box<VmmAction>>>,
+    api_request_sender: Rc<mpsc::Sender<VmmRequest>>,
     // We write to this EventFd to let the VMM know about new messages.
     vmm_send_event: Rc<EventFd>,
 }
@@ -532,7 +532,7 @@ impl ApiServerHttpService {
     pub fn new(
         mmds_info: Arc<Mutex<Mmds>>,
         vmm_shared_info: Arc<RwLock<InstanceInfo>>,
-        api_request_sender: Rc<mpsc::Sender<Box<VmmAction>>>,
+        api_request_sender: Rc<mpsc::Sender<VmmRequest>>,
         vmm_send_event: Rc<EventFd>,
     ) -> Self {
         ApiServerHttpService {
@@ -548,7 +548,7 @@ impl hyper::server::Service for ApiServerHttpService {
     type Request = hyper::Request;
     type Response = hyper::Response;
     type Error = hyper::error::Error;
-    type Future = Box<Future<Item = Self::Response, Error = Self::Error>>;
+    type Future = Box<dyn Future<Item = Self::Response, Error = Self::Error>>;
 
     // This function returns a future that will resolve at some point to the response for
     // the HTTP request contained in req.
@@ -646,18 +646,22 @@ impl hyper::server::Service for ApiServerHttpService {
                                 .get_data_str(),
                         )))
                     }
-                    Sync(sync_req, outcome_receiver) => {
-                        if send_to_vmm(sync_req, &api_request_sender, &vmm_send_event).is_err() {
+                    Sync(vmm_req, response_receiver) => {
+                        // It only makes sense that we firstly log the incoming API request and
+                        // only after that we forward it to the VMM.
+                        let body_desc = match method_copy {
+                            Method::Get => None,
+                            _ => Some(String::from_utf8_lossy(&b.to_vec()).to_string()),
+                        };
+                        log_received_api_request(describe(&method_copy, &path, &body_desc));
+
+                        if send_to_vmm(vmm_req, &api_request_sender, &vmm_send_event).is_err() {
                             METRICS.api_server.sync_vmm_send_timeout_count.inc();
                             return Either::A(future::err(hyper::Error::Timeout));
                         }
 
                         // metric-logging related variables for being able to log response details
                         let path_copy = path.clone();
-                        let body_desc = match method_copy {
-                            Method::Get => None,
-                            _ => Some(String::from_utf8_lossy(&b.to_vec()).to_string()),
-                        };
 
                         // We need to clone the description of the request because these are moved
                         // in the below closure.
@@ -665,13 +669,11 @@ impl hyper::server::Service for ApiServerHttpService {
                         let method_copy_err = method_copy.clone();
                         let body_desc_err = body_desc.clone();
 
-                        log_received_api_request(describe(&method_copy, &path, &body_desc));
-
-                        // Sync requests don't receive a response until the outcome is returned.
+                        // Sync requests don't receive a response until the response is returned.
                         // Once more, this just registers a closure to run when the result is
                         // available.
                         Either::B(
-                            outcome_receiver
+                            response_receiver
                                 .map(move |result| {
                                     let description =
                                         describe(&method_copy, &path_copy, &body_desc);
@@ -681,20 +683,21 @@ impl hyper::server::Service for ApiServerHttpService {
                                     // logged at its point of origin and not log it again.
                                     let response = result.generate_response();
                                     let status_code = response.status();
-                                    if result.is_ok() {
-                                        info!(
-                                            "The {} was executed successfully. Status code: {}.",
-                                            description, status_code
-                                        );
-                                    } else {
-                                        // It is safe to `unwrap_err` because result was checked
-                                        // against not being ok.
-                                        error!(
-                                            "Received Error on {}. Status code: {}. Message: {}",
-                                            description,
-                                            status_code,
-                                            result.unwrap_err()
-                                        );
+                                    match result {
+                                        Ok(_) => {
+                                            info!(
+                                                "The {} was executed successfully. Status code: {}.",
+                                                description, status_code
+                                            );
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Received Error on {}. Status code: {}. Message: {}",
+                                                description,
+                                                status_code,
+                                                e
+                                            );
+                                        }
                                     }
                                     response
                                 })
@@ -703,7 +706,7 @@ impl hyper::server::Service for ApiServerHttpService {
                                         "Timeout on {}",
                                         describe(&method_copy_err, &path_copy_err, &body_desc_err)
                                     );
-                                    METRICS.api_server.sync_outcome_fails.inc();
+                                    METRICS.api_server.sync_response_fails.inc();
                                     hyper::Error::Timeout
                                 }),
                         )
@@ -749,6 +752,7 @@ mod tests {
     extern crate net_util;
 
     use self::net_util::MacAddr;
+    use super::super::VmmAction;
     use super::*;
 
     use serde_json::{Map, Value};
@@ -760,7 +764,20 @@ mod tests {
     use hyper::Body;
     use vmm::vmm_config::logger::LoggerLevel;
     use vmm::vmm_config::machine_config::CpuFeaturesTemplate;
-    use vmm::VmmAction;
+
+    impl<'a> std::fmt::Debug for Error<'a> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Error::Generic(code, name) => write!(f, "Generic({:?}, {})", code, name),
+                Error::EmptyID => write!(f, "EmptyID"),
+                Error::InvalidID => write!(f, "InvalidID"),
+                Error::InvalidPathMethod(path, method) => {
+                    write!(f, "InvalidPathMethod({}, {:?})", path, method)
+                }
+                Error::SerdeJson(err) => write!(f, "SerdeJson({:?})", err),
+            }
+        }
+    }
 
     /// This asserts that $lhs matches $rhs.
     macro_rules! assert_match {
@@ -1102,16 +1119,14 @@ mod tests {
         let body: Chunk = Chunk::from(json);
         let path = "/foo";
 
-        match parse_actions_req(path, Method::Put, &body) {
-            Ok(pr) => {
-                let (sender, receiver) = oneshot::channel();
-                assert!(pr.eq(&ParsedRequest::Sync(
-                    VmmAction::StartMicroVm(sender),
-                    receiver
-                )));
-            }
-            _ => assert!(false),
-        }
+        let (sender, receiver) = oneshot::channel();
+
+        assert!(parse_actions_req(path, Method::Put, &body)
+            .unwrap()
+            .eq(&ParsedRequest::Sync(
+                VmmRequest::new(VmmAction::StartMicroVm, sender),
+                receiver
+            )));
 
         // PUT BlockDeviceRescan
         let json = r#"{
@@ -1120,16 +1135,14 @@ mod tests {
               }"#;
         let body: Chunk = Chunk::from(json);
         let path = "/foo";
-        match parse_actions_req(path, Method::Put, &body) {
-            Ok(pr) => {
-                let (sender, receiver) = oneshot::channel();
-                assert!(pr.eq(&ParsedRequest::Sync(
-                    VmmAction::RescanBlockDevice("dummy_id".to_string(), sender),
-                    receiver
-                )));
-            }
-            _ => assert!(false),
-        }
+        let (sender, receiver) = oneshot::channel();
+
+        assert!(parse_actions_req(path, Method::Put, &body)
+            .unwrap()
+            .eq(&ParsedRequest::Sync(
+                VmmRequest::new(VmmAction::RescanBlockDevice("dummy_id".to_string()), sender),
+                receiver
+            )));
 
         // Error cases
 
@@ -1202,7 +1215,7 @@ mod tests {
             Ok(pr) => {
                 let (sender, receiver) = oneshot::channel();
                 assert!(pr.eq(&ParsedRequest::Sync(
-                    VmmAction::PauseToSnapshot("/foo/img".to_string(), sender),
+                    VmmRequest::new(VmmAction::PauseToSnapshot("/foo/img".to_string()), sender),
                     receiver,
                 )));
             }
@@ -1215,9 +1228,11 @@ mod tests {
             Ok(pr) => {
                 let (sender, receiver) = oneshot::channel();
                 assert!(pr.eq(&ParsedRequest::Sync(
-                    VmmAction::ResumeFromSnapshot(
-                        "/foo/img".to_string(),
-                        "/foo/mem".to_string(),
+                    VmmRequest::new(
+                        VmmAction::ResumeFromSnapshot(
+                            "/foo/img".to_string(),
+                            "/foo/mem".to_string()
+                        ),
                         sender
                     ),
                     receiver,
@@ -1241,16 +1256,14 @@ mod tests {
         // all of BootSourceBody's members are accessible. Rather than making them all public just
         // for the purpose of unit tests, it's preferable to trust the deserialization.
         let boot_source_cfg = serde_json::from_slice::<BootSourceConfig>(&body).unwrap();
-        match parse_boot_source_req(boot_source_path, Method::Put, &body) {
-            Ok(pr) => {
-                let (sender, receiver) = oneshot::channel();
-                assert!(pr.eq(&ParsedRequest::Sync(
-                    VmmAction::ConfigureBootSource(boot_source_cfg, sender),
-                    receiver,
-                )));
-            }
-            _ => assert!(false),
-        }
+        let (sender, receiver) = oneshot::channel();
+
+        assert!(parse_boot_source_req(boot_source_path, Method::Put, &body)
+            .unwrap()
+            .eq(&ParsedRequest::Sync(
+                VmmRequest::new(VmmAction::ConfigureBootSource(boot_source_cfg), sender),
+                receiver,
+            )));
 
         // Error cases
         // Test case for invalid path.
@@ -1296,13 +1309,10 @@ mod tests {
             rate_limiter: None,
         };
 
-        match drive_desc.into_parsed_request(Some(String::from("id_1")), Method::Put) {
-            Ok(pr) => match parse_drives_req(valid_drive_path, Method::Put, &body) {
-                Ok(pr_drive) => assert!(pr.eq(&pr_drive)),
-                _ => assert!(false),
-            },
-            _ => assert!(false),
-        }
+        assert!(drive_desc
+            .into_parsed_request(Some(String::from("id_1")), Method::Put)
+            .unwrap()
+            .eq(&parse_drives_req(valid_drive_path, Method::Put, &body).unwrap()));
 
         // Error Cases
         // Test Case for invalid payload (id from path does not match the id from the body).
@@ -1346,13 +1356,10 @@ mod tests {
             fields: Value::Object(payload_map),
         };
 
-        match patch_payload.into_parsed_request(Some("id_1".to_string()), Method::Patch) {
-            Ok(pr) => match parse_drives_req(valid_drive_path, Method::Patch, &valid_body) {
-                Ok(pr_drive) => assert!(pr.eq(&pr_drive)),
-                _ => assert!(false),
-            },
-            _ => assert!(false),
-        }
+        assert!(patch_payload
+            .into_parsed_request(Some("id_1".to_string()), Method::Patch)
+            .unwrap()
+            .eq(&parse_drives_req(valid_drive_path, Method::Patch, &valid_body).unwrap()));
 
         // Test case where id from path is different.
         let expected_error = Err(Error::Generic(
@@ -1412,16 +1419,14 @@ mod tests {
         // PUT
         let logger_config =
             serde_json::from_slice::<LoggerConfig>(&logger_body).expect("deserialization failed");
-        match parse_logger_req(logger_path, Method::Put, &logger_body) {
-            Ok(pr) => {
-                let (sender, receiver) = oneshot::channel();
-                assert!(pr.eq(&ParsedRequest::Sync(
-                    VmmAction::ConfigureLogger(logger_config, sender),
-                    receiver,
-                )));
-            }
-            _ => assert!(false),
-        }
+
+        let (sender, receiver) = oneshot::channel();
+        assert!(parse_logger_req(logger_path, Method::Put, &logger_body)
+            .unwrap()
+            .eq(&ParsedRequest::Sync(
+                VmmRequest::new(VmmAction::ConfigureLogger(logger_config), sender),
+                receiver,
+            )));
 
         // Error cases
         // Error Case: Serde Deserialization fails due to invalid payload.
@@ -1464,13 +1469,10 @@ mod tests {
             shared_mem: false,
         };
 
-        match vm_config.into_parsed_request(None, Method::Put) {
-            Ok(parsed_req) => match parse_machine_config_req(&path, Method::Put, &body) {
-                Ok(other_parsed_req) => assert!(parsed_req.eq(&other_parsed_req)),
-                _ => assert!(false),
-            },
-            _ => assert!(false),
-        }
+        assert!(vm_config
+            .into_parsed_request(None, Method::Put)
+            .unwrap()
+            .eq(&parse_machine_config_req(&path, Method::Put, &body).unwrap()));
 
         // PATCH
         let vm_config = VmConfig {
@@ -1484,15 +1486,10 @@ mod tests {
         let body = r#"{
             "vcpu_count": 32
         }"#;
-        match vm_config.into_parsed_request(None, Method::Patch) {
-            Ok(parsed_req) => {
-                match parse_machine_config_req(&path, Method::Patch, &Chunk::from(body)) {
-                    Ok(other_parsed_req) => assert!(parsed_req.eq(&other_parsed_req)),
-                    _ => assert!(false),
-                }
-            }
-            _ => assert!(false),
-        }
+        assert!(vm_config
+            .into_parsed_request(None, Method::Patch)
+            .unwrap()
+            .eq(&parse_machine_config_req(&path, Method::Patch, &Chunk::from(body)).unwrap()));
 
         // Error cases
         // Error Case: Invalid payload (cannot deserialize the body into a VmConfig object).
@@ -1519,7 +1516,7 @@ mod tests {
         if let Err(Error::SerdeJson(e)) = parse_machine_config_req(path, Method::Put, &body) {
             assert!(e.is_data());
         } else {
-            assert!(false);
+            panic!();
         }
 
         // Error Case: PUT request with missing parameter
@@ -1557,13 +1554,10 @@ mod tests {
             allow_mmds_requests: false,
         };
 
-        match netif.into_parsed_request(Some(net_id), Method::Put) {
-            Ok(pr) => match parse_netif_req(&path, Method::Put, &body) {
-                Ok(pr_netif) => assert!(pr.eq(&pr_netif)),
-                _ => assert!(false),
-            },
-            _ => assert!(false),
-        }
+        assert!(netif
+            .into_parsed_request(Some(net_id), Method::Put)
+            .unwrap()
+            .eq(&parse_netif_req(&path, Method::Put, &body).unwrap()));
 
         // Error cases
         // Error Case: The id from the path does not match the id from the body.
@@ -1612,10 +1606,9 @@ mod tests {
         let nuc_pr = nuc
             .into_parsed_request(Some("1".to_string()), Method::Patch)
             .unwrap();
-        match parse_netif_req(&"/network-interfaces/1", Method::Patch, &body) {
-            Ok(pr) => assert!(nuc_pr.eq(&pr)),
-            _ => assert!(false),
-        };
+        assert!(
+            nuc_pr.eq(&parse_netif_req(&"/network-interfaces/1", Method::Patch, &body).unwrap())
+        );
 
         let json = r#"{
             "iface_id": "1",
@@ -1638,10 +1631,9 @@ mod tests {
         let body = Chunk::from(empty_json);
 
         // Test for GET request
-        match parse_mmds_request(path, Method::Get, &body) {
-            Ok(parsed_req) => assert!(parsed_req.eq(&ParsedRequest::GetMMDS)),
-            Err(_) => assert!(false),
-        };
+        assert!(parse_mmds_request(path, Method::Get, &body)
+            .unwrap()
+            .eq(&ParsedRequest::GetMMDS));
 
         let dummy_json = "{\
                 \"latest\": {\
@@ -1654,22 +1646,19 @@ mod tests {
 
         // Test for PUT request
         let body = Chunk::from(dummy_json);
-        match parse_mmds_request(path, Method::Put, &body) {
-            Ok(parsed_req) => assert!(parsed_req.eq(&ParsedRequest::PutMMDS(
+        assert!(parse_mmds_request(path, Method::Put, &body)
+            .unwrap()
+            .eq(&ParsedRequest::PutMMDS(
                 serde_json::from_slice(&body).unwrap()
-            ))),
-            Err(_) => assert!(false),
-        };
+            )));
 
         // Test for PATCH request
         let patch_json = "{\"user-data\": 15}";
         let body = Chunk::from(patch_json);
-        match parse_mmds_request(path, Method::Patch, &body) {
-            Ok(parsed_req) => assert!(parsed_req.eq(&ParsedRequest::PatchMMDS(
-                serde_json::from_slice(&body).unwrap()
-            ))),
-            Err(_) => assert!(false),
-        };
+
+        assert!(parse_mmds_request(path, Method::Patch, &body).unwrap().eq(
+            &ParsedRequest::PatchMMDS(serde_json::from_slice(&body).unwrap())
+        ));
 
         // Test for invalid json on PUT
         let invalid_json = "\"latest\": {}}";
@@ -1691,6 +1680,41 @@ mod tests {
         let path = "/mmds/something";
         let expected_err = Err(Error::InvalidPathMethod(path, Method::Get));
         assert!(parse_mmds_request(path, Method::Get, &body) == expected_err);
+    }
+
+    #[test]
+    fn test_parse_vsock_req() {
+        let valid_vsock_path = "/vsock";
+        let json = r#"{
+                "vsock_id": "foo",
+                "guest_cid": 3,
+                "uds_path": "v.sock"
+              }"#;
+
+        // Test for PUT request
+        let body: Chunk = Chunk::from(json);
+        let vsock_cfg = serde_json::from_slice::<VsockDeviceConfig>(&body).unwrap();
+
+        let (sender, receiver) = oneshot::channel();
+        assert!(parse_vsock_req(valid_vsock_path, Method::Put, &body)
+            .unwrap()
+            .eq(&ParsedRequest::Sync(
+                VmmRequest::new(VmmAction::SetVsockDevice(vsock_cfg), sender),
+                receiver,
+            )));
+
+        // Error case: invalid path.
+        let path = "/vsock/invalid_path";
+        assert!(
+            parse_vsock_req(path, Method::Put, &body)
+                == Err(Error::InvalidPathMethod(path, Method::Put))
+        );
+
+        // Serde Error: invalid VsockDeviceConfig body.
+        assert!(
+            parse_vsock_req(valid_vsock_path, Method::Put, &Chunk::from("foo"))
+                == Err(Error::SerdeJson(get_dummy_serde_error()))
+        );
     }
 
     #[test]
@@ -1716,10 +1740,9 @@ mod tests {
         }
 
         // Test empty request
-        match parse_request(Method::Get, "/", &body) {
-            Ok(pr) => assert!(pr.eq(&ParsedRequest::GetInstanceInfo)),
-            _ => assert!(false),
-        }
+        assert!(parse_request(Method::Get, "/", &body)
+            .unwrap()
+            .eq(&ParsedRequest::GetInstanceInfo));
         for method in &all_methods {
             if *method != Method::Get {
                 assert!(parse_request(method.clone(), "/", &body).is_err());

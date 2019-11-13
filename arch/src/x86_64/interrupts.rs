@@ -13,13 +13,15 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use kvm;
 use kvm_bindings::kvm_lapic_state;
 
+/// Errors thrown while configuring the LAPIC.
 #[derive(Debug)]
 pub enum Error {
+    /// Failure in retrieving the LAPIC configuration.
     GetLapic(io::Error),
+    /// Failure in modifying the LAPIC configuration.
     SetLapic(io::Error),
 }
-
-pub type Result<T> = result::Result<T, Error>;
+type Result<T> = result::Result<T, Error>;
 
 // Defines poached from apicdef.h kernel header.
 const APIC_LVT0: usize = 0x350;
@@ -82,9 +84,8 @@ pub fn set_lint(vcpu: &kvm::VcpuFd) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    extern crate rand;
-    use self::rand::Rng;
-
+    extern crate fc_util;
+    use self::fc_util::rand::xor_rng_u32;
     use super::*;
     use kvm::Kvm;
 
@@ -109,8 +110,7 @@ mod tests {
 
     #[test]
     fn test_apic_delivery_mode() {
-        let mut rng = rand::thread_rng();
-        let mut v: Vec<u32> = (0..20).map(|_| rng.gen::<u32>()).collect();
+        let mut v: Vec<u32> = (0..20).map(|_| xor_rng_u32()).collect();
 
         v.iter_mut()
             .for_each(|x| *x = set_apic_delivery_mode(*x, 2));

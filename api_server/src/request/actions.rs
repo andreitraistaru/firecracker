@@ -7,8 +7,8 @@ use futures::sync::oneshot;
 use hyper::Method;
 use serde_json::Value;
 
+use super::{VmmAction, VmmRequest};
 use request::{IntoParsedRequest, ParsedRequest};
-use vmm::VmmAction;
 
 // The names of the members from this enum must precisely correspond (as a string) to the possible
 // values of "action_type" from the json request body. This is useful to get a strongly typed
@@ -83,42 +83,42 @@ impl IntoParsedRequest for ActionBody {
                 let block_device_id = self.payload.unwrap().as_str().unwrap().to_string();
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
-                    VmmAction::RescanBlockDevice(block_device_id, sync_sender),
+                    VmmRequest::new(VmmAction::RescanBlockDevice(block_device_id), sync_sender),
                     sync_receiver,
                 ))
             }
             ActionType::FlushMetrics => {
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
-                    VmmAction::FlushMetrics(sync_sender),
+                    VmmRequest::new(VmmAction::FlushMetrics, sync_sender),
                     sync_receiver,
                 ))
             }
             ActionType::InstanceStart => {
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
-                    VmmAction::StartMicroVm(sync_sender),
+                    VmmRequest::new(VmmAction::StartMicroVm, sync_sender),
                     sync_receiver,
                 ))
             }
             ActionType::PauseVCPUs => {
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
-                    VmmAction::PauseVCPUs(sync_sender),
+                    VmmRequest::new(VmmAction::PauseVCPUs, sync_sender),
                     sync_receiver,
                 ))
             }
             ActionType::ResumeVCPUs => {
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
-                    VmmAction::ResumeVCPUs(sync_sender),
+                    VmmRequest::new(VmmAction::ResumeVCPUs, sync_sender),
                     sync_receiver,
                 ))
             }
             ActionType::SendCtrlAltDel => {
                 let (sync_sender, sync_receiver) = oneshot::channel();
                 Ok(ParsedRequest::Sync(
-                    VmmAction::SendCtrlAltDel(sync_sender),
+                    VmmRequest::new(VmmAction::SendCtrlAltDel, sync_sender),
                     sync_receiver,
                 ))
             }
@@ -199,7 +199,7 @@ mod tests {
               }"#;
             let (sender, receiver) = oneshot::channel();
             let req = ParsedRequest::Sync(
-                VmmAction::RescanBlockDevice("dummy_id".to_string(), sender),
+                VmmRequest::new(VmmAction::RescanBlockDevice("dummy_id".to_string()), sender),
                 receiver,
             );
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
@@ -218,7 +218,8 @@ mod tests {
             }"#;
 
             let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest = ParsedRequest::Sync(VmmAction::FlushMetrics(sender), receiver);
+            let req: ParsedRequest =
+                ParsedRequest::Sync(VmmRequest::new(VmmAction::FlushMetrics, sender), receiver);
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
             assert!(result
@@ -246,7 +247,8 @@ mod tests {
             }"#;
 
             let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest = ParsedRequest::Sync(VmmAction::StartMicroVm(sender), receiver);
+            let req: ParsedRequest =
+                ParsedRequest::Sync(VmmRequest::new(VmmAction::StartMicroVm, sender), receiver);
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
             assert!(result
@@ -274,7 +276,8 @@ mod tests {
             }"#;
 
             let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest = ParsedRequest::Sync(VmmAction::PauseVCPUs(sender), receiver);
+            let req: ParsedRequest =
+                ParsedRequest::Sync(VmmRequest::new(VmmAction::PauseVCPUs, sender), receiver);
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
             assert!(result
@@ -291,7 +294,8 @@ mod tests {
             }"#;
 
             let (sender, receiver) = oneshot::channel();
-            let req: ParsedRequest = ParsedRequest::Sync(VmmAction::ResumeVCPUs(sender), receiver);
+            let req: ParsedRequest =
+                ParsedRequest::Sync(VmmRequest::new(VmmAction::ResumeVCPUs, sender), receiver);
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
             assert!(result
@@ -309,7 +313,7 @@ mod tests {
 
             let (sender, receiver) = oneshot::channel();
             let req: ParsedRequest =
-                ParsedRequest::Sync(VmmAction::SendCtrlAltDel(sender), receiver);
+                ParsedRequest::Sync(VmmRequest::new(VmmAction::SendCtrlAltDel, sender), receiver);
             let result: Result<ActionBody, serde_json::Error> = serde_json::from_str(json);
             assert!(result.is_ok());
             assert!(result

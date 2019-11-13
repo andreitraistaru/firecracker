@@ -55,26 +55,37 @@ extern "C" {
     fn fdt_pack(fdt: *mut c_void) -> c_int;
 }
 
+/// Trait for devices to be added to the Flattened Device Tree.
 pub trait DeviceInfoForFDT {
+    /// Returns the address where this device will be loaded.
     fn addr(&self) -> u64;
+    /// Returns the associated interrupt for this device.
     fn irq(&self) -> u32;
+    /// Returns the amount of memory that needs to be reserved for this device.
     fn length(&self) -> u64;
 }
 
+/// Errors thrown while configuring the Flattened Device Tree for aarch64.
 #[derive(Debug)]
 pub enum Error {
+    /// Failed to append node to the FDT.
     AppendFDTNode(io::Error),
+    /// Failed to append a property to the FDT.
     AppendFDTProperty(io::Error),
+    /// Syscall for creating FDT failed.
     CreateFDT(io::Error),
+    /// Failed to obtain a C style string.
     CstringFDTTransform(NulError),
+    /// Failure in calling syscall for terminating this FDT.
     FinishFDTReserveMap(io::Error),
+    /// FDT was partially written to memory.
     IncompleteFDTMemoryWrite,
+    /// Failure in writing FDT in memory.
     WriteFDTToMemory(GuestMemoryError),
 }
+type Result<T> = result::Result<T, Error>;
 
-pub type Result<T> = result::Result<T, Error>;
-
-// Creates the flattened device tree for this VM.
+/// Creates the flattened device tree for this aarch64 microVM.
 pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     guest_mem: &GuestMemory,
     num_cpus: u32,
@@ -430,7 +441,7 @@ fn create_psci_node(fdt: &mut Vec<u8>) -> Result<()> {
 
 fn create_virtio_node<T: DeviceInfoForFDT + Clone + Debug>(
     fdt: &mut Vec<u8>,
-    dev_info: T,
+    dev_info: &T,
 ) -> Result<()> {
     let device_reg_prop = generate_prop64(&[dev_info.addr(), dev_info.length()]);
     let irq = generate_prop32(&[GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_EDGE_RISING]);
@@ -447,7 +458,7 @@ fn create_virtio_node<T: DeviceInfoForFDT + Clone + Debug>(
 
 fn create_serial_node<T: DeviceInfoForFDT + Clone + Debug>(
     fdt: &mut Vec<u8>,
-    dev_info: T,
+    dev_info: &T,
 ) -> Result<()> {
     let serial_reg_prop = generate_prop64(&[dev_info.addr(), dev_info.length()]);
     let irq = generate_prop32(&[GIC_FDT_IRQ_TYPE_SPI, dev_info.irq(), IRQ_TYPE_EDGE_RISING]);
@@ -465,7 +476,7 @@ fn create_serial_node<T: DeviceInfoForFDT + Clone + Debug>(
 
 fn create_rtc_node<T: DeviceInfoForFDT + Clone + Debug>(
     fdt: &mut Vec<u8>,
-    dev_info: T,
+    dev_info: &T,
 ) -> Result<()> {
     let compatible = b"arm,pl031\0arm,primecell\0";
     let rtc_reg_prop = generate_prop64(&[dev_info.addr(), dev_info.length()]);
@@ -485,35 +496,23 @@ fn create_devices_node<T: DeviceInfoForFDT + Clone + Debug>(
     fdt: &mut Vec<u8>,
     dev_info: &HashMap<(DeviceType, String), T>,
 ) -> Result<()> {
-    // We are trying to detect the root block device. We know
-    // that if a root block device is attached, it will be the one with the lowest bus address.
-
-    // As per doc, `None` will be returned only if the iterator
-    // is empty. That cannot happen, since on aarch64 the RTC device is
-    // always appended to the hashmap of devices.
-    let ((first_device_type, first_device_id), first_device_info) = dev_info
-        .iter()
-        .min_by(|&(_, ref a), &(_, ref b)| a.addr().cmp(&b.addr()))
-        .expect("Device Information cannot be empty");
-
-    // We check that the device with the lowest bus address is indeed a virtio device.
-    // At this point, it does not matter whether we are dealing with network or block since
-    // the create_virtio_node function is agnostic of that.
-    if let DeviceType::Virtio(_) = first_device_type {
-        create_virtio_node(fdt, first_device_info.clone())?;
-    }
+    // Create one temp Vec to store all virtio devices
+    let mut ordered_virtio_device: Vec<&T> = Vec::new();
 
     for ((device_type, device_id), info) in dev_info {
         match device_type {
-            DeviceType::RTC => create_rtc_node(fdt, info.clone())?,
-            DeviceType::Serial => create_serial_node(fdt, info.clone())?,
+            DeviceType::RTC => create_rtc_node(fdt, info)?,
+            DeviceType::Serial => create_serial_node(fdt, info)?,
             DeviceType::Virtio(_) => {
-                // We already appended the first virtio device.
-                if (device_type, device_id) != (&first_device_type, &first_device_id) {
-                    create_virtio_node(fdt, info.clone())?;
-                }
+                ordered_virtio_device.push(info);
             }
-        };
+        }
+    }
+
+    // Sort out virtio devices by address from low to high and insert them into fdt table.
+    ordered_virtio_device.sort_by(|a, b| a.addr().cmp(&b.addr()));
+    for ordered_device_info in ordered_virtio_device.drain(..) {
+        create_virtio_node(fdt, ordered_device_info)?;
     }
 
     Ok(())

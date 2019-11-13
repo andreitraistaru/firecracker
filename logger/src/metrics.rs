@@ -98,7 +98,7 @@ pub struct ApiServerMetrics {
     /// Measures the cpu's startup time in microseconds.
     pub process_startup_time_cpu_us: SharedMetric,
     /// Number of failures on API requests triggered by internal errors.
-    pub sync_outcome_fails: SharedMetric,
+    pub sync_response_fails: SharedMetric,
     /// Number of timeouts during communication with the VMM.
     pub sync_vmm_send_timeout_count: SharedMetric,
 }
@@ -395,8 +395,9 @@ struct SerializeToUtcTimestampMs;
 
 impl Serialize for SerializeToUtcTimestampMs {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer
-            .serialize_i64(fc_util::get_time(fc_util::ClockType::Monotonic) as i64 / 1_000_000)
+        serializer.serialize_i64(
+            fc_util::time::get_time(fc_util::time::ClockType::Monotonic) as i64 / 1_000_000,
+        )
     }
 }
 

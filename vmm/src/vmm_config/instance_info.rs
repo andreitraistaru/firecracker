@@ -231,8 +231,10 @@ pub enum StartMicrovmError {
     CreateNetDevice(devices::virtio::Error),
     /// Failed to create a `RateLimiter` object.
     CreateRateLimiter(std::io::Error),
+    /// Failed to create the backend for the vsock device.
+    CreateVsockBackend(devices::virtio::vsock::VsockUnixBackendError),
     /// Failed to create the vsock device.
-    CreateVsockDevice,
+    CreateVsockDevice(devices::virtio::vsock::VsockError),
     /// The device manager was not configured.
     DeviceManager,
     /// Cannot read from an Event file descriptor.
@@ -321,8 +323,11 @@ impl Display for StartMicrovmError {
                  the file was deleted/corrupted. Error number: {:?}",
                 err
             ),
-            CreateRateLimiter(ref err) => write!(f, "Cannot create RateLimiter. {}", err),
-            CreateVsockDevice => write!(f, "Cannot create vsock device."),
+            CreateRateLimiter(ref err) => write!(f, "Cannot create RateLimiter: {}", err),
+            CreateVsockBackend(ref err) => {
+                write!(f, "Cannot create backend for vsock device: {:?}", err)
+            }
+            CreateVsockDevice(ref err) => write!(f, "Cannot create vsock device: {:?}", err),
             CreateBalloon(ref err) => {
                 let mut err_msg = format!("{:?}", err);
                 err_msg = err_msg.replace("\"", "");
@@ -642,7 +647,7 @@ mod tests {
                 CreateRateLimiter(std::io::Error::from_raw_os_error(0))
             ),
             format!(
-                "Cannot create RateLimiter. {}",
+                "Cannot create RateLimiter: {}",
                 std::io::Error::from_raw_os_error(0)
             )
         );

@@ -62,7 +62,7 @@ class JailerContext:
         """Cleanup this jailer context."""
         self.cleanup()
 
-    def construct_param_list(self, config_file):
+    def construct_param_list(self, config_file, no_api):
         """Create the list of parameters we want the jailer to start with.
 
         We want to be able to vary any parameter even the required ones as we
@@ -97,6 +97,8 @@ class JailerContext:
         if config_file is not None:
             jailer_param_list.extend(['--'])
             jailer_param_list.extend(['--config-file', str(config_file)])
+        if no_api:
+            jailer_param_list.append('--no-api')
         return jailer_param_list
 
     def chroot_base_with_id(self):
@@ -159,10 +161,11 @@ class JailerContext:
             exist_ok=True
         )
         if self.netns:
-            run('ip netns add {}'.format(self.netns), shell=True)
+            run('ip netns add {}'.format(self.netns), shell=True, check=True)
 
     def cleanup(self, reuse_jail=False):
         """Clean up this jailer context."""
+        # pylint: disable=subprocess-run-check
         # When force is false, the only resources that get removed
         # are the one that firecracker creates (i.e api socket and dev folder).
         # This way, the chroot folder can be reused.
@@ -226,6 +229,7 @@ class JailerContext:
         disappears. The retry function that calls this code makes
         sure we do not timeout.
         """
+        # pylint: disable=subprocess-run-check
         tasks_file = '/sys/fs/cgroup/{}/{}/{}/tasks'.format(
             controller,
             FC_BINARY_NAME,

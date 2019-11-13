@@ -6,8 +6,8 @@ use std::result;
 use futures::sync::oneshot;
 use hyper::Method;
 
+use super::{VmmAction, VmmRequest};
 use vmm::vmm_config::balloon::{BalloonConfig, BalloonUpdateConfig};
-use vmm::VmmAction;
 
 use request::{IntoParsedRequest, ParsedRequest};
 
@@ -20,7 +20,7 @@ impl IntoParsedRequest for BalloonConfig {
         let (sender, receiver) = oneshot::channel();
         match method {
             Method::Put => Ok(ParsedRequest::Sync(
-                VmmAction::InsertBalloon(self, sender),
+                VmmRequest::new(VmmAction::InsertBalloon(self), sender),
                 receiver,
             )),
             _ => Err(format!("Invalid method {}!", method)),
@@ -37,7 +37,7 @@ impl IntoParsedRequest for BalloonUpdateConfig {
         let (sender, receiver) = oneshot::channel();
         match method {
             Method::Patch => Ok(ParsedRequest::Sync(
-                VmmAction::UpdateBalloon(self, sender),
+                VmmRequest::new(VmmAction::UpdateBalloon(self), sender),
                 receiver,
             )),
             _ => Err(format!("Invalid method {}!", method)),
@@ -58,7 +58,13 @@ mod tests {
         let get_parsed_req = body.into_parsed_request(None, Method::Get);
 
         assert!(match put_parsed_req {
-            Ok(ParsedRequest::Sync(VmmAction::InsertBalloon(contents, _), _)) => contents == body,
+            Ok(ParsedRequest::Sync(vmm_req, _)) => {
+                let (action, _) = vmm_req.unpack();
+                match action {
+                    VmmAction::InsertBalloon(contents) => contents == body,
+                    _ => false,
+                }
+            }
             _ => false,
         });
 
@@ -77,7 +83,13 @@ mod tests {
         assert!(put_parsed_req == Err("Invalid method PUT!".to_string()));
 
         assert!(match patch_parsed_req {
-            Ok(ParsedRequest::Sync(VmmAction::UpdateBalloon(contents, _), _)) => contents == body,
+            Ok(ParsedRequest::Sync(vmm_req, _)) => {
+                let (action, _) = vmm_req.unpack();
+                match action {
+                    VmmAction::UpdateBalloon(contents) => contents == body,
+                    _ => false,
+                }
+            }
             _ => false,
         });
 

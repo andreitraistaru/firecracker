@@ -459,12 +459,12 @@ paths:
         May fail if update is not possible.
       operationId: putGuestVsock
       parameters:
-        - name: body
-          in: body
-          description: Guest vsock properties
-          required: true
-          schema:
-            $ref: "#/definitions/Vsock"
+      - name: body
+        in: body
+        description: Guest vsock properties
+        required: true
+        schema:
+          $ref: "#/definitions/Vsock"
       responses:
         204:
           description: Vsock created/updated

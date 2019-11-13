@@ -41,6 +41,17 @@ pub enum MmioDeviceStateError {
 /// Optionally, a virtio device can implement device reset in which it returns said resources and
 /// resets its internal.
 pub trait VirtioDevice: AsAny + Send {
+    /// Get the available features offered by device.
+    fn avail_features(&self) -> u64;
+
+    /// Get acknowledged features of the driver.
+    fn acked_features(&self) -> u64;
+
+    /// Set acknowledged features of the driver.
+    /// This function must maintain the following invariant:
+    /// - self.avail_features() & self.acked_features() = self.get_acked_features()
+    fn set_acked_features(&mut self, acked_features: u64);
+
     /// The virtio device type.
     fn device_type(&self) -> u32;
 
@@ -48,13 +59,42 @@ pub trait VirtioDevice: AsAny + Send {
     fn queue_max_sizes(&self) -> &[u16];
 
     /// The set of feature bits shifted by `page * 32`.
-    fn features(&self, page: u32) -> u32 {
-        let _ = page;
-        0
+    fn avail_features_by_page(&self, page: u32) -> u32 {
+        let avail_features = self.avail_features();
+        match page {
+            // Get the lower 32-bits of the features bitfield.
+            0 => avail_features as u32,
+            // Get the upper 32-bits of the features bitfield.
+            1 => (avail_features >> 32) as u32,
+            _ => {
+                warn!("Received request for unknown features page.");
+                0u32
+            }
+        }
     }
 
     /// Acknowledges that this set of features should be enabled.
-    fn ack_features(&mut self, page: u32, value: u32);
+    fn ack_features_by_page(&mut self, page: u32, value: u32) {
+        let mut v = match page {
+            0 => u64::from(value),
+            1 => u64::from(value) << 32,
+            _ => {
+                warn!("Cannot acknowledge unknown features page: {}", page);
+                0u64
+            }
+        };
+
+        // Check if the guest is ACK'ing a feature that we didn't claim to have.
+        let avail_features = self.avail_features();
+        let unrequested_features = v & !avail_features;
+        if unrequested_features != 0 {
+            warn!("Received acknowledge request for unknown feature: {:x}", v);
+            // Don't count these features as acked.
+            v &= !unrequested_features;
+        }
+
+        self.set_acked_features(self.acked_features() | v);
+    }
 
     /// Reads this device configuration space at `offset`.
     fn read_config(&self, offset: u64, data: &mut [u8]);
@@ -77,10 +117,6 @@ pub trait VirtioDevice: AsAny + Send {
     fn reset(&mut self) -> Option<(EventFd, Vec<EventFd>)> {
         None
     }
-
-    fn avail_features(&self) -> u64;
-
-    fn acked_features(&self) -> u64;
 
     fn config_space(&self) -> Vec<u8>;
 }
@@ -174,10 +210,11 @@ impl fmt::Display for SpecificVirtioDeviceState {
 /// Typically one page (4096 bytes) of MMIO address space is sufficient to handle this transport
 /// and inner virtio device.
 pub struct MmioDevice {
-    device: Box<VirtioDevice>,
+    device: Box<dyn VirtioDevice>,
     device_activated: bool,
-
+    // The register where feature bits are stored.
     features_select: u32,
+    // The register where features page is selected.
     acked_features_select: u32,
     queue_select: u32,
     interrupt_status: Arc<AtomicUsize>,
@@ -191,7 +228,7 @@ pub struct MmioDevice {
 
 impl MmioDevice {
     /// Constructs a new MMIO transport for the given virtio device.
-    pub fn new(mem: GuestMemory, device: Box<VirtioDevice>) -> std::io::Result<MmioDevice> {
+    pub fn new(mem: GuestMemory, device: Box<dyn VirtioDevice>) -> std::io::Result<MmioDevice> {
         let mut queue_evts = Vec::new();
         for _ in device.queue_max_sizes().iter() {
             queue_evts.push(EventFd::new()?)
@@ -383,14 +420,14 @@ impl MmioDevice {
 impl BusDevice for MmioDevice {
     fn read(&mut self, offset: u64, data: &mut [u8]) {
         match offset {
-            0x00...0xff if data.len() == 4 => {
+            0x00..=0xff if data.len() == 4 => {
                 let v = match offset {
                     0x0 => MMIO_MAGIC_VALUE,
                     0x04 => MMIO_VERSION,
                     0x08 => self.device.device_type(),
                     0x0c => VENDOR_ID, // vendor id
                     0x10 => {
-                        let mut features = self.device.features(self.features_select);
+                        let mut features = self.device.avail_features_by_page(self.features_select);
                         if self.features_select == 1 {
                             features |= 0x1; // enable support of VirtIO Version 1
                         }
@@ -408,7 +445,7 @@ impl BusDevice for MmioDevice {
                 };
                 LittleEndian::write_u32(data, v);
             }
-            0x100...0xfff => self.device.read_config(offset - 0x100, data),
+            0x100..=0xfff => self.device.read_config(offset - 0x100, data),
             _ => {
                 warn!(
                     "invalid virtio mmio read: 0x{:x}:0x{:x}",
@@ -429,7 +466,7 @@ impl BusDevice for MmioDevice {
         }
 
         match offset {
-            0x00...0xff if data.len() == 4 => {
+            0x00..=0xff if data.len() == 4 => {
                 let v = LittleEndian::read_u32(data);
                 match offset {
                     0x14 => self.features_select = v,
@@ -437,13 +474,13 @@ impl BusDevice for MmioDevice {
                         if self
                             .check_driver_status(DEVICE_DRIVER, DEVICE_FEATURES_OK | DEVICE_FAILED)
                         {
-                            self.device.ack_features(self.acked_features_select, v);
+                            self.device
+                                .ack_features_by_page(self.acked_features_select, v);
                         } else {
                             warn!(
                                 "ack virtio features in invalid state 0x{:x}",
                                 self.driver_status
                             );
-                            return;
                         }
                     }
                     0x24 => self.acked_features_select = v,
@@ -465,16 +502,14 @@ impl BusDevice for MmioDevice {
                     0xa4 => self.update_queue_field(|q| hi(&mut q.used_ring, v)),
                     _ => {
                         warn!("unknown virtio mmio register write: 0x{:x}", offset);
-                        return;
                     }
                 }
             }
-            0x100...0xfff => {
+            0x100..=0xfff => {
                 if self.check_driver_status(DEVICE_DRIVER, DEVICE_FAILED) {
                     self.device.write_config(offset - 0x100, data)
                 } else {
                     warn!("can not write to device config data area before driver is ready");
-                    return;
                 }
             }
             _ => {
@@ -483,7 +518,6 @@ impl BusDevice for MmioDevice {
                     offset,
                     data.len()
                 );
-                return;
             }
         }
     }
@@ -523,7 +557,7 @@ impl MmioDeviceState {
         device_type: u32,
         device_id: &str,
         mmio_device: &MmioDevice,
-        handler: Option<&EpollHandler>,
+        handler: Option<&dyn EpollHandler>,
     ) -> std::result::Result<MmioDeviceState, MmioDeviceStateError> {
         let device = mmio_device.device.as_ref();
         let generic_virtio_device_state = GenericVirtioDeviceState {
@@ -603,7 +637,7 @@ impl MmioDeviceState {
     pub fn restore(
         &self,
         mem: GuestMemory,
-        device: Box<VirtioDevice>,
+        device: Box<dyn VirtioDevice>,
     ) -> std::io::Result<MmioDevice> {
         let mut queue_evts = Vec::new();
         for _ in device.queue_max_sizes().iter() {
@@ -635,7 +669,8 @@ mod tests {
     use super::*;
 
     struct DummyDevice {
-        acked_features: u32,
+        acked_features: u64,
+        avail_features: u64,
         interrupt_evt: Option<EventFd>,
         queue_evts: Option<Vec<EventFd>>,
         config_bytes: [u8; 0xeff],
@@ -645,10 +680,15 @@ mod tests {
         fn new() -> Self {
             DummyDevice {
                 acked_features: 0,
+                avail_features: 0,
                 interrupt_evt: None,
                 queue_evts: None,
                 config_bytes: [0; 0xeff],
             }
+        }
+
+        fn set_avail_features(&mut self, avail_features: u64) {
+            self.avail_features = avail_features;
         }
     }
 
@@ -661,11 +701,8 @@ mod tests {
             &[16, 32]
         }
 
-        #[allow(clippy::needless_range_loop)]
         fn read_config(&self, offset: u64, data: &mut [u8]) {
-            for i in 0..data.len() {
-                data[i] = self.config_bytes[offset as usize + i];
-            }
+            data.copy_from_slice(&self.config_bytes[offset as usize..]);
         }
 
         fn write_config(&mut self, offset: u64, data: &[u8]) {
@@ -674,8 +711,16 @@ mod tests {
             }
         }
 
-        fn ack_features(&mut self, page: u32, value: u32) {
-            self.acked_features = page + value;
+        fn avail_features(&self) -> u64 {
+            self.avail_features
+        }
+
+        fn acked_features(&self) -> u64 {
+            self.acked_features
+        }
+
+        fn set_acked_features(&mut self, acked_features: u64) {
+            self.acked_features = acked_features;
         }
 
         fn activate(
@@ -689,14 +734,6 @@ mod tests {
             self.interrupt_evt = Some(interrupt_evt);
             self.queue_evts = Some(queue_evts);
             Ok(())
-        }
-
-        fn avail_features(&self) -> u64 {
-            0
-        }
-
-        fn acked_features(&self) -> u64 {
-            0
         }
 
         fn config_space(&self) -> Vec<u8> {
@@ -804,11 +841,17 @@ mod tests {
 
         d.features_select = 0;
         d.read(0x10, &mut buf[..]);
-        assert_eq!(LittleEndian::read_u32(&buf[..]), d.device.features(0));
+        assert_eq!(
+            LittleEndian::read_u32(&buf[..]),
+            d.device.avail_features_by_page(0)
+        );
 
         d.features_select = 1;
         d.read(0x10, &mut buf[..]);
-        assert_eq!(LittleEndian::read_u32(&buf[..]), d.device.features(0) | 0x1);
+        assert_eq!(
+            LittleEndian::read_u32(&buf[..]),
+            d.device.avail_features_by_page(0) | 0x1
+        );
 
         d.read(0x34, &mut buf[..]);
         assert_eq!(LittleEndian::read_u32(&buf[..]), 16);
@@ -848,8 +891,9 @@ mod tests {
     fn test_bus_device_write() {
         let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)]).unwrap();
 
-        let dummy_box = Box::new(DummyDevice::new());
-        let p = &dummy_box.acked_features as *const u32;
+        let mut dummy_box = Box::new(DummyDevice::new());
+        let dummy_dev_acked_features = &dummy_box.acked_features as *const u64;
+        let dummy_dev_avail_features = &mut dummy_box.avail_features as *mut u64;
 
         let mut d = MmioDevice::new(m, dummy_box).unwrap();
 
@@ -867,11 +911,11 @@ mod tests {
         set_driver_status(&mut d, DEVICE_ACKNOWLEDGE);
 
         // Acking features in invalid state shouldn't take effect.
-        assert_eq!(unsafe { *p }, 0x0);
+        assert_eq!(unsafe { *dummy_dev_acked_features }, 0x0);
         d.acked_features_select = 0x0;
         LittleEndian::write_u32(&mut buf[..], 1);
         d.write(0x20, &buf[..]);
-        assert_eq!(unsafe { *p }, 0x0);
+        assert_eq!(unsafe { *dummy_dev_acked_features }, 0x0);
 
         // Write to device specific configuration space should be ignored before setting DEVICE_DRIVER
         let buf1 = vec![1; 0xeff];
@@ -895,10 +939,16 @@ mod tests {
         d.write(0x14, &buf[..]);
         assert_eq!(d.features_select, 1);
 
-        d.acked_features_select = 0x123;
-        LittleEndian::write_u32(&mut buf[..], 1);
+        // Test acknowledging features on bus.
+        d.acked_features_select = 0;
+        LittleEndian::write_u32(&mut buf[..], 0x124);
+        // Set the device available features in order to
+        // make acknowledging possible.
+        unsafe {
+            *dummy_dev_avail_features = 0x124;
+        };
         d.write(0x20, &buf[..]);
-        assert_eq!(unsafe { *p }, 0x124);
+        assert_eq!(unsafe { *dummy_dev_acked_features }, 0x124);
 
         d.acked_features_select = 0;
         LittleEndian::write_u32(&mut buf[..], 2);
@@ -911,11 +961,11 @@ mod tests {
         );
 
         // Acking features in invalid state shouldn't take effect.
-        assert_eq!(unsafe { *p }, 0x124);
+        assert_eq!(unsafe { *dummy_dev_acked_features }, 0x124);
         d.acked_features_select = 0x0;
         LittleEndian::write_u32(&mut buf[..], 1);
         d.write(0x20, &buf[..]);
-        assert_eq!(unsafe { *p }, 0x124);
+        assert_eq!(unsafe { *dummy_dev_acked_features }, 0x124);
 
         // Setup queues
         d.queue_select = 0;
@@ -1112,6 +1162,44 @@ mod tests {
     }
 
     #[test]
+    fn test_get_avail_features() {
+        let dummy_dev = DummyDevice::new();
+        assert_eq!(dummy_dev.avail_features(), dummy_dev.avail_features);
+    }
+
+    #[test]
+    fn test_get_acked_features() {
+        let dummy_dev = DummyDevice::new();
+        assert_eq!(dummy_dev.acked_features(), dummy_dev.acked_features);
+    }
+
+    #[test]
+    fn test_set_acked_features() {
+        let mut dummy_dev = DummyDevice::new();
+
+        assert_eq!(dummy_dev.acked_features(), 0);
+        dummy_dev.set_acked_features(16);
+        assert_eq!(dummy_dev.acked_features(), dummy_dev.acked_features);
+    }
+
+    #[test]
+    fn test_ack_features_by_page() {
+        let mut dummy_dev = DummyDevice::new();
+        dummy_dev.set_acked_features(16);
+        dummy_dev.set_avail_features(8);
+        dummy_dev.ack_features_by_page(0, 8);
+        assert_eq!(dummy_dev.acked_features(), 24);
+    }
+
+    #[test]
+    fn test_set_avail_features() {
+        let mut dummy_dev = DummyDevice::new();
+        assert_eq!(dummy_dev.avail_features(), 0);
+        dummy_dev.set_avail_features(4);
+        assert_eq!(dummy_dev.avail_features(), 4);
+    }
+
+    #[test]
     fn test_mmio_device_state_with_invalid_device_type() {
         let m = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x1000)]).unwrap();
         let mmio_device = MmioDevice::new(m, Box::new(DummyDevice::new())).unwrap();
@@ -1155,7 +1243,9 @@ mod tests {
             SpecificVirtioDeviceState::Net(
                 NetState::new(
                     &Net::new_with_tap(
-                        net_util::Tap::new().map_err(Error::TapOpen).unwrap(),
+                        net_util::Tap::open_named("disp_spec_dev")
+                            .map_err(Error::TapOpen)
+                            .unwrap(),
                         None,
                         net::EpollConfig::new(0, epoll::create(true).unwrap(), sender),
                         None,

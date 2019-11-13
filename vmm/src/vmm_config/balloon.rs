@@ -111,5 +111,4 @@ mod tests {
             "Not allowed to update an inexistent balloon device."
         );
     }
-
 }

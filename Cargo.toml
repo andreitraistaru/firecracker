@@ -4,7 +4,7 @@ version = "1.1.1"
 authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
 
 [dependencies]
-backtrace = {version = "0.3", features = ["libunwind", "libbacktrace", "std"], default-features = false}
+backtrace = {version = "=0.3.35", features = ["libunwind", "libbacktrace", "std"], default-features = false}
 clap = { version = ">=2.27.1", default-features = false}
 
 api_server = { path = "api_server" }
@@ -13,6 +13,7 @@ jailer = { path = "jailer" }
 logger = { path = "logger" }
 mmds = { path = "mmds" }
 seccomp = { path = "seccomp" }
+sys_util = { path = "sys_util" }
 vmm = { path = "vmm" }
 
 [dev-dependencies]

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Merged Firecracker 0.19.0.
+
 ### Fixed
 
 - Fixed a deserialization issue that could cause Firecracker to crash while
