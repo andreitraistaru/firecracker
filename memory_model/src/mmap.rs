@@ -537,7 +537,7 @@ impl Drop for MemoryMapping {
 
 /// `Bitmap` implements a simple bit map on the page level with test and set operations. It is
 /// page-size aware, so it converts addresses to page numbers before setting or clearing the bits.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Bitmap {
     map: Vec<AtomicU64>,
     size: usize,
@@ -555,10 +555,7 @@ impl Bitmap {
         // Create the map of `AtomicU64`, allowing the bit set operations to be done on a non-mut
         // `Bitmap`, avoiding the need for a Mutex or other serialization.
         let map_size = ((bit_size - 1) >> 6) + 1;
-        let map = (0..map_size).map(|_| AtomicU64::new(0)).collect();
-        for _ in 0..map_size {
-            map.push(AtomicU64::new(0));
-        }
+        let map: Vec<AtomicU64> = (0..map_size).map(|_| AtomicU64::new(0)).collect();
 
         Bitmap {
             map,

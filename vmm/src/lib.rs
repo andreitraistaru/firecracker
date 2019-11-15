@@ -2587,34 +2587,64 @@ impl Vmm {
                     .expect("BUG: Bitmaps should exist for all areas if tracking is enabled");
 
                 // Get the KVM dirty bitmap for this region of guest memory.
-                let bitmap = self
+                let kvm_bitmap = self
                     .vm
                     .get_fd()
                     .get_dirty_log(n as u32, size)
                     .map_err(PauseMicrovmError::WriteMemory)?;
 
                 let mut written_pages = 0;
-                // Loop over the dirty bitmap, writing to the file for every changed page.
-                for (i, v) in bitmap.iter().enumerate() {
+                // write_start_guest_offset and write_size track the starting (guest physical)
+                // offset for a batch of dirty pages if we are tracking one, and the size of that
+                // batch. Batching together writes allows large regions of memory to be written
+                // down in a single syscall.
+                let mut write_start_guest_offset = None;
+                let mut write_size = 0;
+                // Loop over the KVM dirty bitmap, writing to the file for every page that is
+                // marked dirty in either the KVM dirty bitmap or Firecracker's dirty bitmap.
+                for (i, v) in kvm_bitmap.iter().enumerate() {
                     for j in 0..64 {
                         let page_offset = ((i * 64) + j) * 4096;
-                        let guest_physical_offset = guest_base.checked_add(page_offset).unwrap();
 
                         let is_kvm_dirty = ((v >> j) & 1u64) != 0u64;
                         let is_firecracker_dirty = fc_bitmap.is_addr_set(page_offset);
                         if is_kvm_dirty || is_firecracker_dirty {
-                            // We may have skipped some pages, so seek forward to the new physical
-                            // offset into the underlying file.
-                            file.seek(SeekFrom::Start((file_offset + page_offset) as u64))
-                                .map_err(PauseMicrovmError::WriteMemory)?;
-                            // Tell the memory to write itself down to the snapshot file.
+                            if write_size == 0 {
+                                // We're starting a section of dirty pages, so seek to the place
+                                // we're going to write them into the file, and start counting how
+                                // much we're going to write.
+                                file.seek(SeekFrom::Start((file_offset + page_offset) as u64))
+                                    .map_err(PauseMicrovmError::WriteMemory)?;
+                                // Then calculate the offset of this batch of dirty pages into
+                                // guest (physical) memory, so when we come to write the pages we
+                                // know where to start.
+                                write_start_guest_offset =
+                                    Some(guest_base.checked_add(page_offset).unwrap());
+                            }
+                            write_size += 4096;
+                            written_pages += 1;
+                        } else if write_size > 0 {
+                            // We've found a gap in dirty memory, so write down the previous dirty
+                            // section if there was one.
                             self.guest_memory()
                                 .unwrap()
-                                .write_from_memory(guest_physical_offset, &mut file, 4096)
+                                .write_from_memory(
+                                    write_start_guest_offset.unwrap(),
+                                    &mut file,
+                                    write_size,
+                                )
                                 .map_err(PauseMicrovmError::SyncMemory)?;
-                            written_pages += 1;
+                            write_size = 0;
                         }
                     }
+                }
+                if write_size > 0 {
+                    // If there was a dirty section at the trailer of this memory region, ask the
+                    // guest memory to write it to the file.
+                    self.guest_memory()
+                        .unwrap()
+                        .write_from_memory(write_start_guest_offset.unwrap(), &mut file, write_size)
+                        .map_err(PauseMicrovmError::SyncMemory)?;
                 }
                 info!(
                     "Wrote {} dirty pages ({} bytes) to memory file",

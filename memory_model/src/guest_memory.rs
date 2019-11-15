@@ -563,7 +563,7 @@ impl GuestMemory {
     /// # fn test_host_addr() -> Result<(), ()> {
     ///     let start_addr = GuestAddress(0x1000);
     ///     let mut gm = GuestMemory::new_anon_from_tuples(&vec![(start_addr, 0x500)], true).map_err(|_| ())?;
-    ///     let addr = gm.get_host_address(GuestAddress(0x1200)).unwrap();
+    ///     let addr = gm.get_host_address(GuestAddress(0x1200), 100).unwrap();
     ///     println!("Host address is {:p}", addr);
     ///     Ok(())
     /// # }
