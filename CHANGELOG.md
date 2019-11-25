@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.19.1]
 
 ### Added
 
@@ -14,6 +14,9 @@
   should be tracked in order to generate a subsequent incremental snapshot.
 
 ### Fixed
+
+- Fixed a logical error in bounds checking performed on vsock virtio
+descriptors.
 
 - Fixed a deserialization issue that could cause Firecracker to crash while
   attempting to load a corrupt snapshot file.
