@@ -117,12 +117,6 @@ impl Display for Version {
     }
 }
 
-const FIRST_SUPPORTED_APP_VERSION: Version = Version {
-    major: 1,
-    minor: 0,
-    build: 0,
-};
-
 /// The header of a Firecracker snapshot image.
 /// It strictly contains the most basic info needed to identify a Snapshot
 /// and select the proper deserialization logic.
@@ -251,9 +245,7 @@ impl SnapshotEngine {
         // Check if the app version associated with the snapshot is valid.
         // For the moment we accept any app version starting with 1.0.0 (first wisp version
         // supporting snapshotting) and ending with the current app version.
-        if !(header.app_version.major >= FIRST_SUPPORTED_APP_VERSION.major
-            && header.app_version.major <= current_app_version.major)
-        {
+        if header.app_version.major > current_app_version.major {
             return Err(Error::UnsupportedAppVersion(header.app_version));
         }
 
@@ -646,22 +638,22 @@ mod tests {
                     Default::default(),
                     vec![],
                 );
-                bad_microvm_state.header.app_version = Version::new(0, 0, 0);
+                bad_microvm_state.header.app_version = Version::new(10000, 2, 3);
+                let expected_error = format!(
+                    "Failed to translate snapshot: \
+                     Unimplemented snapshot translator between versions 10000.2.3 and {}.{}.{}.",
+                    APP_VER.major, APP_VER.minor, APP_VER.build
+                );
+
                 let ret = SnapshotEngine::serialize(&bad_snap_path, &bad_microvm_state, APP_VER);
                 assert!(ret.is_err());
-                assert_eq!(
-                    format!("{}", ret.err().unwrap()),
-                    "Unsupported app version: 0.0.0."
-                );
+                assert_eq!(&format!("{}", ret.err().unwrap()), &expected_error);
 
                 let bad_bytes = bincode::serialize(&bad_microvm_state).unwrap();
                 std::fs::write(&bad_snap_path, &bad_bytes).unwrap();
                 let ret = SnapshotEngine::deserialize(&bad_snap_path, header.app_version);
                 assert!(ret.is_err());
-                assert_eq!(
-                    format!("{}", ret.err().unwrap()),
-                    "Unsupported app version: 0.0.0."
-                );
+                assert_eq!(&format!("{}", ret.err().unwrap()), &expected_error);
             }
 
             // Good case: valid snapshot.

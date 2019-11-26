@@ -20,11 +20,11 @@ impl Display for Error {
             Serialize(ref e) => write!(f, "Failed to serialize snapshot content. {}", e),
             UnimplementedSnapshotTranslator((from, to)) => write!(
                 f,
-                "Unimplemented snapshot translator between versions {} and {}.",
+                "Unimplemented snapshot translator between versions {} and {}",
                 from, to
             ),
             SnapshotTooBig(size, max_size) => {
-                write!(f, "Snapshot too big: {} > {}.", size, max_size)
+                write!(f, "Snapshot too big: {} > {}", size, max_size)
             }
         }
     }
@@ -90,7 +90,7 @@ mod tests {
                     Version::new(1, 0, 0)
                 ))
             ),
-            "Unimplemented snapshot translator between versions 0.0.0 and 1.0.0."
+            "Unimplemented snapshot translator between versions 0.0.0 and 1.0.0"
         );
     }
 
@@ -102,7 +102,7 @@ mod tests {
         assert!(ret.is_err());
         assert_eq!(
             format!("{}", ret.err().unwrap()),
-            "Unimplemented snapshot translator between versions 0.0.0 and 1.0.0."
+            "Unimplemented snapshot translator between versions 0.0.0 and 1.0.0"
         );
     }
 
