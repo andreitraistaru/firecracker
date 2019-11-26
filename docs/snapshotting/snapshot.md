@@ -2,7 +2,12 @@
 
 MicroVMs can be Paused-to-a-Snapshot, and Resumed-from-a-Snapshot
 by using the `PUT` requests to `/snapshot/create` and `/snapshot/load`
-respectively.
+respectively. Firecracker also allows incremental snapshots to be
+created, which saves a page-level diff between the guest memory initial
+state and the contents at the time a snapshot is taken. The incremental
+diff is saved in a sparse file, separate from the guest memory backing
+file. One or more incremental states can be later used to reconstruct
+the guest memory contents via composition, overlaying, etc. 
 
 ## Prerequisites
 
@@ -58,6 +63,11 @@ curl --unix-socket /tmp/firecracker.socket -i  \
     }'
 ```
 
+When creating a clean guest VM (as opposed to restoring from a snapshot),
+the optional `track_dirty_pages` boolean parameter of `machine-config`
+allows an incremental memory snapshot to be saved when the next VM
+snapshot is taken. 
+
 ## PauseToSnapshot - creating a snapshot of a microVM
 
 Use the `PUT /snapshot/create` API request to create a snapshot.
@@ -81,12 +91,6 @@ the generated snapshot, they should `kill` this Firecracker process
 after receiving the `OK` response to release its host-side resources,
 and not wait for the `original` microVM to kill itself (in <150ms).
 
-This API request will only be successful if called on a Firecracker
-which had previously started its guest - it had previously received an
-`InstanceStart` API action request.
-
-Only file-backed guest memory microVMs can be snapshotted.
-
 ### PauseToSnapshot Example
 
 ```bash
@@ -98,6 +102,9 @@ curl --unix-socket /tmp/firecracker.socket -i \
              \"snapshot_path\": \"/path/to/snapshot\"
     }"
 ```
+
+There's an optional payload parameter, called `mem_file_path`, which
+specifies the path where an incremental guest memory snapshot is saved. 
 
 ### Resources comprising the full snapshot
 
@@ -122,6 +129,11 @@ Required resources:
 - all TAPs associated with emulated guest network interfaces used by the
   original microVM, made available in the network namespace where the
   to-be-resumed Firecracker is running.
+  
+Optional parameters:
+- `track_dirty_pages`, a boolean which can be used to enable tracking
+  of dirty guest memory pages after the microVM is resumed. This enables
+  saving an incremental guest memory snapshot at a later point.
 
 If one wishes to reuse an existing host TAP for restoring a microVM,
 make sure the *original/source* microVM Firecracker process has ended so
