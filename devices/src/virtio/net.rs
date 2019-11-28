@@ -1817,6 +1817,30 @@ mod tests {
     }
 
     #[test]
+    fn test_tx_queue_interrupt() {
+        // Regression test for https://github.com/firecracker-microvm/wisp/issues/151 .
+        let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
+        let (mut h, txq, _) = default_test_netepollhandler(&mem, TestMutators::default());
+
+        let daddr = 0x2000;
+        assert!(daddr as usize > txq.end().0);
+
+        // Do some TX.
+        txq.avail.idx.set(1);
+        txq.avail.ring[0].set(0);
+        txq.dtable[0].set(daddr, 0x1000, 0, 0);
+
+        // trigger the TX handler
+        h.tx.queue_evt.write(1).unwrap();
+        h.handle_event(TX_QUEUE_EVENT, EPOLLIN).unwrap();
+
+        // Verify if TX queue was processed.
+        assert_eq!(txq.used.idx.get(), 1);
+        // Check if interrupt was triggered.
+        assert_eq!(h.interrupt_evt.read().unwrap(), 1);
+    }
+
+    #[test]
     fn test_bandwidth_rate_limiter() {
         let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, txq, rxq) = default_test_netepollhandler(&mem, TestMutators::default());
