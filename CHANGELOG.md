@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed Github issue #151 - raise interrupt for TX queue used descriptors.
+
 ## [0.19.1]
 
 ### Added

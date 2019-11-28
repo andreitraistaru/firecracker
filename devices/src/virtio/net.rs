@@ -401,6 +401,7 @@ impl NetEpollHandler {
         // trigger a process_rx() which checks if there are any new frames to be sent, starting
         // with the MMDS network stack.
         let mut process_rx_for_mmds = false;
+        let mut raise_irq = false;
 
         while let Some(head) = self.tx.queue.pop(&self.mem) {
             // If limiter.consume() fails it means there is no more TokenType::Ops
@@ -478,6 +479,11 @@ impl NetEpollHandler {
             }
 
             self.tx.queue.add_used(&self.mem, head_index, 0);
+            raise_irq = true;
+        }
+
+        if raise_irq {
+            self.signal_used_queue()?;
         }
 
         // An incoming frame for the MMDS may trigger the transmission of a new message.
@@ -1739,7 +1745,7 @@ mod tests {
             h.interrupt_evt.write(1).unwrap();
             h.handle_event(RX_TAP_EVENT, EPOLLIN).unwrap();
             assert!(h.rx.deferred_frame);
-            assert_eq!(h.interrupt_evt.read().unwrap(), 2);
+            assert_eq!(h.interrupt_evt.read().unwrap(), 3);
             // The #cfg(test) enabled version of read_tap always returns 1234 bytes (or the len of
             // the buffer, whichever is smaller).
             assert_eq!(rxq.used.ring[0].get().len, 1234);
@@ -1891,7 +1897,7 @@ mod tests {
                 assert!(h.get_rx_rate_limiter().is_blocked());
                 assert!(h.rx.deferred_frame);
                 // assert that no operation actually completed (limiter blocked it)
-                assert_eq!(h.interrupt_evt.read().unwrap(), 1);
+                assert_eq!(h.interrupt_evt.read().unwrap(), 2);
                 // make sure the data is still queued for processing
                 assert_eq!(rxq.used.idx.get(), 0);
             }
@@ -1994,7 +2000,7 @@ mod tests {
                 assert!(h.get_rx_rate_limiter().is_blocked());
                 assert!(h.rx.deferred_frame);
                 // assert that no operation actually completed (limiter blocked it)
-                assert_eq!(h.interrupt_evt.read().unwrap(), 1);
+                assert_eq!(h.interrupt_evt.read().unwrap(), 2);
                 // make sure the data is still queued for processing
                 assert_eq!(rxq.used.idx.get(), 0);
 
