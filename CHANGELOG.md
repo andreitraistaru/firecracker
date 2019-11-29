@@ -4,7 +4,9 @@
 
 ### Fixed
 
-- Fixed Github issue #151 - raise interrupt for TX queue used descriptors.
+- Raise interrupt for TX queue used descriptors - Github issue #151
+- Fixed a bug that causes 100% cpu load when the net device rx is throttled 
+by the ratelimiter - Github issue #152
 
 ## [0.19.1]
 

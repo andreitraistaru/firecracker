@@ -155,10 +155,6 @@ pub struct NetEpollHandler {
     acked_features: u64,
     mmds_ns: Option<MmdsNetworkStack>,
     guest_mac: Option<MacAddr>,
-    epoll_fd: RawFd,
-    rx_tap_listening: bool,
-    rx_tap_epoll_token: u64,
-
     #[cfg(test)]
     test_mutators: tests::TestMutators,
 }
@@ -510,28 +506,6 @@ impl NetEpollHandler {
     fn read_tap(&mut self) -> io::Result<usize> {
         self.tap.read(&mut self.rx.frame_buf)
     }
-
-    fn register_tap_rx_listener(&mut self) -> std::result::Result<(), std::io::Error> {
-        epoll::ctl(
-            self.epoll_fd,
-            epoll::ControlOptions::EPOLL_CTL_ADD,
-            self.tap.as_raw_fd(),
-            epoll::Event::new(epoll::Events::EPOLLIN, self.rx_tap_epoll_token),
-        )?;
-        self.rx_tap_listening = true;
-        Ok(())
-    }
-
-    fn unregister_tap_rx_listener(&mut self) -> std::result::Result<(), std::io::Error> {
-        epoll::ctl(
-            self.epoll_fd,
-            epoll::ControlOptions::EPOLL_CTL_DEL,
-            self.tap.as_raw_fd(),
-            epoll::Event::new(epoll::Events::EPOLLIN, self.rx_tap_epoll_token),
-        )?;
-        self.rx_tap_listening = false;
-        Ok(())
-    }
 }
 
 impl EpollHandler for NetEpollHandler {
@@ -551,10 +525,6 @@ impl EpollHandler for NetEpollHandler {
                         underlying: e,
                     })
                 } else {
-                    if !self.rx_tap_listening {
-                        self.register_tap_rx_listener()
-                            .map_err(DeviceError::IoError)?;
-                    }
                     // If the limiter is not blocked, resume the receiving of bytes.
                     if !self.rx.rate_limiter.is_blocked() {
                         // There should be a buffer available now to receive the frame into.
@@ -568,8 +538,6 @@ impl EpollHandler for NetEpollHandler {
                 METRICS.net.rx_tap_event_count.inc();
 
                 if self.rx.queue.is_empty(&self.mem) {
-                    self.unregister_tap_rx_listener()
-                        .map_err(DeviceError::IoError)?;
                     return Err(DeviceError::NoAvailBuffers);
                 }
 
@@ -860,9 +828,6 @@ impl VirtioDevice for Net {
                 acked_features: self.acked_features,
                 mmds_ns,
                 guest_mac: self.guest_mac(),
-                epoll_fd: self.epoll_config.epoll_raw_fd,
-                rx_tap_listening: true,
-                rx_tap_epoll_token: self.epoll_config.rx_tap_token,
 
                 #[cfg(test)]
                 test_mutators: tests::TestMutators::default(),
@@ -882,17 +847,14 @@ impl VirtioDevice for Net {
 
             //TODO: barrier needed here maybe?
 
-            // Still doing this here, otherwise the net device might get stuck after being
-            // restored from a snapshot because activate no longer added the TAP fd to the
-            // epoll set by default after the Firecracker patch which introduced the
-            // `register_tap_rx_listener` and `unregister_tap_rx_listener` methods to
-            // NetEpollHandler. We're setting handler.rx_tap_listening to true above for
-            // the same reason.
             epoll::ctl(
                 self.epoll_config.epoll_raw_fd,
                 epoll::ControlOptions::EPOLL_CTL_ADD,
                 tap_fd,
-                epoll::Event::new(epoll::Events::EPOLLIN, self.epoll_config.rx_tap_token),
+                epoll::Event::new(
+                    epoll::Events::EPOLLIN | epoll::Events::EPOLLET,
+                    self.epoll_config.rx_tap_token,
+                ),
             )
             .map_err(|e| {
                 METRICS.net.activate_fails.inc();
@@ -1257,7 +1219,6 @@ mod tests {
         let interrupt_evt = EventFd::new().unwrap();
         let rx_queue_evt = EventFd::new().unwrap();
         let tx_queue_evt = EventFd::new().unwrap();
-        let epoll_fd = epoll::create(true).unwrap();
 
         (
             NetEpollHandler {
@@ -1271,9 +1232,6 @@ mod tests {
                 mmds_ns: Some(MmdsNetworkStack::new_with_defaults()),
                 test_mutators,
                 guest_mac: None,
-                epoll_fd,
-                rx_tap_epoll_token: 0,
-                rx_tap_listening: false,
             },
             txq,
             rxq,
@@ -1613,15 +1571,12 @@ mod tests {
         };
         let mem = GuestMemory::new_anon_from_tuples(&[(GuestAddress(0), 0x10000)], true).unwrap();
         let (mut h, _txq, rxq) = default_test_netepollhandler(&mem, test_mutators);
-        h.register_tap_rx_listener().unwrap();
 
         // The RX queue is empty.
         match h.handle_event(RX_TAP_EVENT, epoll::Events::EPOLLIN) {
             Err(DeviceError::NoAvailBuffers) => (),
             _ => panic!("invalid"),
         }
-        // Since the RX was empty, we shouldn't be listening for tap RX events.
-        assert!(!h.rx_tap_listening);
 
         // Fake an avail buffer; this time, tap reading should error out.
         rxq.avail.idx.set(1);
@@ -1629,8 +1584,6 @@ mod tests {
             Err(DeviceError::FailedReadTap) => (),
             other => panic!("invalid: {:?}", other),
         }
-        // Since the RX was empty, we shouldn't be listening for tap RX events.
-        assert!(!h.rx_tap_listening);
 
         // Fake an avail buffer; this time, tap reading should error out.
         rxq.avail.idx.set(1);
@@ -1876,8 +1829,8 @@ mod tests {
             }
 
             // wait for 100ms to give the rate-limiter timer a chance to replenish
-            // wait for an extra 50ms to make sure the timerfd event makes its way from the kernel
-            thread::sleep(Duration::from_millis(150));
+            // wait for an extra 100ms to make sure the timerfd event makes its way from the kernel
+            thread::sleep(Duration::from_millis(200));
 
             // following TX procedure should succeed because bandwidth should now be available
             {
@@ -1927,8 +1880,8 @@ mod tests {
             }
 
             // wait for 100ms to give the rate-limiter timer a chance to replenish
-            // wait for an extra 50ms to make sure the timerfd event makes its way from the kernel
-            thread::sleep(Duration::from_millis(150));
+            // wait for an extra 100ms to make sure the timerfd event makes its way from the kernel
+            thread::sleep(Duration::from_millis(200));
 
             // following RX procedure should succeed because bandwidth should now be available
             {
@@ -1984,8 +1937,8 @@ mod tests {
             }
 
             // wait for 100ms to give the rate-limiter timer a chance to replenish
-            // wait for an extra 50ms to make sure the timerfd event makes its way from the kernel
-            thread::sleep(Duration::from_millis(150));
+            // wait for an extra 100ms to make sure the timerfd event makes its way from the kernel
+            thread::sleep(Duration::from_millis(200));
 
             // following TX procedure should succeed because ops should now be available
             {
@@ -2039,8 +1992,8 @@ mod tests {
             }
 
             // wait for 100ms to give the rate-limiter timer a chance to replenish
-            // wait for an extra 50ms to make sure the timerfd event makes its way from the kernel
-            thread::sleep(Duration::from_millis(150));
+            // wait for an extra 100ms to make sure the timerfd event makes its way from the kernel
+            thread::sleep(Duration::from_millis(200));
 
             // following RX procedure should succeed because ops should now be available
             {
