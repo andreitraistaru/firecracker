@@ -1,12 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [0.19.2]
 
 ### Fixed
 
-- Raise interrupt for TX queue used descriptors - Github issue #151
-- Fixed a bug that causes 100% cpu load when the net device rx is throttled 
-by the ratelimiter - Github issue #152
+- Raise interrupt for TX queue used descriptors (GitHub issue #151).
+- Fixed a bug that causes 100% cpu load when the net device rx is throttled
+  by the ratelimiter (GitHub issue #152).
 
 ## [0.19.1]
 
@@ -17,15 +17,14 @@ by the ratelimiter - Github issue #152
   incremental guest memory snapshot on disk.
 - New `machine-config` parameter `track_dirty_pages`, marking whether
   dirty pages should be tracked, which allows incremental snapshots to be
-  created.   
+  created.
 - New snapshot API parameter `track_dirty_pages`, marking whether dirty pages
   should be tracked in order to generate a subsequent incremental snapshot.
 
 ### Fixed
 
 - Fixed a logical error in bounds checking performed on vsock virtio
-descriptors.
-
+  descriptors.
 - Fixed a deserialization issue that could cause Firecracker to crash while
   attempting to load a corrupt snapshot file.
 
