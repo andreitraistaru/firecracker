@@ -8,7 +8,9 @@
 use crate::virtio::net::Error;
 use crate::virtio::net::Result;
 use crate::virtio::net::{MAX_BUFFER_SIZE, QUEUE_SIZE, QUEUE_SIZES, RX_INDEX, TX_INDEX};
-use crate::virtio::{ActivateResult, Queue, VirtioDevice, TYPE_NET, VIRTIO_MMIO_INT_VRING};
+use crate::virtio::{
+    ActivateResult, DeviceState, Queue, VirtioDevice, TYPE_NET, VIRTIO_MMIO_INT_VRING,
+};
 use crate::{report_net_event_fail, Error as DeviceError};
 use dumbo::ns::MmdsNetworkStack;
 use dumbo::{EthernetFrame, MacAddr, MAC_ADDR_LEN};
@@ -59,8 +61,6 @@ pub struct Net {
     avail_features: u64,
     acked_features: u64,
 
-    mem: GuestMemoryMmap,
-
     pub(crate) queues: Vec<Queue>,
     pub(crate) queue_evts: Vec<EventFd>,
 
@@ -82,7 +82,8 @@ pub struct Net {
     config_space: Vec<u8>,
     guest_mac: Option<MacAddr>,
 
-    device_activated: bool,
+    pub(crate) device_state: DeviceState,
+    pub(crate) activate_evt: EventFd,
 
     mmds_ns: Option<MmdsNetworkStack>,
 
@@ -95,7 +96,6 @@ impl Net {
     pub fn new_with_tap(
         tap: Tap,
         guest_mac: Option<&MacAddr>,
-        mem: GuestMemoryMmap,
         rx_rate_limiter: RateLimiter,
         tx_rate_limiter: RateLimiter,
         allow_mmds_requests: bool,
@@ -148,7 +148,6 @@ impl Net {
             tap,
             avail_features,
             acked_features: 0u64,
-            mem,
             queues,
             queue_evts,
             rx_rate_limiter,
@@ -161,7 +160,8 @@ impl Net {
             tx_iovec: Vec::with_capacity(QUEUE_SIZE as usize),
             interrupt_status: Arc::new(AtomicUsize::new(0)),
             interrupt_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?,
-            device_activated: false,
+            device_state: DeviceState::Inactive,
+            activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?,
             config_space,
             guest_mac,
             mmds_ns,
@@ -219,8 +219,13 @@ impl Net {
     // if a buffer was used, and false if the frame must be deferred until a buffer
     // is made available by the driver.
     fn rx_single_frame(&mut self) -> bool {
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem) => mem,
+            // This should never happen, it's been already validated in the event handler.
+            DeviceState::Inactive => return false,
+        };
         let rx_queue = &mut self.queues[RX_INDEX];
-        let mut next_desc = rx_queue.pop(&self.mem);
+        let mut next_desc = rx_queue.pop(mem);
         if next_desc.is_none() {
             return false;
         }
@@ -239,7 +244,7 @@ impl Net {
 
                     let limit = cmp::min(write_count + desc.len as usize, self.rx_bytes_read);
                     let source_slice = &self.rx_frame_buf[write_count..limit];
-                    let write_result = self.mem.write_slice(source_slice, desc.addr);
+                    let write_result = mem.write_slice(source_slice, desc.addr);
 
                     match write_result {
                         Ok(()) => {
@@ -271,7 +276,7 @@ impl Net {
             }
         }
 
-        rx_queue.add_used(&self.mem, head_index, write_count as u32);
+        rx_queue.add_used(mem, head_index, write_count as u32);
 
         // Mark that we have at least one pending packet and we need to interrupt the guest.
         self.rx_deferred_irqs = true;
@@ -406,6 +411,12 @@ impl Net {
     }
 
     fn process_tx(&mut self) -> result::Result<(), DeviceError> {
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem) => mem,
+            // This should never happen, it's been already validated in the event handler.
+            DeviceState::Inactive => return Err(DeviceError::SpuriousEvent),
+        };
+
         // The MMDS network stack works like a state machine, based on synchronous calls, and
         // without being added to any event loop. If any frame is accepted by the MMDS, we also
         // trigger a process_rx() which checks if there are any new frames to be sent, starting
@@ -414,7 +425,7 @@ impl Net {
         let mut raise_irq = false;
         let tx_queue = &mut self.queues[TX_INDEX];
 
-        while let Some(head) = tx_queue.pop(&self.mem) {
+        while let Some(head) = tx_queue.pop(mem) {
             // If limiter.consume() fails it means there is no more TokenType::Ops
             // budget and rate limiting is in effect.
             if !self.tx_rate_limiter.consume(1, TokenType::Ops) {
@@ -459,7 +470,7 @@ impl Net {
             for (desc_addr, desc_len) in self.tx_iovec.drain(..) {
                 let limit = cmp::min((read_count + desc_len) as usize, self.tx_frame_buf.len());
 
-                let read_result = self.mem.read_slice(
+                let read_result = mem.read_slice(
                     &mut self.tx_frame_buf[read_count..limit as usize],
                     desc_addr,
                 );
@@ -492,7 +503,7 @@ impl Net {
                 process_rx_for_mmds = true;
             }
 
-            tx_queue.add_used(&self.mem, head_index, 0);
+            tx_queue.add_used(mem, head_index, 0);
             raise_irq = true;
         }
 
@@ -541,8 +552,13 @@ impl Net {
     }
 
     pub fn process_tap_rx_event(&mut self) {
+        let mem = match self.device_state {
+            DeviceState::Activated(ref mem) => mem,
+            // This should never happen, it's been already validated in the event handler.
+            DeviceState::Inactive => return,
+        };
         METRICS.net.rx_tap_event_count.inc();
-        if self.queues[RX_INDEX].is_empty(&self.mem) {
+        if self.queues[RX_INDEX].is_empty(mem) {
             error!("The RX queue is empty, there is no available buffer.");
             METRICS.net.event_fails.inc();
             return;
@@ -676,20 +692,28 @@ impl VirtioDevice for Net {
     }
 
     fn is_activated(&self) -> bool {
-        self.device_activated
+        match self.device_state {
+            DeviceState::Inactive => false,
+            DeviceState::Activated(_) => true,
+        }
     }
 
-    fn activate(&mut self, _: GuestMemoryMmap) -> ActivateResult {
-        self.device_activated = true;
+    fn activate(&mut self, mem: GuestMemoryMmap) -> ActivateResult {
+        if self.activate_evt.write(1).is_err() {
+            error!("Net: Cannot write to activate_evt");
+            return Err(super::super::ActivateError::BadActivate);
+        }
+        self.device_state = DeviceState::Activated(mem);
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::net::Ipv4Addr;
     use std::os::unix::io::AsRawFd;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::time::Duration;
     use std::{io, mem, thread};
 
@@ -741,13 +765,13 @@ mod tests {
         }
     }
 
-    trait TestUtil {
+    pub(crate) trait TestUtil {
         fn default_net(test_mutators: TestMutators) -> Net;
         fn default_guest_mac() -> MacAddr;
         fn default_guest_memory() -> GuestMemoryMmap;
         fn rx_single_frame_no_irq_coalescing(&mut self) -> bool;
         fn virtqueues(mem: &GuestMemoryMmap) -> (VirtQueue, VirtQueue);
-        fn assign_queues(&mut self, rxq: Queue, txq: Queue);
+        fn assign_queues(&mut self, rxq: Queue, txq: Queue, mem: &GuestMemoryMmap);
         fn set_mac(&mut self, mac: MacAddr);
     }
 
@@ -762,7 +786,6 @@ mod tests {
             let mut net = Net::new_with_tap(
                 tap,
                 Some(&guest_mac),
-                Net::default_guest_memory(),
                 RateLimiter::default(),
                 RateLimiter::default(),
                 true,
@@ -808,11 +831,11 @@ mod tests {
         }
 
         // Assigns "guest virtio driver" activated queues to the net device.
-        fn assign_queues(&mut self, rxq: Queue, txq: Queue) {
+        fn assign_queues(&mut self, rxq: Queue, txq: Queue, mem: &GuestMemoryMmap) {
             self.queues.clear();
             self.queues.push(rxq);
             self.queues.push(txq);
-            self.activate(self.mem.clone()).unwrap();
+            self.activate(mem.clone()).unwrap();
         }
     }
 
@@ -931,12 +954,12 @@ mod tests {
     }
 
     #[test]
-    fn test_event_handling() {
+    fn test_event_processing() {
         let mut event_manager = EventManager::new().unwrap();
         let mut net = Net::default_net(TestMutators::default());
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
 
         let daddr = 0x2000;
         assert!(daddr > txq.end().0);
@@ -1213,9 +1236,9 @@ mod tests {
     fn test_process_error_cases() {
         let mut event_manager = EventManager::new().unwrap();
         let mut net = Net::default_net(TestMutators::default());
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
 
         // RX rate limiter events should error since the limiter is not blocked.
         // Validate that the event failed and failure was properly accounted for.
@@ -1242,15 +1265,26 @@ mod tests {
     fn test_invalid_event() {
         let mut event_manager = EventManager::new().unwrap();
         let mut net = Net::default_net(TestMutators::default());
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
 
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
+
+        let net = Arc::new(Mutex::new(net));
+        event_manager.add_subscriber(net.clone()).unwrap();
+
+        // Process the activate event.
+        let ev_count = event_manager.run_with_timeout(50).unwrap();
+        assert_eq!(ev_count, 1);
+
+        // Inject invalid event.
         let invalid_event = EpollEvent::new(EventSet::IN, 1000);
         check_metric_after_block!(
             &METRICS.net.event_fails,
             1,
-            net.process(&invalid_event, &mut event_manager)
+            net.lock()
+                .unwrap()
+                .process(&invalid_event, &mut event_manager)
         );
     }
 
@@ -1265,9 +1299,9 @@ mod tests {
         };
 
         let mut net = Net::default_net(test_mutators);
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
 
         // The RX queue is empty.
         let tap_event = EpollEvent::new(EventSet::IN, net.tap.as_raw_fd() as u64);
@@ -1290,9 +1324,9 @@ mod tests {
     fn test_rx_rate_limiter_handling() {
         let mut event_manager = EventManager::new().unwrap();
         let mut net = Net::default_net(TestMutators::default());
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
 
         net.rx_rate_limiter = RateLimiter::new(0, None, 0, 0, None, 0).unwrap();
         let rate_limiter_event =
@@ -1308,9 +1342,9 @@ mod tests {
     fn test_tx_rate_limiter_handling() {
         let mut event_manager = EventManager::new().unwrap();
         let mut net = Net::default_net(TestMutators::default());
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
 
         net.tx_rate_limiter = RateLimiter::new(0, None, 0, 0, None, 0).unwrap();
         let rate_limiter_event =
@@ -1327,9 +1361,9 @@ mod tests {
     fn test_bandwidth_rate_limiter() {
         let mut event_manager = EventManager::new().unwrap();
         let mut net = Net::default_net(TestMutators::default());
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
 
         let daddr = 0x2000;
         assert!(daddr > txq.end().0);
@@ -1445,9 +1479,9 @@ mod tests {
     fn test_ops_rate_limiter() {
         let mut event_manager = EventManager::new().unwrap();
         let mut net = Net::default_net(TestMutators::default());
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
 
         let daddr = 0x2000;
         assert!(daddr > txq.end().0);
@@ -1564,9 +1598,9 @@ mod tests {
     #[test]
     fn test_patch_rate_limiters() {
         let mut net = Net::default_net(TestMutators::default());
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
 
         net.rx_rate_limiter = RateLimiter::new(10, None, 10, 2, None, 2).unwrap();
         net.tx_rate_limiter = RateLimiter::new(10, None, 10, 2, None, 2).unwrap();
@@ -1600,9 +1634,9 @@ mod tests {
         // Regression test for https://github.com/firecracker-microvm/firecracker/issues/1436 .
         let mut event_manager = EventManager::new().unwrap();
         let mut net = Net::default_net(TestMutators::default());
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
 
         let daddr = 0x2000;
         assert!(daddr > txq.end().0);
@@ -1626,9 +1660,9 @@ mod tests {
     #[test]
     fn test_virtio_device() {
         let mut net = Net::default_net(TestMutators::default());
-        let mem_clone = net.mem.clone();
-        let (rxq, txq) = Net::virtqueues(&mem_clone);
-        net.assign_queues(rxq.create_queue(), txq.create_queue());
+        let mem = Net::default_guest_memory();
+        let (rxq, txq) = Net::virtqueues(&mem);
+        net.assign_queues(rxq.create_queue(), txq.create_queue(), &mem);
 
         // Test queues count (TX and RX).
         let queues = net.queues();
