@@ -708,6 +708,7 @@ fn attach_block_devices(
 
         let block_device = Arc::new(Mutex::new(
             devices::virtio::Block::new(
+                drive_config.drive_id.clone(),
                 block_file,
                 drive_config.is_read_only,
                 rate_limiter.unwrap_or_default(),

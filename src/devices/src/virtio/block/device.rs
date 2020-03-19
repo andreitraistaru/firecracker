@@ -95,10 +95,11 @@ pub struct Block {
     interrupt_status: Arc<AtomicUsize>,
     interrupt_evt: EventFd,
     pub(crate) queue_evts: [EventFd; 1],
-
     pub(crate) device_state: DeviceState,
 
     // Implementation specific fields.
+    id: String,
+    partuuid: Option<String>,
     pub(crate) rate_limiter: RateLimiter,
 }
 
@@ -107,7 +108,9 @@ impl Block {
     ///
     /// The given file must be seekable and sizable.
     pub fn new(
+        id: String,
         mut disk_image: File,
+        partuuid: Option<String>,
         is_disk_read_only: bool,
         rate_limiter: RateLimiter,
     ) -> io::Result<Block> {
@@ -124,6 +127,8 @@ impl Block {
         let queues = QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();
 
         Ok(Block {
+            id,
+            partuuid,
             disk_image_id: build_disk_image_id(&disk_image),
             disk_image,
             disk_nsectors: disk_size / SECTOR_SIZE,
@@ -255,6 +260,21 @@ impl Block {
         METRICS.block.update_count.inc();
         Ok(())
     }
+
+    /// Provides the ID of this block device.
+    pub fn id(&self) -> &String {
+        &self.id
+    }
+
+    /// Provides the PARTUUID of this block device.
+    pub fn partuuid(&self) -> Option<&String> {
+        self.partuuid.as_ref()
+    }
+
+    /// Specifies if this block device is read only.
+    pub fn is_read_only(&self) -> bool {
+        self.avail_features & (1u64 << VIRTIO_BLK_F_RO) != 0
+    }
 }
 
 impl VirtioDevice for Block {
@@ -382,7 +402,7 @@ pub(crate) mod tests {
         // Rate limiting is enabled but with a high operation rate (10 million ops/s).
         let rate_limiter = RateLimiter::new(0, None, 0, 100_000, None, 10).unwrap();
 
-        Block::new(block_file, true, rate_limiter).unwrap()
+        Block::new("test".to_string(), block_file, None, true, rate_limiter).unwrap()
     }
 
     pub fn default_mem() -> GuestMemoryMmap {
