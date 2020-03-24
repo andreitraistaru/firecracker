@@ -67,7 +67,7 @@ pub struct VmResources {
     /// The configurations for block devices.
     pub block: BlockDevices,
     /// The configurations for network interface devices.
-    pub network_interface: NetworkInterfaceConfigs,
+    pub network_interface: NetworkInterfaces,
     /// The configurations for vsock devices.
     pub vsock: Option<VsockDeviceConfig>,
 }
@@ -243,29 +243,31 @@ mod tests {
     use vmm_config::boot_source::{BootConfig, BootSourceConfig, DEFAULT_KERNEL_CMDLINE};
     use vmm_config::drive::{BlockDeviceConfig, BlockDevices, DriveError};
     use vmm_config::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
-    use vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceConfigs, NetworkInterfaceError};
+    use vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaces};
     use vmm_config::vsock::VsockDeviceConfig;
     use vmm_config::RateLimiterConfig;
     use vstate::VcpuConfig;
 
-    fn default_net_cfgs() -> NetworkInterfaceConfigs {
-        let mut net_if_cfgs = NetworkInterfaceConfigs::new();
-        net_if_cfgs
-            .insert(NetworkInterfaceConfig {
-                iface_id: "net_if1".to_string(),
-                // TempFile::new_with_prefix("") generates a random file name used as random net_if name.
-                host_dev_name: TempFile::new_with_prefix("")
-                    .unwrap()
-                    .as_path()
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
-                guest_mac: Some(MacAddr::parse_str("01:23:45:67:89:0a").unwrap()),
-                rx_rate_limiter: Some(RateLimiterConfig::default()),
-                tx_rate_limiter: Some(RateLimiterConfig::default()),
-                allow_mmds_requests: false,
-            })
-            .unwrap();
+    fn default_net_cfg() -> NetworkInterfaceConfig {
+        NetworkInterfaceConfig {
+            iface_id: "net_if1".to_string(),
+            // TempFile::new_with_prefix("") generates a random file name used as random net_if name.
+            host_dev_name: TempFile::new_with_prefix("")
+                .unwrap()
+                .as_path()
+                .to_str()
+                .unwrap()
+                .to_string(),
+            guest_mac: Some(MacAddr::parse_str("01:23:45:67:89:0a").unwrap()),
+            rx_rate_limiter: Some(RateLimiterConfig::default()),
+            tx_rate_limiter: Some(RateLimiterConfig::default()),
+            allow_mmds_requests: false,
+        }
+    }
+
+    fn default_net_devs() -> NetworkInterfaces {
+        let mut net_if_cfgs = NetworkInterfaces::new();
+        net_if_cfgs.insert(default_net_cfg()).unwrap();
 
         net_if_cfgs
     }
@@ -308,7 +310,7 @@ mod tests {
             vm_config: VmConfig::default(),
             boot_config: Some(default_boot_cfg()),
             block: default_blocks(),
-            network_interface: default_net_cfgs(),
+            network_interface: default_net_devs(),
             vsock: None,
         }
     }
@@ -540,7 +542,7 @@ mod tests {
         );
 
         match VmResources::from_json(json.as_str(), "some_version") {
-            Err(Error::NetDevice(NetworkInterfaceError::HostDeviceNameInUse { .. })) => (),
+            Err(Error::NetDevice(NetworkInterfaceError::OpenTap { .. })) => (),
             _ => unreachable!(),
         }
 
@@ -719,12 +721,7 @@ mod tests {
         let mut vm_resources = default_vm_resources();
 
         // Clone the existing net config in order to obtain a new one.
-        let mut new_net_device_cfg = vm_resources
-            .network_interface
-            .iter()
-            .next()
-            .unwrap()
-            .clone();
+        let mut new_net_device_cfg = default_net_cfg();
         new_net_device_cfg.iface_id = "new_net_if".to_string();
         new_net_device_cfg.guest_mac = Some(MacAddr::parse_str("01:23:45:67:89:0c").unwrap());
         new_net_device_cfg.host_dev_name = "dummy_path2".to_string();
