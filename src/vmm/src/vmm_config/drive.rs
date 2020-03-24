@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Mutex};
 
-use super::RateLimiterConfig;
+use super::rate_limiter::RateLimiterConfig;
 use devices::virtio::Block;
 
 type Result<T> = result::Result<T, DriveError>;
@@ -176,7 +176,7 @@ impl BlockDevices {
 
         let rate_limiter = block_device_config
             .rate_limiter
-            .map(super::RateLimiterConfig::try_into)
+            .map(RateLimiterConfig::try_into)
             .transpose()
             .map_err(DriveError::CreateRateLimiter)?;
 

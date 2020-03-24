@@ -248,8 +248,8 @@ mod tests {
     use vmm_config::drive::{BlockDeviceConfig, BlockDevices, DriveError};
     use vmm_config::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
     use vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaces};
+    use vmm_config::rate_limiter::RateLimiterConfig;
     use vmm_config::vsock::tests::{default_config, TempSockFile};
-    use vmm_config::RateLimiterConfig;
     use vstate::VcpuConfig;
 
     fn default_net_cfg() -> NetworkInterfaceConfig {

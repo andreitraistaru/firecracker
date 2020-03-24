@@ -28,6 +28,7 @@ use vmm_config::metrics::{MetricsConfig, MetricsConfigError};
 use vmm_config::net::{
     NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaceUpdateConfig,
 };
+use vmm_config::rate_limiter::TokenBucketConfig;
 use vmm_config::vsock::{VsockConfigError, VsockDeviceConfig};
 
 /// This enum represents the public interface of the VMM. Each action contains various
@@ -438,7 +439,7 @@ impl RuntimeApiController {
                 ($rate_limiter: ident, $metric: ident) => {{
                     new_cfg
                         .$rate_limiter
-                        .map(|rl| rl.$metric.map(vmm_config::TokenBucketConfig::into))
+                        .map(|rl| rl.$metric.map(TokenBucketConfig::into))
                         .unwrap_or(None)
                 }};
             }

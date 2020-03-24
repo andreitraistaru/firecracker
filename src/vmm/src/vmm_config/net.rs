@@ -6,7 +6,7 @@ use std::fmt;
 use std::result;
 use std::sync::{Arc, Mutex};
 
-use super::RateLimiterConfig;
+use super::rate_limiter::RateLimiterConfig;
 use devices::virtio::Net;
 use dumbo::MacAddr;
 use utils::net::{Tap, TapError};
@@ -173,12 +173,12 @@ impl NetworkInterfaces {
 
         let rx_rate_limiter = cfg
             .rx_rate_limiter
-            .map(super::RateLimiterConfig::try_into)
+            .map(RateLimiterConfig::try_into)
             .transpose()
             .map_err(NetworkInterfaceError::CreateRateLimiter)?;
         let tx_rate_limiter = cfg
             .tx_rate_limiter
-            .map(super::RateLimiterConfig::try_into)
+            .map(RateLimiterConfig::try_into)
             .transpose()
             .map_err(NetworkInterfaceError::CreateRateLimiter)?;
 
