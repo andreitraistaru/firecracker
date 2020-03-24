@@ -57,6 +57,8 @@ fn init_vnet_hdr(buf: &mut [u8]) {
 }
 
 pub struct Net {
+    id: String,
+
     pub(crate) tap: Tap,
     avail_features: u64,
     acked_features: u64,
@@ -94,6 +96,7 @@ pub struct Net {
 impl Net {
     /// Create a new virtio network device with the given TAP interface.
     pub fn new_with_tap(
+        id: String,
         tap: Tap,
         guest_mac: Option<&MacAddr>,
         rx_rate_limiter: RateLimiter,
@@ -145,6 +148,7 @@ impl Net {
         };
 
         Ok(Net {
+            id,
             tap,
             avail_features,
             acked_features: 0u64,
@@ -169,6 +173,16 @@ impl Net {
             #[cfg(test)]
             test_mutators: tests::TestMutators::default(),
         })
+    }
+
+    /// Provides the ID of this net device.
+    pub fn id(&self) -> &String {
+        &self.id
+    }
+
+    /// Provides the MAC of this net device.
+    pub fn guest_mac(&self) -> Option<&MacAddr> {
+        self.guest_mac.as_ref()
     }
 
     fn signal_used_queue(&self) -> result::Result<(), DeviceError> {
@@ -299,7 +313,7 @@ impl Net {
         rate_limiter: &mut RateLimiter,
         frame_buf: &[u8],
         tap: &mut Tap,
-        guest_mac: Option<MacAddr>,
+        guest_mac: Option<&MacAddr>,
     ) -> bool {
         if let Some(ns) = mmds_ns {
             if ns.detour_frame(frame_bytes_from_buf(frame_buf)) {
@@ -319,7 +333,7 @@ impl Net {
         // Check for guest MAC spoofing.
         if let Some(mac) = guest_mac {
             let _ = EthernetFrame::from_bytes(&frame_buf[vnet_hdr_len()..]).and_then(|eth_frame| {
-                if mac != eth_frame.src_mac() {
+                if mac != &eth_frame.src_mac() {
                     METRICS.net.tx_spoofed_mac_count.inc();
                 }
                 Ok(())
@@ -496,7 +510,7 @@ impl Net {
                 &mut self.tx_rate_limiter,
                 &self.tx_frame_buf[..read_count],
                 &mut self.tap,
-                self.guest_mac,
+                self.guest_mac.as_ref(),
             ) && !self.rx_deferred_frame
             {
                 // MMDS consumed this frame/request, let's also try to process the response.
@@ -784,6 +798,7 @@ pub(crate) mod tests {
             let guest_mac = Net::default_guest_mac();
 
             let mut net = Net::new_with_tap(
+                format!("net-device{}", next_tap),
                 tap,
                 Some(&guest_mac),
                 RateLimiter::default(),
@@ -1154,7 +1169,7 @@ pub(crate) mod tests {
                 &mut net.tx_rate_limiter,
                 &net.tx_frame_buf[..packet_len],
                 &mut net.tap,
-                Some(sha),
+                Some(&sha),
             ))
         );
 
@@ -1214,7 +1229,7 @@ pub(crate) mod tests {
                 &mut net.tx_rate_limiter,
                 &net.tx_frame_buf[..packet_len],
                 &mut net.tap,
-                Some(guest_mac),
+                Some(&guest_mac),
             )
         );
 
@@ -1227,7 +1242,7 @@ pub(crate) mod tests {
                 &mut net.tx_rate_limiter,
                 &net.tx_frame_buf[..packet_len],
                 &mut net.tap,
-                Some(not_guest_mac),
+                Some(&not_guest_mac),
             )
         );
     }
