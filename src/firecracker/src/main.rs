@@ -33,9 +33,9 @@ use utils::terminal::Terminal;
 use utils::validators::validate_instance_id;
 use vmm::default_syscalls::get_seccomp_filter;
 use vmm::resources::VmResources;
+use vmm::rpc_interface::instance_info::InstanceInfo;
+use vmm::rpc_interface::logger::{init_logger, LoggerConfig, LoggerLevel};
 use vmm::signal_handler::register_signal_handlers;
-use vmm::vmm_config::instance_info::InstanceInfo;
-use vmm::vmm_config::logger::{init_logger, LoggerConfig, LoggerLevel};
 
 // The reason we place default API socket under /run is that API socket is a
 // runtime file.

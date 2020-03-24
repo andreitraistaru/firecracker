@@ -4,7 +4,7 @@
 use super::super::VmmAction;
 use logger::{Metric, METRICS};
 use request::{checked_id, Body, Error, ParsedRequest, StatusCode};
-use vmm::vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceUpdateConfig};
+use vmm::rpc_interface::net::{NetworkInterfaceConfig, NetworkInterfaceUpdateConfig};
 
 pub fn parse_put_net(body: &Body, id_from_path: Option<&&str>) -> Result<ParsedRequest, Error> {
     METRICS.put_api_requests.network_count.inc();

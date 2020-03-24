@@ -4,7 +4,7 @@
 use super::super::VmmAction;
 use logger::{Metric, METRICS};
 use request::{Body, Error, ParsedRequest};
-use vmm::vmm_config::boot_source::BootSourceConfig;
+use vmm::rpc_interface::boot_source::BootSourceConfig;
 
 pub fn parse_put_boot_source(body: &Body) -> Result<ParsedRequest, Error> {
     METRICS.put_api_requests.boot_source_count.inc();

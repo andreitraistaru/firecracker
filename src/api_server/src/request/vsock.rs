@@ -3,7 +3,7 @@
 
 use super::super::VmmAction;
 use request::{Body, Error, ParsedRequest};
-use vmm::vmm_config::vsock::VsockDeviceConfig;
+use vmm::rpc_interface::vsock::VsockDeviceConfig;
 
 pub fn parse_put_vsock(body: &Body) -> Result<ParsedRequest, Error> {
     Ok(ParsedRequest::Sync(VmmAction::SetVsockDevice(

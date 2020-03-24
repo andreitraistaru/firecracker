@@ -230,8 +230,8 @@ mod tests {
 
     use micro_http::HttpConnection;
     use vmm::builder::StartMicrovmError;
+    use vmm::rpc_interface::machine_config::VmConfig;
     use vmm::rpc_interface::VmmActionError;
-    use vmm::vmm_config::machine_config::VmConfig;
 
     impl PartialEq for ParsedRequest {
         fn eq(&self, other: &ParsedRequest) -> bool {

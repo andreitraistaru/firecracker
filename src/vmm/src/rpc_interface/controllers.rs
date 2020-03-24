@@ -1,16 +1,14 @@
-// Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
+// Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.
 
-use std::fmt::{Display, Formatter};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::result;
 use std::sync::{Arc, Mutex};
 
-use super::Vmm;
-
-use super::Error as VmmError;
+use crate::rpc_interface::{VmmAction, VmmActionError, VmmData};
+use crate::Vmm;
 use arch::DeviceType;
 use builder::StartMicrovmError;
 use device_manager::mmio::MMIO_CFG_SPACE_OFF;
@@ -18,132 +16,12 @@ use devices::virtio::{Block, MmioTransport, Net, TYPE_BLOCK, TYPE_NET};
 use logger::METRICS;
 use polly::event_manager::EventManager;
 use resources::VmResources;
+use rpc_interface;
+use rpc_interface::drive::DriveError;
+use rpc_interface::machine_config::VmConfig;
+use rpc_interface::net::{NetworkInterfaceError, NetworkInterfaceUpdateConfig};
+use rpc_interface::rate_limiter::TokenBucketConfig;
 use seccomp::BpfProgram;
-use vmm_config;
-use vmm_config::boot_source::{BootSourceConfig, BootSourceConfigError};
-use vmm_config::drive::{BlockDeviceConfig, DriveError};
-use vmm_config::logger::{LoggerConfig, LoggerConfigError};
-use vmm_config::machine_config::{VmConfig, VmConfigError};
-use vmm_config::metrics::{MetricsConfig, MetricsConfigError};
-use vmm_config::net::{
-    NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaceUpdateConfig,
-};
-use vmm_config::rate_limiter::TokenBucketConfig;
-use vmm_config::vsock::{VsockConfigError, VsockDeviceConfig};
-
-/// This enum represents the public interface of the VMM. Each action contains various
-/// bits of information (ids, paths, etc.).
-#[derive(PartialEq)]
-pub enum VmmAction {
-    /// Configure the boot source of the microVM using as input the `ConfigureBootSource`. This
-    /// action can only be called before the microVM has booted.
-    ConfigureBootSource(BootSourceConfig),
-    /// Configure the logger using as input the `LoggerConfig`. This action can only be called
-    /// before the microVM has booted.
-    ConfigureLogger(LoggerConfig),
-    /// Configure the metrics using as input the `MetricsConfig`. This action can only be called
-    /// before the microVM has booted.
-    ConfigureMetrics(MetricsConfig),
-    /// Get the configuration of the microVM.
-    GetVmConfiguration,
-    /// Flush the metrics. This action can only be called after the logger has been configured.
-    FlushMetrics,
-    /// Add a new block device or update one that already exists using the `BlockDeviceConfig` as
-    /// input. This action can only be called before the microVM has booted.
-    InsertBlockDevice(BlockDeviceConfig),
-    /// Add a new network interface config or update one that already exists using the
-    /// `NetworkInterfaceConfig` as input. This action can only be called before the microVM has
-    /// booted.
-    InsertNetworkDevice(NetworkInterfaceConfig),
-    /// Set the vsock device or update the one that already exists using the
-    /// `VsockDeviceConfig` as input. This action can only be called before the microVM has
-    /// booted.
-    SetVsockDevice(VsockDeviceConfig),
-    /// Set the microVM configuration (memory & vcpu) using `VmConfig` as input. This
-    /// action can only be called before the microVM has booted.
-    SetVmConfiguration(VmConfig),
-    /// Launch the microVM. This action can only be called before the microVM has booted.
-    StartMicroVm,
-    /// Send CTRL+ALT+DEL to the microVM, using the i8042 keyboard function. If an AT-keyboard
-    /// driver is listening on the guest end, this can be used to shut down the microVM gracefully.
-    #[cfg(target_arch = "x86_64")]
-    SendCtrlAltDel,
-    /// Update the path of an existing block device. The data associated with this variant
-    /// represents the `drive_id` and the `path_on_host`.
-    UpdateBlockDevicePath(String, String),
-    /// Update a network interface, after microVM start. Currently, the only updatable properties
-    /// are the RX and TX rate limiters.
-    UpdateNetworkInterface(NetworkInterfaceUpdateConfig),
-}
-
-/// Wrapper for all errors associated with VMM actions.
-#[derive(Debug)]
-pub enum VmmActionError {
-    /// The action `ConfigureBootSource` failed because of bad user input.
-    BootSource(BootSourceConfigError),
-    /// One of the actions `InsertBlockDevice` or `UpdateBlockDevicePath`
-    /// failed because of bad user input.
-    DriveConfig(DriveError),
-    /// Internal Vmm error.
-    InternalVmm(VmmError),
-    /// The action `ConfigureLogger` failed because of bad user input.
-    Logger(LoggerConfigError),
-    /// One of the actions `GetVmConfiguration` or `SetVmConfiguration` failed because of bad input.
-    MachineConfig(VmConfigError),
-    /// The action `ConfigureMetrics` failed because of bad user input.
-    Metrics(MetricsConfigError),
-    /// The action `InsertNetworkDevice` failed because of bad user input.
-    NetworkConfig(NetworkInterfaceError),
-    /// The requested operation is not supported after starting the microVM.
-    OperationNotSupportedPostBoot,
-    /// The requested operation is not supported before starting the microVM.
-    OperationNotSupportedPreBoot,
-    /// The action `StartMicroVm` failed because of an internal error.
-    StartMicrovm(StartMicrovmError),
-    /// The action `SetVsockDevice` failed because of bad user input.
-    VsockConfig(VsockConfigError),
-}
-
-impl Display for VmmActionError {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        use self::VmmActionError::*;
-
-        write!(
-            f,
-            "{}",
-            match self {
-                BootSource(err) => err.to_string(),
-                DriveConfig(err) => err.to_string(),
-                InternalVmm(err) => format!("Internal Vmm error: {}", err),
-                Logger(err) => err.to_string(),
-                MachineConfig(err) => err.to_string(),
-                Metrics(err) => err.to_string(),
-                NetworkConfig(err) => err.to_string(),
-                OperationNotSupportedPostBoot => {
-                    "The requested operation is not supported after starting the microVM."
-                        .to_string()
-                }
-                OperationNotSupportedPreBoot => {
-                    "The requested operation is not supported before starting the microVM."
-                        .to_string()
-                }
-                StartMicrovm(err) => err.to_string(),
-                /// The action `SetVsockDevice` failed because of bad user input.
-                VsockConfig(err) => err.to_string(),
-            }
-        )
-    }
-}
-
-/// The enum represents the response sent by the VMM in case of success. The response is either
-/// empty, when no data needs to be sent, or an internal VMM structure.
-#[derive(Debug)]
-pub enum VmmData {
-    /// No data is sent on the channel.
-    Empty,
-    /// The microVM configuration represented by `VmConfig`.
-    MachineConfiguration(VmConfig),
-}
 
 /// Enables pre-boot setup and instantiation of a Firecracker VMM.
 pub struct PrebootApiController<'a> {
@@ -224,11 +102,11 @@ impl<'a> PrebootApiController<'a> {
                 .map(|_| VmmData::Empty)
                 .map_err(VmmActionError::BootSource),
             ConfigureLogger(logger_cfg) => {
-                vmm_config::logger::init_logger(logger_cfg, &self.firecracker_version)
+                rpc_interface::logger::init_logger(logger_cfg, &self.firecracker_version)
                     .map(|_| VmmData::Empty)
                     .map_err(VmmActionError::Logger)
             }
-            ConfigureMetrics(metrics_cfg) => vmm_config::metrics::init_metrics(metrics_cfg)
+            ConfigureMetrics(metrics_cfg) => rpc_interface::metrics::init_metrics(metrics_cfg)
                 .map(|_| VmmData::Empty)
                 .map_err(VmmActionError::Metrics),
             GetVmConfiguration => Ok(VmmData::MachineConfiguration(
@@ -254,7 +132,7 @@ impl<'a> PrebootApiController<'a> {
                 .set_vm_config(&machine_config_body)
                 .map(|_| VmmData::Empty)
                 .map_err(VmmActionError::MachineConfig),
-            StartMicroVm => super::builder::build_microvm(
+            StartMicroVm => crate::builder::build_microvm(
                 &self.vm_resources,
                 &mut self.event_manager,
                 &self.seccomp_filter,
@@ -333,7 +211,7 @@ impl RuntimeApiController {
         METRICS
             .write()
             .map(|_| ())
-            .map_err(super::Error::Metrics)
+            .map_err(crate::Error::Metrics)
             .map_err(VmmActionError::InternalVmm)
     }
 

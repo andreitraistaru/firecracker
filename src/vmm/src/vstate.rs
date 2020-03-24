@@ -32,6 +32,7 @@ use kvm_bindings::{
 use kvm_bindings::{kvm_userspace_memory_region, KVM_API_VERSION};
 use kvm_ioctls::*;
 use logger::{Metric, METRICS};
+use rpc_interface::machine_config::CpuFeaturesTemplate;
 use seccomp::{BpfProgram, SeccompFilter};
 use std::sync::Barrier;
 use utils::eventfd::EventFd;
@@ -40,7 +41,6 @@ use utils::sm::StateMachine;
 use vm_memory::{
     Address, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion,
 };
-use vmm_config::machine_config::CpuFeaturesTemplate;
 
 #[cfg(target_arch = "x86_64")]
 const MAGIC_IOPORT_SIGNAL_GUEST_BOOT_COMPLETE: u64 = 0x03f0;
@@ -1317,8 +1317,8 @@ mod tests {
     use super::super::devices;
     use super::*;
 
+    use rpc_interface::boot_source::DEFAULT_KERNEL_CMDLINE;
     use utils::signal::validate_signal_num;
-    use vmm_config::boot_source::DEFAULT_KERNEL_CMDLINE;
 
     // Auxiliary function being used throughout the tests.
     fn setup_vcpu(mem_size: usize) -> (Vm, Vcpu, GuestMemoryMmap) {

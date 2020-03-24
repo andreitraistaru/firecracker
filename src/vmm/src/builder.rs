@@ -17,14 +17,14 @@ use device_manager::mmio::MMIODeviceManager;
 use devices::legacy::Serial;
 use devices::virtio::{MmioTransport, Vsock, VsockUnixBackend};
 use polly::event_manager::{Error as EventManagerError, EventManager};
+use rpc_interface::boot_source::BootConfig;
+use rpc_interface::drive::BlockDevices;
+use rpc_interface::net::NetworkInterfaces;
 use seccomp::BpfProgramRef;
 use utils::eventfd::EventFd;
 use utils::terminal::Terminal;
 use utils::time::TimestampUs;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
-use vmm_config::boot_source::BootConfig;
-use vmm_config::drive::BlockDevices;
-use vmm_config::net::NetworkInterfaces;
 use vstate::{KvmContext, Vcpu, VcpuConfig, Vm};
 use {device_manager, VmmEventsObserver};
 
@@ -744,12 +744,12 @@ pub mod tests {
     use devices::virtio::{TYPE_BLOCK, TYPE_VSOCK};
     use kernel::cmdline::Cmdline;
     use polly::event_manager::EventManager;
+    use rpc_interface::boot_source::DEFAULT_KERNEL_CMDLINE;
+    use rpc_interface::drive::BlockDeviceConfig;
+    use rpc_interface::net::NetworkInterfaceConfig;
+    use rpc_interface::vsock::tests::{default_config, TempSockFile};
+    use rpc_interface::vsock::VsockStore;
     use utils::tempfile::TempFile;
-    use vmm_config::boot_source::DEFAULT_KERNEL_CMDLINE;
-    use vmm_config::drive::BlockDeviceConfig;
-    use vmm_config::net::NetworkInterfaceConfig;
-    use vmm_config::vsock::tests::{default_config, TempSockFile};
-    use vmm_config::vsock::VsockStore;
 
     struct SerialInput(File);
     impl io::Read for SerialInput {

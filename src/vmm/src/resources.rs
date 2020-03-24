@@ -5,15 +5,15 @@
 
 use std::fs::File;
 
-use vmm_config::boot_source::{
+use rpc_interface::boot_source::{
     BootConfig, BootSourceConfig, BootSourceConfigError, DEFAULT_KERNEL_CMDLINE,
 };
-use vmm_config::drive::*;
-use vmm_config::logger::{init_logger, LoggerConfig, LoggerConfigError};
-use vmm_config::machine_config::{VmConfig, VmConfigError};
-use vmm_config::metrics::{init_metrics, MetricsConfig, MetricsConfigError};
-use vmm_config::net::*;
-use vmm_config::vsock::*;
+use rpc_interface::drive::*;
+use rpc_interface::logger::{init_logger, LoggerConfig, LoggerConfigError};
+use rpc_interface::machine_config::{VmConfig, VmConfigError};
+use rpc_interface::metrics::{init_metrics, MetricsConfig, MetricsConfigError};
+use rpc_interface::net::*;
+use rpc_interface::vsock::*;
 use vstate::VcpuConfig;
 
 type Result<E> = std::result::Result<(), E>;
@@ -243,13 +243,13 @@ mod tests {
     use super::*;
     use dumbo::MacAddr;
     use resources::VmResources;
+    use rpc_interface::boot_source::{BootConfig, BootSourceConfig, DEFAULT_KERNEL_CMDLINE};
+    use rpc_interface::drive::{BlockDeviceConfig, BlockDevices, DriveError};
+    use rpc_interface::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
+    use rpc_interface::net::{NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaces};
+    use rpc_interface::rate_limiter::RateLimiterConfig;
+    use rpc_interface::vsock::tests::{default_config, TempSockFile};
     use utils::tempfile::TempFile;
-    use vmm_config::boot_source::{BootConfig, BootSourceConfig, DEFAULT_KERNEL_CMDLINE};
-    use vmm_config::drive::{BlockDeviceConfig, BlockDevices, DriveError};
-    use vmm_config::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
-    use vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaces};
-    use vmm_config::rate_limiter::RateLimiterConfig;
-    use vmm_config::vsock::tests::{default_config, TempSockFile};
     use vstate::VcpuConfig;
 
     fn default_net_cfg() -> NetworkInterfaceConfig {

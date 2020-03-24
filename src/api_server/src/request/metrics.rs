@@ -4,7 +4,7 @@
 use super::super::VmmAction;
 use logger::{Metric, METRICS};
 use request::{Body, Error, ParsedRequest};
-use vmm::vmm_config::metrics::MetricsConfig;
+use vmm::rpc_interface::metrics::MetricsConfig;
 
 pub fn parse_put_metrics(body: &Body) -> Result<ParsedRequest, Error> {
     METRICS.put_api_requests.metrics_count.inc();

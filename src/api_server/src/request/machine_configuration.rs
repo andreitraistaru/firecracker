@@ -4,7 +4,7 @@
 use super::super::VmmAction;
 use logger::{Metric, METRICS};
 use request::{method_to_error, Body, Error, Method, ParsedRequest, StatusCode};
-use vmm::vmm_config::machine_config::VmConfig;
+use vmm::rpc_interface::machine_config::VmConfig;
 
 pub fn parse_get_machine_config() -> Result<ParsedRequest, Error> {
     METRICS.get_api_requests.machine_cfg_count.inc();
@@ -53,7 +53,7 @@ pub fn parse_patch_machine_config(body: &Body) -> Result<ParsedRequest, Error> {
 mod tests {
     use super::*;
 
-    use vmm::vmm_config::machine_config::CpuFeaturesTemplate;
+    use vmm::rpc_interface::machine_config::CpuFeaturesTemplate;
 
     #[test]
     fn test_parse_get_machine_config_request() {
