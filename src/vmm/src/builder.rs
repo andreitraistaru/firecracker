@@ -632,16 +632,9 @@ fn attach_mmio_device(
     id: String,
     device: MmioTransport,
 ) -> std::result::Result<(), device_manager::mmio::Error> {
-    let type_id = device
-        .device()
-        .lock()
-        .expect("Poisoned device lock")
-        .device_type();
-    let cmdline = &mut vmm.kernel_cmdline;
-
+    let kernel_cmdline = &mut vmm.kernel_cmdline;
     vmm.mmio_device_manager
-        .register_mmio_device(vmm.vm.fd(), device, cmdline, type_id, id)?;
-
+        .register_mmio_device(vmm.vm.fd(), device, kernel_cmdline, id)?;
     Ok(())
 }
 

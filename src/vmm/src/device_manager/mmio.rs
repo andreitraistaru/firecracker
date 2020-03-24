@@ -100,29 +100,29 @@ impl MMIODeviceManager {
         vm: &VmFd,
         mmio_device: devices::virtio::MmioTransport,
         cmdline: &mut kernel_cmdline::Cmdline,
-        type_id: u32,
         device_id: String,
     ) -> Result<u64> {
         if self.irq > self.last_irq {
             return Err(Error::IrqsExhausted);
         }
 
-        for (i, queue_evt) in mmio_device
-            .locked_device()
-            .queue_events()
-            .iter()
-            .enumerate()
+        let type_id;
         {
-            let io_addr = IoEventAddress::Mmio(
-                self.mmio_base + u64::from(devices::virtio::NOTIFY_REG_OFFSET),
-            );
+            let locked_device = mmio_device.locked_device();
+            for (i, queue_evt) in locked_device.queue_events().iter().enumerate() {
+                let io_addr = IoEventAddress::Mmio(
+                    self.mmio_base + u64::from(devices::virtio::NOTIFY_REG_OFFSET),
+                );
 
-            vm.register_ioevent(queue_evt, &io_addr, i as u32)
-                .map_err(Error::RegisterIoEvent)?;
+                vm.register_ioevent(queue_evt, &io_addr, i as u32)
+                    .map_err(Error::RegisterIoEvent)?;
+            }
+
+            vm.register_irqfd(locked_device.interrupt_evt(), self.irq)
+                .map_err(Error::RegisterIrqFd)?;
+
+            type_id = locked_device.device_type();
         }
-
-        vm.register_irqfd(mmio_device.locked_device().interrupt_evt(), self.irq)
-            .map_err(Error::RegisterIrqFd)?;
 
         self.bus
             .insert(Arc::new(Mutex::new(mmio_device)), self.mmio_base, MMIO_LEN)
@@ -294,11 +294,10 @@ mod tests {
             guest_mem: GuestMemoryMmap,
             device: Arc<Mutex<dyn devices::virtio::VirtioDevice>>,
             cmdline: &mut kernel_cmdline::Cmdline,
-            type_id: u32,
             device_id: &str,
         ) -> Result<u64> {
             let mmio_device = devices::virtio::MmioTransport::new(guest_mem, device);
-            self.register_mmio_device(vm, mmio_device, cmdline, type_id, device_id.to_string())
+            self.register_mmio_device(vm, mmio_device, cmdline, device_id.to_string())
         }
 
         fn update_drive(&self, device_id: &str, new_size: u64) -> Result<()> {
@@ -411,7 +410,7 @@ mod tests {
         assert!(builder::setup_interrupt_controller(&mut vm, 1).is_ok());
 
         assert!(device_manager
-            .register_virtio_device(vm.fd(), guest_mem, dummy, &mut cmdline, 0, "dummy")
+            .register_virtio_device(vm.fd(), guest_mem, dummy, &mut cmdline, "dummy")
             .is_ok());
     }
 
@@ -438,7 +437,6 @@ mod tests {
                     guest_mem.clone(),
                     Arc::new(Mutex::new(DummyDevice::new())),
                     &mut cmdline,
-                    0,
                     "dummy1",
                 )
                 .unwrap();
@@ -452,7 +450,6 @@ mod tests {
                         guest_mem,
                         Arc::new(Mutex::new(DummyDevice::new())),
                         &mut cmdline,
-                        0,
                         "dummy2"
                     )
                     .unwrap_err()
@@ -531,7 +528,7 @@ mod tests {
         let dummy = Arc::new(Mutex::new(DummyDevice::new()));
 
         if device_manager
-            .register_virtio_device(vm.fd(), guest_mem, dummy, &mut cmdline, TYPE_BLOCK, "foo")
+            .register_virtio_device(vm.fd(), guest_mem, dummy, &mut cmdline, "foo")
             .is_ok()
         {
             assert!(device_manager.update_drive("foo", 1_048_576).is_ok());
@@ -553,16 +550,11 @@ mod tests {
         let mut cmdline = kernel_cmdline::Cmdline::new(4096);
         let dummy = Arc::new(Mutex::new(DummyDevice::new()));
 
-        let type_id = 0;
+        let type_id = dummy.lock().unwrap().device_type();
         let id = String::from("foo");
-        if let Ok(addr) = device_manager.register_virtio_device(
-            vm.fd(),
-            guest_mem,
-            dummy,
-            &mut cmdline,
-            type_id,
-            &id,
-        ) {
+        if let Ok(addr) =
+            device_manager.register_virtio_device(vm.fd(), guest_mem, dummy, &mut cmdline, &id)
+        {
             assert!(device_manager
                 .get_device(DeviceType::Virtio(type_id), &id)
                 .is_some());
