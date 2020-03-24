@@ -48,6 +48,7 @@ pub(crate) const AVAIL_FEATURES: u64 =
     1 << uapi::VIRTIO_F_VERSION_1 as u64 | 1 << uapi::VIRTIO_F_IN_ORDER as u64;
 
 pub struct Vsock<B> {
+    id: String,
     cid: u64,
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<EventFd>,
@@ -75,6 +76,7 @@ where
     B: VsockBackend,
 {
     pub(crate) fn with_queues(
+        id: String,
         cid: u64,
         backend: B,
         queues: Vec<VirtQueue>,
@@ -85,6 +87,7 @@ where
         }
 
         Ok(Vsock {
+            id,
             cid,
             queues,
             queue_events,
@@ -99,12 +102,16 @@ where
     }
 
     /// Create a new virtio-vsock device with the given VM CID and vsock backend.
-    pub fn new(cid: u64, backend: B) -> super::Result<Vsock<B>> {
+    pub fn new(id: String, cid: u64, backend: B) -> super::Result<Vsock<B>> {
         let queues: Vec<VirtQueue> = defs::QUEUE_SIZES
             .iter()
             .map(|&max_size| VirtQueue::new(max_size))
             .collect();
-        Self::with_queues(cid, backend, queues)
+        Self::with_queues(id, cid, backend, queues)
+    }
+
+    pub fn id(&self) -> &String {
+        &self.id
     }
 
     pub fn cid(&self) -> u64 {

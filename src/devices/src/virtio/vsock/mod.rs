@@ -260,7 +260,7 @@ mod tests {
                 cid: CID,
                 mem,
                 mem_size: MEM_SIZE,
-                device: Vsock::new(CID, TestBackend::new()).unwrap(),
+                device: Vsock::new("test".to_string(), CID, TestBackend::new()).unwrap(),
             }
         }
 
@@ -296,8 +296,13 @@ mod tests {
                 guest_rxvq,
                 guest_txvq,
                 guest_evvq,
-                device: Vsock::with_queues(self.cid, TestBackend::new(), vec![rxvq, txvq, evvq])
-                    .unwrap(),
+                device: Vsock::with_queues(
+                    "test".to_string(),
+                    self.cid,
+                    TestBackend::new(),
+                    vec![rxvq, txvq, evvq],
+                )
+                .unwrap(),
             }
         }
     }
