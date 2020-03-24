@@ -65,7 +65,7 @@ pub struct VmResources {
     /// The boot configuration for this microVM.
     boot_config: Option<BootConfig>,
     /// The configurations for block devices.
-    pub block: BlockDeviceConfigs,
+    pub block: BlockDevices,
     /// The configurations for network interface devices.
     pub network_interface: NetworkInterfaceConfigs,
     /// The configurations for vsock devices.
@@ -241,7 +241,7 @@ mod tests {
     use resources::VmResources;
     use utils::tempfile::TempFile;
     use vmm_config::boot_source::{BootConfig, BootSourceConfig, DEFAULT_KERNEL_CMDLINE};
-    use vmm_config::drive::{BlockDeviceConfig, BlockDeviceConfigs, DriveError};
+    use vmm_config::drive::{BlockDeviceConfig, BlockDevices, DriveError};
     use vmm_config::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
     use vmm_config::net::{NetworkInterfaceConfig, NetworkInterfaceConfigs, NetworkInterfaceError};
     use vmm_config::vsock::VsockDeviceConfig;
@@ -270,20 +270,26 @@ mod tests {
         net_if_cfgs
     }
 
-    fn default_block_cfgs() -> BlockDeviceConfigs {
-        let mut block_cfgs = BlockDeviceConfigs::new();
-        block_cfgs
-            .insert(BlockDeviceConfig {
+    fn default_block_cfg() -> (BlockDeviceConfig, TempFile) {
+        let tmp_file = TempFile::new().unwrap();
+        (
+            BlockDeviceConfig {
                 drive_id: "block1".to_string(),
-                path_on_host: TempFile::new().unwrap().as_path().to_path_buf(),
+                path_on_host: tmp_file.as_path().to_path_buf(),
                 is_root_device: false,
                 partuuid: Some("0eaa91a0-01".to_string()),
                 is_read_only: false,
                 rate_limiter: Some(RateLimiterConfig::default()),
-            })
-            .unwrap();
+            },
+            tmp_file,
+        )
+    }
 
-        block_cfgs
+    fn default_blocks() -> BlockDevices {
+        let mut blocks = BlockDevices::new();
+        let (cfg, _file) = default_block_cfg();
+        blocks.insert(cfg).unwrap();
+        blocks
     }
 
     fn default_boot_cfg() -> BootConfig {
@@ -301,7 +307,7 @@ mod tests {
         VmResources {
             vm_config: VmConfig::default(),
             boot_config: Some(default_boot_cfg()),
-            block: default_block_cfgs(),
+            block: default_blocks(),
             network_interface: default_net_cfgs(),
             vsock: None,
         }
@@ -685,16 +691,13 @@ mod tests {
     #[test]
     fn test_set_block_device() {
         let mut vm_resources = default_vm_resources();
-
-        // Clone the existing block config in order to obtain a new one.
-        let mut new_block_device_cfg = vm_resources.block.config_list.get(0).unwrap().clone();
+        let (mut new_block_device_cfg, _file) = default_block_cfg();
         let tmp_file = TempFile::new().unwrap();
         new_block_device_cfg.drive_id = "block2".to_string();
         new_block_device_cfg.path_on_host = tmp_file.as_path().to_path_buf();
-        assert_eq!(vm_resources.block.config_list.len(), 1);
-
+        assert_eq!(vm_resources.block.list.len(), 1);
         vm_resources.set_block_device(new_block_device_cfg).unwrap();
-        assert_eq!(vm_resources.block.config_list.len(), 2);
+        assert_eq!(vm_resources.block.list.len(), 2);
     }
 
     #[test]
