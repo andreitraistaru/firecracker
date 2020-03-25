@@ -113,7 +113,7 @@ type Result<T> = result::Result<T, NetworkInterfaceError>;
 /// A list of the Network Interfaces that the microvm has configured.
 #[derive(Default)]
 pub struct NetworkInterfaces {
-    if_list: Vec<Arc<Mutex<Net>>>,
+    pub(crate) if_list: Vec<Arc<Mutex<Net>>>,
 }
 
 impl NetworkInterfaces {

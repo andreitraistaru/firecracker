@@ -42,15 +42,15 @@ pub struct VsockDeviceConfig {
     pub uds_path: String,
 }
 
-struct VsockAndUnixPath {
-    vsock: Arc<Mutex<Vsock<VsockUnixBackend>>>,
+pub(crate) struct VsockAndUnixPath {
+    pub(crate) vsock: Arc<Mutex<Vsock<VsockUnixBackend>>>,
     uds_path: String,
 }
 
 /// A builder of Vsock with Unix backend from 'VsockDeviceConfig'.
 #[derive(Default)]
 pub struct VsockStore {
-    inner: Option<VsockAndUnixPath>,
+    pub(crate) inner: Option<VsockAndUnixPath>,
 }
 
 impl VsockStore {

@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Mutex};
 
-use super::rate_limiter::RateLimiterConfig;
+use crate::builder::BlockDevicesList;
+use crate::rpc_interface::rate_limiter::RateLimiterConfig;
 use devices::virtio::Block;
 
 type Result<T> = result::Result<T, DriveError>;
@@ -83,25 +84,21 @@ pub struct BlockDeviceConfig {
 
 /// Wrapper for the collection that holds all the Block Devices
 #[derive(Default)]
-pub struct BlockDevices {
-    /// The list of block devices.
-    pub list: VecDeque<Arc<Mutex<Block>>>,
-    /// Index of the root block device, if any.
-    pub has_root_block: bool,
-}
+pub struct BlockDevices(pub(crate) BlockDevicesList);
 
 impl BlockDevices {
     /// Constructor for BlockDevices. It initializes an empty LinkedList.
     pub fn new() -> BlockDevices {
-        BlockDevices {
+        Self(BlockDevicesList {
             list: VecDeque::<Arc<Mutex<Block>>>::new(),
             has_root_block: false,
-        }
+        })
     }
 
     /// Gets the index of the device with the specified `drive_id` if it exists in the list.
     pub fn get_index_of_drive_id(&self, drive_id: &str) -> Option<usize> {
-        self.list
+        self.0
+            .list
             .iter()
             .position(|b| b.lock().unwrap().id().eq(drive_id))
     }
@@ -120,41 +117,41 @@ impl BlockDevices {
                 // Check whether the Device Config belongs to a root device,
                 // we need to satisfy the condition by which a VMM can only have one root device.
                 if is_root_device {
-                    if self.has_root_block {
+                    if self.0.has_root_block {
                         return Err(DriveError::RootBlockDeviceAlreadyAdded);
                     } else {
                         // Root Device should be the first in the list whether or not PARTUUID is
                         // specified in order to avoid bugs in case of switching from partuuid boot
                         // scenarios to /dev/vda boot type.
-                        self.list.push_front(block_dev);
-                        self.has_root_block = true;
+                        self.0.list.push_front(block_dev);
+                        self.0.has_root_block = true;
                     }
                 } else {
-                    self.list.push_back(block_dev);
+                    self.0.list.push_back(block_dev);
                 }
             }
             // Update existing block device.
             Some(mut index) => {
                 // Check if the root block device is being updated.
-                if index == 0 && self.has_root_block {
+                if index == 0 && self.0.has_root_block {
                     // Set root flag according to the updated block config.
-                    self.has_root_block = is_root_device;
+                    self.0.has_root_block = is_root_device;
                 } else if is_root_device {
                     // Check if a second root block device is being added.
-                    if self.has_root_block {
+                    if self.0.has_root_block {
                         return Err(DriveError::RootBlockDeviceAlreadyAdded);
                     } else {
                         // One of the non-root blocks is becoming root.
-                        self.has_root_block = true;
+                        self.0.has_root_block = true;
 
                         // Make sure the root device is on the first position.
-                        self.list.swap(0, index);
+                        self.0.list.swap(0, index);
                         // Block config to be updated has moved to first position.
                         index = 0;
                     }
                 }
                 // Update the slot with the new block.
-                self.list[index] = block_dev;
+                self.0.list[index] = block_dev;
             }
         }
         Ok(())

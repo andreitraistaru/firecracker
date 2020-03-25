@@ -3,6 +3,7 @@
 
 //! Enables pre-boot setup, instantiation and booting of a Firecracker VMM.
 
+use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -15,7 +16,7 @@ use arch::InitrdConfig;
 use device_manager::legacy::PortIODeviceManager;
 use device_manager::mmio::MMIODeviceManager;
 use devices::legacy::Serial;
-use devices::virtio::{MmioTransport, Vsock, VsockUnixBackend};
+use devices::virtio::{Block, MmioTransport, Net, Vsock, VsockUnixBackend};
 use polly::event_manager::{Error as EventManagerError, EventManager};
 use rpc_interface::boot_source::BootConfig;
 use rpc_interface::drive::BlockDevices;
@@ -219,6 +220,47 @@ impl VmmEventsObserver for SerialStdin {
             e
         })
     }
+}
+
+/// Enum describing how the memory is specified.
+pub enum GuestMemorySpec {
+    /// Just a size
+    SizeInMib(usize),
+    /// Already created mappings
+    Initialized(GuestMemoryMmap),
+}
+
+/// Wrapper list of Block Devices, needed to also keep meta-information
+/// about the block devices like whether a root block is present.
+#[derive(Default)]
+pub struct BlockDevicesList {
+    /// The list of block devices.
+    pub list: VecDeque<Arc<Mutex<Block>>>,
+    /// Index of the root block device, if any.
+    pub has_root_block: bool,
+}
+
+/// A data structure that defines resources to be used by a microVM.
+// TODO: this should be generic type of vsock backend
+pub struct VmResources {
+    /// Vcpus configuration.
+    pub vcpu_config: VcpuConfig,
+    /// Guest Memory
+    pub mem: GuestMemorySpec,
+
+    /// The kernel commandline validated against correctness.
+    pub cmdline: kernel::cmdline::Cmdline,
+    /// The descriptor to a kernel file, if one should be loaded into memory.
+    pub kernel_file: Option<std::fs::File>,
+    /// The descriptor to the initrd file, if one should be loaded into memory.
+    pub initrd_file: Option<std::fs::File>,
+
+    /// The list of block devices.
+    pub blocks: BlockDevicesList,
+    /// The list of net devices.
+    pub net_ifaces: Vec<Arc<Mutex<Net>>>,
+    /// The Vsock device.
+    pub vsock: Option<Arc<Mutex<Vsock<VsockUnixBackend>>>>,
 }
 
 /// Builds and starts a microVM based on the current Firecracker VmResources configuration.
@@ -658,8 +700,8 @@ fn attach_block_devices(
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
-    for (idx, block) in blocks.list.iter().enumerate() {
-        if blocks.has_root_block && idx == 0 {
+    for (idx, block) in blocks.0.list.iter().enumerate() {
+        if blocks.0.has_root_block && idx == 0 {
             let kernel_cmdline = &mut vmm.kernel_cmdline;
 
             let locked = block.lock().unwrap();

@@ -5,7 +5,7 @@
 
 use std::fs::File;
 
-use crate::builder::DEFAULT_KERNEL_CMDLINE;
+use crate::builder::{GuestMemorySpec, VmResources, DEFAULT_KERNEL_CMDLINE};
 use rpc_interface::boot_source::{BootConfig, BootSourceConfig, BootSourceConfigError};
 use rpc_interface::drive::*;
 use rpc_interface::logger::{init_logger, LoggerConfig, LoggerConfigError};
@@ -71,6 +71,40 @@ pub struct VmResourceStore {
     pub network_interface: NetworkInterfaces,
     /// The vsock device.
     pub vsock: VsockStore,
+}
+
+impl Into<VmResources> for VmResourceStore {
+    fn into(self) -> VmResources {
+        let vcpu_config = self.vcpu_config();
+        let (cmdline, kernel_file, initrd_file) = match self.boot_config {
+            Some(cfg) => (cfg.cmdline, Some(cfg.kernel_file), cfg.initrd_file),
+            None => (
+                // Safe to unwrap since this will create the Default CMDLINE which
+                // is tested to be valid.
+                Self::create_cmdline(None).unwrap(),
+                None,
+                None,
+            ),
+        };
+        VmResources {
+            vcpu_config,
+            mem: GuestMemorySpec::SizeInMib(self.vm_config.mem_size_mib.unwrap()),
+
+            /// The kernel commandline validated against correctness.
+            cmdline,
+            /// The descriptor to a kernel file, if one should be loaded into memory.
+            kernel_file,
+            /// The descriptor to the initrd file, if one should be loaded into memory.
+            initrd_file,
+
+            /// The list of block devices.
+            blocks: self.block.0,
+            /// The list of net devices.
+            net_ifaces: self.network_interface.if_list,
+            /// The Vsock device.
+            vsock: self.vsock.inner.map(|v| v.vsock),
+        }
+    }
 }
 
 impl VmResourceStore {
@@ -177,14 +211,27 @@ impl VmResourceStore {
         self.boot_config.as_ref()
     }
 
+    fn create_cmdline(
+        args: Option<&String>,
+    ) -> std::result::Result<kernel::cmdline::Cmdline, BootSourceConfigError> {
+        use self::BootSourceConfigError::InvalidKernelCommandLine;
+        let mut cmdline = kernel::cmdline::Cmdline::new(arch::CMDLINE_MAX_SIZE);
+        let boot_args = match args {
+            None => DEFAULT_KERNEL_CMDLINE,
+            Some(str) => str.as_str(),
+        };
+        cmdline
+            .insert_str(boot_args)
+            .map_err(|e| InvalidKernelCommandLine(e.to_string()))?;
+        Ok(cmdline)
+    }
+
     /// Set the guest boot source configuration.
     pub fn set_boot_source(
         &mut self,
         boot_source_cfg: BootSourceConfig,
     ) -> Result<BootSourceConfigError> {
-        use self::BootSourceConfigError::{
-            InvalidInitrdPath, InvalidKernelCommandLine, InvalidKernelPath,
-        };
+        use self::BootSourceConfigError::{InvalidInitrdPath, InvalidKernelPath};
 
         // Validate boot source config.
         let kernel_file =
@@ -193,14 +240,8 @@ impl VmResourceStore {
             Some(path) => Some(File::open(path).map_err(InvalidInitrdPath)?),
             None => None,
         };
-        let mut cmdline = kernel::cmdline::Cmdline::new(arch::CMDLINE_MAX_SIZE);
-        let boot_args = match boot_source_cfg.boot_args.as_ref() {
-            None => DEFAULT_KERNEL_CMDLINE,
-            Some(str) => str.as_str(),
-        };
-        cmdline
-            .insert_str(boot_args)
-            .map_err(|e| InvalidKernelCommandLine(e.to_string()))?;
+
+        let cmdline = Self::create_cmdline(boot_source_cfg.boot_args.as_ref())?;
 
         self.boot_config = Some(BootConfig {
             cmdline,
