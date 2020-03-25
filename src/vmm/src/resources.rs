@@ -61,7 +61,7 @@ pub struct VmmConfig {
 /// A data structure that encapsulates the device configurations
 /// held in the Vmm.
 #[derive(Default)]
-pub struct VmResources {
+pub struct VmResourceStore {
     /// The vCpu and memory configuration for this microVM.
     vm_config: VmConfig,
     /// The boot configuration for this microVM.
@@ -74,7 +74,7 @@ pub struct VmResources {
     pub vsock: VsockStore,
 }
 
-impl VmResources {
+impl VmResourceStore {
     /// Configures Vmm resources as described by the `config_json` param.
     pub fn from_json(
         config_json: &str,
@@ -242,7 +242,7 @@ mod tests {
 
     use super::*;
     use dumbo::MacAddr;
-    use resources::VmResources;
+    use resources::VmResourceStore;
     use rpc_interface::boot_source::{BootConfig, BootSourceConfig, DEFAULT_KERNEL_CMDLINE};
     use rpc_interface::drive::{BlockDeviceConfig, BlockDevices, DriveError};
     use rpc_interface::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
@@ -309,8 +309,8 @@ mod tests {
         }
     }
 
-    fn default_vm_resources() -> VmResources {
-        VmResources {
+    fn default_vm_resources() -> VmResourceStore {
+        VmResourceStore {
             vm_config: VmConfig::default(),
             boot_config: Some(default_boot_cfg()),
             block: default_blocks(),
@@ -370,7 +370,7 @@ mod tests {
             rootfs_file.as_path().to_str().unwrap()
         );
 
-        match VmResources::from_json(json.as_str(), "some_version") {
+        match VmResourceStore::from_json(json.as_str(), "some_version") {
             Err(Error::BootSource(BootSourceConfigError::InvalidKernelPath(_))) => (),
             _ => unreachable!(),
         }
@@ -394,7 +394,7 @@ mod tests {
             kernel_file.as_path().to_str().unwrap()
         );
 
-        match VmResources::from_json(json.as_str(), "some_version") {
+        match VmResourceStore::from_json(json.as_str(), "some_version") {
             Err(Error::BlockDevice(DriveError::InvalidBlockDevicePath)) => (),
             _ => unreachable!(),
         }
@@ -424,7 +424,7 @@ mod tests {
             rootfs_file.as_path().to_str().unwrap()
         );
 
-        match VmResources::from_json(json.as_str(), "some_version") {
+        match VmResourceStore::from_json(json.as_str(), "some_version") {
             Err(Error::VmConfig(VmConfigError::InvalidVcpuCount)) => (),
             _ => unreachable!(),
         }
@@ -454,7 +454,7 @@ mod tests {
             rootfs_file.as_path().to_str().unwrap()
         );
 
-        match VmResources::from_json(json.as_str(), "some_version") {
+        match VmResourceStore::from_json(json.as_str(), "some_version") {
             Err(Error::VmConfig(VmConfigError::InvalidMemorySize)) => (),
             _ => unreachable!(),
         }
@@ -482,7 +482,7 @@ mod tests {
             rootfs_file.as_path().to_str().unwrap()
         );
 
-        match VmResources::from_json(json.as_str(), "some_version") {
+        match VmResourceStore::from_json(json.as_str(), "some_version") {
             Err(Error::Logger(LoggerConfigError::InitializationFailure { .. })) => (),
             _ => unreachable!(),
         }
@@ -510,7 +510,7 @@ mod tests {
             rootfs_file.as_path().to_str().unwrap()
         );
 
-        match VmResources::from_json(json.as_str(), "some_version") {
+        match VmResourceStore::from_json(json.as_str(), "some_version") {
             Err(Error::Metrics(MetricsConfigError::InitializationFailure { .. })) => (),
             _ => unreachable!(),
         }
@@ -545,7 +545,7 @@ mod tests {
             rootfs_file.as_path().to_str().unwrap()
         );
 
-        match VmResources::from_json(json.as_str(), "some_version") {
+        match VmResourceStore::from_json(json.as_str(), "some_version") {
             Err(Error::NetDevice(NetworkInterfaceError::OpenTap { .. })) => (),
             _ => unreachable!(),
         }
@@ -583,7 +583,7 @@ mod tests {
             rootfs_file.as_path().to_str().unwrap(),
         );
 
-        assert!(VmResources::from_json(json.as_str(), "some_version").is_ok());
+        assert!(VmResourceStore::from_json(json.as_str(), "some_version").is_ok());
     }
 
     #[test]

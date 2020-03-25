@@ -32,7 +32,7 @@ use utils::arg_parser::{ArgParser, Argument};
 use utils::terminal::Terminal;
 use utils::validators::validate_instance_id;
 use vmm::default_syscalls::get_seccomp_filter;
-use vmm::resources::VmResources;
+use vmm::resources::VmResourceStore;
 use vmm::rpc_interface::instance_info::InstanceInfo;
 use vmm::rpc_interface::logger::{init_logger, LoggerConfig, LoggerLevel};
 use vmm::signal_handler::register_signal_handlers;
@@ -262,9 +262,9 @@ fn build_microvm_from_json(
     seccomp_filter: BpfProgram,
     event_manager: &mut EventManager,
     config_json: String,
-) -> (VmResources, Arc<Mutex<vmm::Vmm>>) {
-    let vm_resources =
-        VmResources::from_json(&config_json, FIRECRACKER_VERSION).unwrap_or_else(|err| {
+) -> (VmResourceStore, Arc<Mutex<vmm::Vmm>>) {
+    let vm_resources = VmResourceStore::from_json(&config_json, FIRECRACKER_VERSION)
+        .unwrap_or_else(|err| {
             error!(
                 "Configuration for VMM from one single json failed: {:?}",
                 err

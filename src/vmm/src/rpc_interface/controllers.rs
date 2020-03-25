@@ -15,7 +15,7 @@ use device_manager::mmio::MMIO_CFG_SPACE_OFF;
 use devices::virtio::{Block, MmioTransport, Net, TYPE_BLOCK, TYPE_NET};
 use logger::METRICS;
 use polly::event_manager::EventManager;
-use resources::VmResources;
+use resources::VmResourceStore;
 use rpc_interface;
 use rpc_interface::drive::DriveError;
 use rpc_interface::machine_config::VmConfig;
@@ -27,7 +27,7 @@ use seccomp::BpfProgram;
 pub struct PrebootApiController<'a> {
     seccomp_filter: BpfProgram,
     firecracker_version: String,
-    vm_resources: &'a mut VmResources,
+    vm_resources: &'a mut VmResourceStore,
     event_manager: &'a mut EventManager,
 
     built_vmm: Option<Arc<Mutex<Vmm>>>,
@@ -38,7 +38,7 @@ impl<'a> PrebootApiController<'a> {
     pub fn new(
         seccomp_filter: BpfProgram,
         firecracker_version: String,
-        vm_resources: &'a mut VmResources,
+        vm_resources: &'a mut VmResourceStore,
         event_manager: &'a mut EventManager,
     ) -> PrebootApiController<'a> {
         PrebootApiController {
@@ -61,12 +61,12 @@ impl<'a> PrebootApiController<'a> {
         firecracker_version: String,
         recv_req: F,
         respond: G,
-    ) -> (VmResources, Arc<Mutex<Vmm>>)
+    ) -> (VmResourceStore, Arc<Mutex<Vmm>>)
     where
         F: Fn() -> VmmAction,
         G: Fn(result::Result<VmmData, VmmActionError>),
     {
-        let mut vm_resources = VmResources::default();
+        let mut vm_resources = VmResourceStore::default();
         let mut preboot_controller = PrebootApiController::new(
             seccomp_filter,
             firecracker_version,
