@@ -53,8 +53,6 @@ pub fn parse_patch_machine_config(body: &Body) -> Result<ParsedRequest, Error> {
 mod tests {
     use super::*;
 
-    use vmm::rpc_interface::machine_config::CpuFeaturesTemplate;
-
     #[test]
     fn test_parse_get_machine_config_request() {
         assert!(parse_get_machine_config().is_ok());
@@ -68,13 +66,12 @@ mod tests {
             vcpu_count: Some(8),
             mem_size_mib: Some(1024),
             ht_enabled: Some(true),
-            cpu_template: Some(CpuFeaturesTemplate::T2),
+            cpu_template: None,
         };
         let body = r#"{
                 "vcpu_count": 8,
                 "mem_size_mib": 1024,
-                "ht_enabled": true,
-                "cpu_template": "T2"
+                "ht_enabled": true
               }"#;
         match parse_put_machine_config(&Body::new(body)) {
             Ok(ParsedRequest::Sync(VmmAction::SetVmConfiguration(config))) => {

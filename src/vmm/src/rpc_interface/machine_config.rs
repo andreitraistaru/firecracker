@@ -4,6 +4,8 @@
 use serde::{de, Deserialize};
 use std::fmt;
 
+use crate::vstate::CpuFeaturesTemplate;
+
 /// Firecracker aims to support small scale workloads only, so limit the maximum
 /// vCPUs supported.
 pub const MAX_SUPPORTED_VCPUS: u8 = 32;
@@ -94,25 +96,6 @@ where
         }
     }
     Ok(val)
-}
-
-/// Template types available for configuring the CPU features that map
-/// to EC2 instances.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub enum CpuFeaturesTemplate {
-    /// C3 Template.
-    C3,
-    /// T2 Template.
-    T2,
-}
-
-impl fmt::Display for CpuFeaturesTemplate {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            CpuFeaturesTemplate::C3 => write!(f, "C3"),
-            CpuFeaturesTemplate::T2 => write!(f, "T2"),
-        }
-    }
 }
 
 #[cfg(test)]

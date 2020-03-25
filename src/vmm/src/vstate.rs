@@ -32,7 +32,6 @@ use kvm_bindings::{
 use kvm_bindings::{kvm_userspace_memory_region, KVM_API_VERSION};
 use kvm_ioctls::*;
 use logger::{Metric, METRICS};
-use rpc_interface::machine_config::CpuFeaturesTemplate;
 use seccomp::{BpfProgram, SeccompFilter};
 use std::sync::Barrier;
 use utils::eventfd::EventFd;
@@ -41,6 +40,25 @@ use utils::sm::StateMachine;
 use vm_memory::{
     Address, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion,
 };
+
+/// Template types available for configuring the CPU features that map
+/// to EC2 instances.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub enum CpuFeaturesTemplate {
+    /// C3 Template.
+    C3,
+    /// T2 Template.
+    T2,
+}
+
+impl Display for CpuFeaturesTemplate {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        match self {
+            CpuFeaturesTemplate::C3 => write!(f, "C3"),
+            CpuFeaturesTemplate::T2 => write!(f, "T2"),
+        }
+    }
+}
 
 #[cfg(target_arch = "x86_64")]
 const MAGIC_IOPORT_SIGNAL_GUEST_BOOT_COMPLETE: u64 = 0x03f0;
@@ -1314,10 +1332,9 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     use std::time::Duration;
 
-    use super::super::devices;
     use super::*;
-
-    use rpc_interface::boot_source::DEFAULT_KERNEL_CMDLINE;
+    use crate::builder::DEFAULT_KERNEL_CMDLINE;
+    use devices;
     use utils::signal::validate_signal_num;
 
     // Auxiliary function being used throughout the tests.

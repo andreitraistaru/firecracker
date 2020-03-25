@@ -5,9 +5,8 @@
 
 use std::fs::File;
 
-use rpc_interface::boot_source::{
-    BootConfig, BootSourceConfig, BootSourceConfigError, DEFAULT_KERNEL_CMDLINE,
-};
+use crate::builder::DEFAULT_KERNEL_CMDLINE;
+use rpc_interface::boot_source::{BootConfig, BootSourceConfig, BootSourceConfigError};
 use rpc_interface::drive::*;
 use rpc_interface::logger::{init_logger, LoggerConfig, LoggerConfigError};
 use rpc_interface::machine_config::{VmConfig, VmConfigError};
@@ -241,10 +240,11 @@ mod tests {
     use std::os::linux::fs::MetadataExt;
 
     use super::*;
+    use crate::vstate::CpuFeaturesTemplate;
     use dumbo::MacAddr;
-    use rpc_interface::boot_source::{BootConfig, BootSourceConfig, DEFAULT_KERNEL_CMDLINE};
+    use rpc_interface::boot_source::{BootConfig, BootSourceConfig};
     use rpc_interface::drive::{BlockDeviceConfig, BlockDevices, DriveError};
-    use rpc_interface::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};
+    use rpc_interface::machine_config::{VmConfig, VmConfigError};
     use rpc_interface::net::{NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaces};
     use rpc_interface::rate_limiter::RateLimiterConfig;
     use rpc_interface::vsock::tests::{default_config, TempSockFile};

@@ -4,19 +4,6 @@
 use std::fmt::{Display, Formatter, Result};
 use std::io;
 
-/// Default guest kernel command line:
-/// - `reboot=k` shut down the guest on reboot, instead of well... rebooting;
-/// - `panic=1` on panic, reboot after 1 second;
-/// - `pci=off` do not scan for PCI devices (save boot time);
-/// - `nomodules` disable loadable kernel module support;
-/// - `8250.nr_uarts=0` disable 8250 serial interface;
-/// - `i8042.noaux` do not probe the i8042 controller for an attached mouse (save boot time);
-/// - `i8042.nomux` do not probe i8042 for a multiplexing controller (save boot time);
-/// - `i8042.nopnp` do not use ACPIPnP to discover KBD/AUX controllers (save boot time);
-/// - `i8042.dumbkbd` do not attempt to control kbd state via the i8042 (save boot time).
-pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=1 pci=off nomodules 8250.nr_uarts=0 \
-                                          i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd";
-
 /// Strongly typed data structure used to configure the boot source of the
 /// microvm.
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
