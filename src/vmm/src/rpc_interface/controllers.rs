@@ -7,6 +7,7 @@ use std::path::Path;
 use std::result;
 use std::sync::{Arc, Mutex};
 
+use crate::rpc_interface::resources::VmResourceStore;
 use crate::rpc_interface::{VmmAction, VmmActionError, VmmData};
 use crate::Vmm;
 use arch::DeviceType;
@@ -15,7 +16,6 @@ use device_manager::mmio::MMIO_CFG_SPACE_OFF;
 use devices::virtio::{Block, MmioTransport, Net, TYPE_BLOCK, TYPE_NET};
 use logger::METRICS;
 use polly::event_manager::EventManager;
-use resources::VmResourceStore;
 use rpc_interface;
 use rpc_interface::drive::DriveError;
 use rpc_interface::machine_config::VmConfig;

@@ -37,8 +37,6 @@ pub mod builder;
 /// Syscalls allowed through the seccomp filter.
 pub mod default_syscalls;
 pub(crate) mod device_manager;
-/// Resource store for configured microVM resources.
-pub mod resources;
 /// microVM RPC API adapters and structures used to configure the VMM.
 pub mod rpc_interface;
 /// Signal handling utilities.

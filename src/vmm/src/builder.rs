@@ -216,7 +216,7 @@ impl VmmEventsObserver for SerialStdin {
 /// An `Arc` reference of the built `Vmm` is also plugged in the `EventManager`, while another
 /// is returned.
 pub fn build_microvm(
-    vm_resources: &super::resources::VmResourceStore,
+    vm_resources: &crate::rpc_interface::resources::VmResourceStore,
     event_manager: &mut EventManager,
     seccomp_filter: BpfProgramRef,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {

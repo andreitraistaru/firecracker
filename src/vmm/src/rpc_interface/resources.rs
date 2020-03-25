@@ -242,7 +242,6 @@ mod tests {
 
     use super::*;
     use dumbo::MacAddr;
-    use resources::VmResourceStore;
     use rpc_interface::boot_source::{BootConfig, BootSourceConfig, DEFAULT_KERNEL_CMDLINE};
     use rpc_interface::drive::{BlockDeviceConfig, BlockDevices, DriveError};
     use rpc_interface::machine_config::{CpuFeaturesTemplate, VmConfig, VmConfigError};

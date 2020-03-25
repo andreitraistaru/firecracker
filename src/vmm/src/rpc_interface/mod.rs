@@ -28,6 +28,8 @@ pub mod metrics;
 pub mod net;
 /// Wrapper for configuring rate limiters.
 pub mod rate_limiter;
+/// Resource store for configured microVM resources.
+pub mod resources;
 /// Wrapper for configuring the vsock devices attached to the microVM.
 pub mod vsock;
 
