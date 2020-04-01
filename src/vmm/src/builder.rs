@@ -19,9 +19,6 @@ use device_manager::mmio::MMIODeviceManager;
 use devices::legacy::Serial;
 use devices::virtio::{Block, MmioTransport, Net, Vsock, VsockUnixBackend};
 use polly::event_manager::{Error as EventManagerError, EventManager};
-use rpc_interface::boot_source::BootConfig;
-use rpc_interface::drive::BlockDevices;
-use rpc_interface::net::NetworkInterfaces;
 use seccomp::BpfProgramRef;
 use utils::eventfd::EventFd;
 use utils::terminal::Terminal;
@@ -233,6 +230,7 @@ pub enum GuestMemorySpec {
 
 /// Wrapper over a Block Device, needed to also keep meta-information
 /// about the block devices like whether it is a root block.
+#[derive(Clone)]
 pub struct BlockDeviceWithMetadata {
     /// The list of block devices.
     pub block: Arc<Mutex<Block>>,
@@ -431,11 +429,6 @@ fn load_kernel(
     mut kernel_file: File,
     guest_memory: &GuestMemoryMmap,
 ) -> std::result::Result<GuestAddress, StartMicrovmError> {
-    // Make a clone so that we don't mutate the original file cursor.
-    // let mut kernel_file = kernel_file
-    //     .try_clone()
-    //     .map_err(|e| StartMicrovmError::Internal(Error::KernelFile(e)))?;
-
     let entry_addr =
         kernel::loader::load_kernel(guest_memory, &mut kernel_file, arch::get_kernel_start())
             .map_err(StartMicrovmError::KernelLoader)?;
@@ -444,16 +437,11 @@ fn load_kernel(
 }
 
 fn load_initrd_if_present(
-    mut initrd_file: Option<File>,
+    initrd_file: Option<File>,
     vm_memory: &GuestMemoryMmap,
 ) -> std::result::Result<Option<InitrdConfig>, StartMicrovmError> {
-    use self::StartMicrovmError::InitrdRead;
-
     Ok(match initrd_file {
-        Some(mut f) => Some(load_initrd(
-            vm_memory,
-            &mut f,
-        )?),
+        Some(mut f) => Some(load_initrd(vm_memory, &mut f)?),
         None => None,
     })
 }

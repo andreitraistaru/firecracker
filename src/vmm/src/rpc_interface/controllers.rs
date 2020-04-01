@@ -27,7 +27,7 @@ use seccomp::BpfProgram;
 pub struct PrebootApiController<'a> {
     seccomp_filter: BpfProgram,
     firecracker_version: String,
-    vm_resources: VmResourceStore,
+    vm_resources: &'a mut VmResourceStore,
     event_manager: &'a mut EventManager,
 
     built_vmm: Option<Arc<Mutex<Vmm>>>,
@@ -38,7 +38,7 @@ impl<'a> PrebootApiController<'a> {
     pub fn new(
         seccomp_filter: BpfProgram,
         firecracker_version: String,
-        vm_resources: VmResourceStore,
+        vm_resources: &'a mut VmResourceStore,
         event_manager: &'a mut EventManager,
     ) -> PrebootApiController<'a> {
         PrebootApiController {
@@ -70,7 +70,7 @@ impl<'a> PrebootApiController<'a> {
         let mut preboot_controller = PrebootApiController::new(
             seccomp_filter,
             firecracker_version,
-            vm_resources,
+            &mut vm_resources,
             event_manager,
         );
         // Configure and start microVM through successive API calls.
@@ -83,7 +83,7 @@ impl<'a> PrebootApiController<'a> {
 
         // Safe to unwrap because previous loop cannot end on None.
         let vmm = preboot_controller.built_vmm.unwrap();
-        (preboot_controller.vm_resources, vmm)
+        (vm_resources, vmm)
     }
 
     /// Handles the incoming preboot request and provides a response for it.
@@ -132,20 +132,17 @@ impl<'a> PrebootApiController<'a> {
                 .set_vm_config(&machine_config_body)
                 .map(|_| VmmData::Empty)
                 .map_err(VmmActionError::MachineConfig),
-            StartMicroVm => {
-                let mut resources= VmResourceStore::default();
-                std::mem::swap(&mut self.vm_resources, &mut resources);
-                crate::builder::build_microvm(
-                    resources.into(),
-                    &mut self.event_manager,
-                    &self.seccomp_filter,
-                )
-                    .map(|vmm| {
-                        self.built_vmm = Some(vmm);
-                        VmmData::Empty
-                    })
-                    .map_err(VmmActionError::StartMicrovm)
-            },
+            StartMicroVm => crate::builder::build_microvm(
+                // FIXME: fix errors and remove unwrap.
+                self.vm_resources.build_resources().unwrap(),
+                &mut self.event_manager,
+                &self.seccomp_filter,
+            )
+            .map(|vmm| {
+                self.built_vmm = Some(vmm);
+                VmmData::Empty
+            })
+            .map_err(VmmActionError::StartMicrovm),
 
             // Operations not allowed pre-boot.
             UpdateBlockDevicePath(_, _) | UpdateNetworkInterface(_) | FlushMetrics => {

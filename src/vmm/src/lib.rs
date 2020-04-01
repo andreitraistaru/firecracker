@@ -103,8 +103,6 @@ pub enum Error {
     EventManager(event_manager::Error),
     /// I8042 Error.
     I8042Error(devices::legacy::I8042DeviceError),
-    /// Cannot access kernel file.
-    KernelFile(io::Error),
     /// Cannot open /dev/kvm. Either the host does not have KVM or Firecracker does not have
     /// permission to open the file descriptor.
     KvmContext(vstate::Error),
@@ -154,7 +152,6 @@ impl Display for Error {
             EventFd(e) => write!(f, "Event fd error: {}", e),
             EventManager(e) => write!(f, "Event manager error: {:?}", e),
             I8042Error(e) => write!(f, "I8042 error: {}", e),
-            KernelFile(e) => write!(f, "Cannot access kernel file: {}", e),
             KvmContext(e) => write!(f, "Failed to validate KVM support: {:?}", e),
             #[cfg(target_arch = "x86_64")]
             LegacyIOBus(e) => write!(f, "Cannot add devices to the legacy I/O Bus. {}", e),

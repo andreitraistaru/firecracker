@@ -263,7 +263,7 @@ fn build_microvm_from_json(
     event_manager: &mut EventManager,
     config_json: String,
 ) -> (VmResourceStore, Arc<Mutex<vmm::Vmm>>) {
-    let vm_resources = VmResourceStore::from_json(&config_json, FIRECRACKER_VERSION)
+    let resource_store = VmResourceStore::from_json(&config_json, FIRECRACKER_VERSION)
         .unwrap_or_else(|err| {
             error!(
                 "Configuration for VMM from one single json failed: {:?}",
@@ -271,7 +271,16 @@ fn build_microvm_from_json(
             );
             process::exit(i32::from(vmm::FC_EXIT_CODE_BAD_CONFIGURATION));
         });
-    let vmm = vmm::builder::build_microvm(vm_resources.into(), event_manager, &seccomp_filter)
+    let vm_resources = resource_store
+        .build_resources()
+        .unwrap_or_else(|err| {
+            error!(
+                "Internal error: {:?}",
+                err
+            );
+            process::exit(i32::from(vmm::FC_EXIT_CODE_GENERIC_ERROR));
+        });
+    let vmm = vmm::builder::build_microvm(vm_resources, event_manager, &seccomp_filter)
         .unwrap_or_else(|err| {
             error!(
                 "Building VMM configured from cmdline json failed: {:?}",
@@ -281,7 +290,7 @@ fn build_microvm_from_json(
         });
     info!("Successfully started microvm that was configured from one single json");
 
-    (VmResourceStore::default(), vmm)
+    (resource_store, vmm)
 }
 
 fn run_without_api(seccomp_filter: BpfProgram, config_json: Option<String>) {

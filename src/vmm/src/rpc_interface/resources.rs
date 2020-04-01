@@ -20,18 +20,20 @@ type Result<E> = std::result::Result<(), E>;
 /// Errors encountered when configuring microVM resources.
 #[derive(Debug)]
 pub enum Error {
-    /// JSON is invalid.
-    InvalidJson,
     /// Block device configuration error.
     BlockDevice(DriveError),
-    /// Net device configuration error.
-    NetDevice(NetworkInterfaceError),
     /// Boot source configuration error.
     BootSource(BootSourceConfigError),
+    /// JSON is invalid.
+    InvalidJson,
+    /// Internal error.
+    Internal(std::io::Error),
     /// Logger configuration error.
     Logger(LoggerConfigError),
     /// Metrics system configuration error.
     Metrics(MetricsConfigError),
+    /// Net device configuration error.
+    NetDevice(NetworkInterfaceError),
     /// microVM vCpus or memory configuration error.
     VmConfig(VmConfigError),
     /// Vsock device configuration error.
@@ -71,40 +73,6 @@ pub struct VmResourceStore {
     pub network_interface: NetworkInterfaces,
     /// The vsock device.
     pub vsock: VsockStore,
-}
-
-impl Into<VmResources> for VmResourceStore {
-    fn into(self) -> VmResources {
-        let vcpu_config = self.vcpu_config();
-        let (cmdline, kernel_file, initrd_file) = match self.boot_config {
-            Some(cfg) => (cfg.cmdline, Some(cfg.kernel_file), cfg.initrd_file),
-            None => (
-                // Safe to unwrap since this will create the Default CMDLINE which
-                // is tested to be valid.
-                Self::create_cmdline(None).unwrap(),
-                None,
-                None,
-            ),
-        };
-        VmResources {
-            vcpu_config,
-            mem: GuestMemorySpec::SizeInMib(self.vm_config.mem_size_mib.unwrap()),
-
-            /// The kernel commandline validated against correctness.
-            cmdline,
-            /// The descriptor to a kernel file, if one should be loaded into memory.
-            kernel_file,
-            /// The descriptor to the initrd file, if one should be loaded into memory.
-            initrd_file,
-
-            /// The list of block devices.
-            blocks: self.block.list,
-            /// The list of net devices.
-            net_ifaces: self.network_interface.if_list,
-            /// The Vsock device.
-            vsock: self.vsock.inner.map(|v| v.vsock),
-        }
-    }
 }
 
 impl VmResourceStore {
@@ -272,6 +240,46 @@ impl VmResourceStore {
     /// Sets a vsock device to be attached when the VM starts.
     pub fn set_vsock_device(&mut self, config: VsockDeviceConfig) -> Result<VsockConfigError> {
         self.vsock.insert(config)
+    }
+
+    /// Builds a `VmResources` object from the resources in this store.
+    pub fn build_resources(&self) -> std::result::Result<VmResources, Error> {
+        let vcpu_config = self.vcpu_config();
+        let (cmdline, kernel_file, initrd_file) = match &self.boot_config {
+            Some(cfg) => (
+                cfg.cmdline.clone(),
+                Some(cfg.kernel_file.try_clone().map_err(Error::Internal)?),
+                match &cfg.initrd_file {
+                    Some(f) => Some(f.try_clone().map_err(Error::Internal)?),
+                    None => None,
+                },
+            ),
+            None => (
+                // Safe to unwrap since this will create the Default CMDLINE which
+                // is tested to be valid.
+                Self::create_cmdline(None).unwrap(),
+                None,
+                None,
+            ),
+        };
+        Ok(VmResources {
+            vcpu_config,
+            mem: GuestMemorySpec::SizeInMib(self.vm_config.mem_size_mib.unwrap()),
+
+            /// The kernel commandline validated against correctness.
+            cmdline,
+            /// The descriptor to a kernel file, if one should be loaded into memory.
+            kernel_file,
+            /// The descriptor to the initrd file, if one should be loaded into memory.
+            initrd_file,
+
+            /// The list of block devices.
+            blocks: self.block.list.clone(),
+            /// The list of net devices.
+            net_ifaces: self.network_interface.if_list.clone(),
+            /// The Vsock device.
+            vsock: self.vsock.inner.as_ref().map(|v| v.vsock.clone()),
+        })
     }
 }
 
