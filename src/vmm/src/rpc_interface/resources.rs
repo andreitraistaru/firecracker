@@ -289,6 +289,7 @@ mod tests {
     use std::os::linux::fs::MetadataExt;
 
     use super::*;
+    use crate::builder::tests::TempFilePath;
     use crate::vstate::CpuFeaturesTemplate;
     use dumbo::MacAddr;
     use rpc_interface::boot_source::{BootConfig, BootSourceConfig};
@@ -296,7 +297,7 @@ mod tests {
     use rpc_interface::machine_config::{VmConfig, VmConfigError};
     use rpc_interface::net::{NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaces};
     use rpc_interface::rate_limiter::RateLimiterConfig;
-    use rpc_interface::vsock::tests::{default_config, TempSockFile};
+    use rpc_interface::vsock::tests::default_config;
     use utils::tempfile::TempFile;
     use vstate::VcpuConfig;
 
@@ -757,7 +758,7 @@ mod tests {
     #[test]
     fn test_set_vsock_device() {
         let mut vm_resources = default_vm_resources();
-        let tmp_sock_file = TempSockFile::new(TempFile::new().unwrap());
+        let tmp_sock_file = TempFilePath::new(TempFile::new().unwrap());
         let new_vsock_cfg = default_config(&tmp_sock_file);
         assert!(vm_resources.vsock.get().is_none());
         vm_resources

@@ -271,15 +271,10 @@ fn build_microvm_from_json(
             );
             process::exit(i32::from(vmm::FC_EXIT_CODE_BAD_CONFIGURATION));
         });
-    let vm_resources = resource_store
-        .build_resources()
-        .unwrap_or_else(|err| {
-            error!(
-                "Internal error: {:?}",
-                err
-            );
-            process::exit(i32::from(vmm::FC_EXIT_CODE_GENERIC_ERROR));
-        });
+    let vm_resources = resource_store.build_resources().unwrap_or_else(|err| {
+        error!("Internal error: {:?}", err);
+        process::exit(i32::from(vmm::FC_EXIT_CODE_GENERIC_ERROR));
+    });
     let vmm = vmm::builder::build_microvm(vm_resources, event_manager, &seccomp_filter)
         .unwrap_or_else(|err| {
             error!(

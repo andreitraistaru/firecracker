@@ -196,7 +196,7 @@ impl BlockDevices {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
 
     use super::*;
     use utils::tempfile::TempFile;
@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(block_devs.list.len(), 1);
 
         {
-            let block = block_devs.list[0].lock().unwrap();
+            let block = block_devs.list[0].block.lock().unwrap();
             assert_eq!(block.id(), &dummy_block_device.drive_id);
             assert_eq!(block.partuuid(), dummy_block_device.partuuid.as_ref());
             assert_eq!(block.is_read_only(), dummy_block_device.is_read_only);
@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(block_devs.has_root_block, true);
         assert_eq!(block_devs.list.len(), 1);
         {
-            let block = block_devs.list[0].lock().unwrap();
+            let block = block_devs.list[0].block.lock().unwrap();
             assert_eq!(block.id(), &dummy_block_device.drive_id);
             assert_eq!(block.partuuid(), dummy_block_device.partuuid.as_ref());
             assert_eq!(block.is_read_only(), dummy_block_device.is_read_only);
@@ -361,15 +361,15 @@ mod tests {
 
         let mut block_iter = block_devs.list.iter();
         assert_eq!(
-            block_iter.next().unwrap().lock().unwrap().id(),
+            block_iter.next().unwrap().block.lock().unwrap().id(),
             &root_block_device.drive_id
         );
         assert_eq!(
-            block_iter.next().unwrap().lock().unwrap().id(),
+            block_iter.next().unwrap().block.lock().unwrap().id(),
             &dummy_block_dev_2.drive_id
         );
         assert_eq!(
-            block_iter.next().unwrap().lock().unwrap().id(),
+            block_iter.next().unwrap().block.lock().unwrap().id(),
             &dummy_block_dev_3.drive_id
         );
     }
@@ -421,15 +421,15 @@ mod tests {
         // The root device should be first in the list no matter of the order in
         // which the devices were added.
         assert_eq!(
-            block_iter.next().unwrap().lock().unwrap().id(),
+            block_iter.next().unwrap().block.lock().unwrap().id(),
             &root_block_device.drive_id
         );
         assert_eq!(
-            block_iter.next().unwrap().lock().unwrap().id(),
+            block_iter.next().unwrap().block.lock().unwrap().id(),
             &dummy_block_dev_2.drive_id
         );
         assert_eq!(
-            block_iter.next().unwrap().lock().unwrap().id(),
+            block_iter.next().unwrap().block.lock().unwrap().id(),
             &dummy_block_dev_3.drive_id
         );
     }
@@ -488,7 +488,7 @@ mod tests {
             .get_index_of_drive_id(&dummy_block_device_2.drive_id)
             .unwrap();
         // Validate update was successful.
-        assert!(block_devs.list[index].lock().unwrap().is_read_only());
+        assert!(block_devs.list[index].block.lock().unwrap().is_read_only());
 
         // Update with invalid path.
         let dummy_filename_3 = String::from("test_update_3");
@@ -531,7 +531,10 @@ mod tests {
         assert!(block_devs.insert(root_block_device_new).is_ok());
         assert!(block_devs.has_root_block);
         // Verify it's been moved to the first position.
-        assert_eq!(block_devs.list[0].lock().unwrap().id(), &root_block_id);
+        assert_eq!(
+            block_devs.list[0].block.lock().unwrap().id(),
+            &root_block_id
+        );
     }
 
     #[test]
