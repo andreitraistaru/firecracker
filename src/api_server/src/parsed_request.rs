@@ -19,7 +19,7 @@ use request::net::{parse_patch_net, parse_put_net};
 use request::vsock::parse_put_vsock;
 use ApiServer;
 
-use vmm::rpc_interface::{VmmAction, VmmActionError};
+use rpc_interface::{VmmAction, VmmActionError};
 
 #[allow(clippy::large_enum_variant)]
 pub enum ParsedRequest {
@@ -230,8 +230,8 @@ mod tests {
 
     use micro_http::HttpConnection;
     use vmm::builder::StartMicrovmError;
-    use vmm::rpc_interface::machine_config::VmConfig;
-    use vmm::rpc_interface::VmmActionError;
+    use rpc_interface::machine_config::VmConfig;
+    use rpc_interface::VmmActionError;
 
     impl PartialEq for ParsedRequest {
         fn eq(&self, other: &ParsedRequest) -> bool {

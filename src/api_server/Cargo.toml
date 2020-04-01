@@ -11,6 +11,7 @@ serde_json = ">=1.0.9"
 logger = { path = "../logger" }
 micro_http = { path = "../micro_http" }
 mmds = { path = "../mmds" }
+rpc_interface = { path = "../rpc_interface" }
 seccomp = { path = "../seccomp" }
 utils = { path = "../utils" }
 vmm = { path = "../vmm" }

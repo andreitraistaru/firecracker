@@ -13,9 +13,9 @@ use polly::event_manager::{EventManager, Subscriber};
 use seccomp::BpfProgram;
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
-use vmm::rpc_interface::controllers::{PrebootApiController, RuntimeApiController};
-use vmm::rpc_interface::instance_info::InstanceInfo;
-use vmm::rpc_interface::machine_config::VmConfig;
+use rpc_interface::controllers::{PrebootApiController, RuntimeApiController};
+use rpc_interface::instance_info::InstanceInfo;
+use rpc_interface::machine_config::VmConfig;
 use vmm::Vmm;
 
 use super::FIRECRACKER_VERSION;

@@ -4,7 +4,7 @@
 use serde::{de, Deserialize};
 use std::fmt;
 
-use crate::vstate::CpuFeaturesTemplate;
+use vmm::CpuFeaturesTemplate;
 
 /// Firecracker aims to support small scale workloads only, so limit the maximum
 /// vCPUs supported.

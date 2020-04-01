@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use super::super::VmmAction;
 use logger::{Metric, METRICS};
 use request::{checked_id, Body, Error, ParsedRequest, StatusCode};
-use vmm::rpc_interface::drive::BlockDeviceConfig;
+use rpc_interface::drive::BlockDeviceConfig;
 
 struct PatchDrivePayload {
     // Leaving `fields` pub because ownership on it needs to be yielded to the

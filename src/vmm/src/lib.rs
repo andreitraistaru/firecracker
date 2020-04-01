@@ -37,8 +37,6 @@ pub mod builder;
 /// Syscalls allowed through the seccomp filter.
 pub mod default_syscalls;
 pub(crate) mod device_manager;
-/// microVM RPC API adapters and structures used to configure the VMM.
-pub mod rpc_interface;
 /// Signal handling utilities.
 pub mod signal_handler;
 mod vstate;
@@ -58,6 +56,7 @@ use device_manager::legacy::PortIODeviceManager;
 #[cfg(target_arch = "aarch64")]
 use device_manager::mmio::MMIODeviceInfo;
 use device_manager::mmio::MMIODeviceManager;
+pub use device_manager::mmio::MMIO_CFG_SPACE_OFF;
 use devices::BusDevice;
 use kernel::cmdline::Cmdline as KernelCmdline;
 use logger::{LoggerError, MetricsError, METRICS};
@@ -67,6 +66,7 @@ use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
 use utils::time::TimestampUs;
 use vm_memory::GuestMemoryMmap;
+pub use vstate::{CpuFeaturesTemplate, VcpuConfig};
 use vstate::{Vcpu, VcpuEvent, VcpuHandle, VcpuResponse, Vm};
 
 /// Success exit code.
@@ -349,7 +349,8 @@ impl Vmm {
         }
     }
 
-    fn log_boot_time(t0_ts: &TimestampUs) {
+    /// Logs the guest boot time.
+    pub fn log_boot_time(t0_ts: &TimestampUs) {
         let now_tm_us = TimestampUs::default();
 
         let boot_time_us = now_tm_us.time_us - t0_ts.time_us;

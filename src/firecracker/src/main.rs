@@ -8,6 +8,7 @@ extern crate libc;
 extern crate logger;
 extern crate mmds;
 extern crate polly;
+extern crate rpc_interface;
 extern crate seccomp;
 extern crate timerfd;
 extern crate utils;
@@ -32,9 +33,9 @@ use utils::arg_parser::{ArgParser, Argument};
 use utils::terminal::Terminal;
 use utils::validators::validate_instance_id;
 use vmm::default_syscalls::get_seccomp_filter;
-use vmm::rpc_interface::instance_info::InstanceInfo;
-use vmm::rpc_interface::logger::{init_logger, LoggerConfig, LoggerLevel};
-use vmm::rpc_interface::resources::VmResourceStore;
+use rpc_interface::instance_info::InstanceInfo;
+use rpc_interface::logger::{init_logger, LoggerConfig, LoggerLevel};
+use rpc_interface::resources::VmResourceStore;
 use vmm::signal_handler::register_signal_handlers;
 
 // The reason we place default API socket under /run is that API socket is a

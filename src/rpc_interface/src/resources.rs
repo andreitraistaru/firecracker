@@ -5,15 +5,15 @@
 
 use std::fs::File;
 
-use crate::builder::{GuestMemorySpec, VmResources, DEFAULT_KERNEL_CMDLINE};
-use rpc_interface::boot_source::{BootConfig, BootSourceConfig, BootSourceConfigError};
-use rpc_interface::drive::*;
-use rpc_interface::logger::{init_logger, LoggerConfig, LoggerConfigError};
-use rpc_interface::machine_config::{VmConfig, VmConfigError};
-use rpc_interface::metrics::{init_metrics, MetricsConfig, MetricsConfigError};
-use rpc_interface::net::*;
-use rpc_interface::vsock::*;
-use vstate::VcpuConfig;
+use crate::boot_source::{BootConfig, BootSourceConfig, BootSourceConfigError};
+use crate::drive::*;
+use crate::logger::{init_logger, LoggerConfig, LoggerConfigError};
+use crate::machine_config::{VmConfig, VmConfigError};
+use crate::metrics::{init_metrics, MetricsConfig, MetricsConfigError};
+use crate::net::*;
+use crate::vsock::*;
+use vmm::builder::{GuestMemorySpec, VmResources, DEFAULT_KERNEL_CMDLINE};
+use vmm::VcpuConfig;
 
 type Result<E> = std::result::Result<(), E>;
 
@@ -289,17 +289,16 @@ mod tests {
     use std::os::linux::fs::MetadataExt;
 
     use super::*;
-    use crate::builder::tests::TempFilePath;
-    use crate::vstate::CpuFeaturesTemplate;
+    use crate::boot_source::{BootConfig, BootSourceConfig};
+    use crate::drive::{BlockDeviceConfig, BlockDevices, DriveError};
+    use crate::machine_config::{VmConfig, VmConfigError};
+    use crate::net::{NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaces};
+    use crate::rate_limiter::RateLimiterConfig;
+    use crate::tests::TempFilePath;
+    use crate::vsock::tests::default_config;
     use dumbo::MacAddr;
-    use rpc_interface::boot_source::{BootConfig, BootSourceConfig};
-    use rpc_interface::drive::{BlockDeviceConfig, BlockDevices, DriveError};
-    use rpc_interface::machine_config::{VmConfig, VmConfigError};
-    use rpc_interface::net::{NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaces};
-    use rpc_interface::rate_limiter::RateLimiterConfig;
-    use rpc_interface::vsock::tests::default_config;
     use utils::tempfile::TempFile;
-    use vstate::VcpuConfig;
+    use vmm::{CpuFeaturesTemplate, VcpuConfig};
 
     fn default_net_cfg() -> NetworkInterfaceConfig {
         NetworkInterfaceConfig {
@@ -758,7 +757,7 @@ mod tests {
     #[test]
     fn test_set_vsock_device() {
         let mut vm_resources = default_vm_resources();
-        let tmp_sock_file = TempFilePath::new(TempFile::new().unwrap());
+        let tmp_sock_file = TempFilePath::new();
         let new_vsock_cfg = default_config(&tmp_sock_file);
         assert!(vm_resources.vsock.get().is_none());
         vm_resources

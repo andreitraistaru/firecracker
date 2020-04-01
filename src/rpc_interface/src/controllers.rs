@@ -7,21 +7,19 @@ use std::path::Path;
 use std::result;
 use std::sync::{Arc, Mutex};
 
-use crate::rpc_interface::resources::VmResourceStore;
-use crate::rpc_interface::{VmmAction, VmmActionError, VmmData};
-use crate::Vmm;
+use crate::drive::DriveError;
+use crate::machine_config::VmConfig;
+use crate::net::{NetworkInterfaceError, NetworkInterfaceUpdateConfig};
+use crate::rate_limiter::TokenBucketConfig;
+use crate::resources::VmResourceStore;
+use crate::{VmmAction, VmmActionError, VmmData};
 use arch::DeviceType;
-use builder::StartMicrovmError;
-use device_manager::mmio::MMIO_CFG_SPACE_OFF;
 use devices::virtio::{Block, MmioTransport, Net, TYPE_BLOCK, TYPE_NET};
-use logger::METRICS;
+use logger_crate::METRICS;
 use polly::event_manager::EventManager;
-use rpc_interface;
-use rpc_interface::drive::DriveError;
-use rpc_interface::machine_config::VmConfig;
-use rpc_interface::net::{NetworkInterfaceError, NetworkInterfaceUpdateConfig};
-use rpc_interface::rate_limiter::TokenBucketConfig;
 use seccomp::BpfProgram;
+use vmm::builder::StartMicrovmError;
+use vmm::{Vmm, MMIO_CFG_SPACE_OFF};
 
 /// Enables pre-boot setup and instantiation of a Firecracker VMM.
 pub struct PrebootApiController<'a> {
@@ -102,11 +100,11 @@ impl<'a> PrebootApiController<'a> {
                 .map(|_| VmmData::Empty)
                 .map_err(VmmActionError::BootSource),
             ConfigureLogger(logger_cfg) => {
-                rpc_interface::logger::init_logger(logger_cfg, &self.firecracker_version)
+                crate::logger::init_logger(logger_cfg, &self.firecracker_version)
                     .map(|_| VmmData::Empty)
                     .map_err(VmmActionError::Logger)
             }
-            ConfigureMetrics(metrics_cfg) => rpc_interface::metrics::init_metrics(metrics_cfg)
+            ConfigureMetrics(metrics_cfg) => crate::metrics::init_metrics(metrics_cfg)
                 .map(|_| VmmData::Empty)
                 .map_err(VmmActionError::Metrics),
             GetVmConfiguration => Ok(VmmData::MachineConfiguration(
@@ -132,7 +130,7 @@ impl<'a> PrebootApiController<'a> {
                 .set_vm_config(&machine_config_body)
                 .map(|_| VmmData::Empty)
                 .map_err(VmmActionError::MachineConfig),
-            StartMicroVm => crate::builder::build_microvm(
+            StartMicroVm => vmm::builder::build_microvm(
                 // FIXME: fix errors and remove unwrap.
                 self.vm_resources.build_resources().unwrap(),
                 &mut self.event_manager,
@@ -212,7 +210,7 @@ impl RuntimeApiController {
         METRICS
             .write()
             .map(|_| ())
-            .map_err(crate::Error::Metrics)
+            .map_err(vmm::Error::Metrics)
             .map_err(VmmActionError::InternalVmm)
     }
 

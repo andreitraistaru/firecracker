@@ -3,13 +3,11 @@
 
 //! Auxiliary module for configuring the logger.
 
-extern crate logger as logger_crate;
-
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
-use self::logger_crate::{Level, LOGGER};
 use super::Writer;
+use logger_crate::{Level, LOGGER};
 
 /// Enum used for setting the log level.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -139,7 +137,7 @@ mod tests {
     use utils::tempfile::TempFile;
     use utils::time::TimestampUs;
 
-    use Vmm;
+    use vmm::Vmm;
 
     #[test]
     fn test_init_logger() {

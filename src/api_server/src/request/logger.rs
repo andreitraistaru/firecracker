@@ -4,7 +4,7 @@
 use super::super::VmmAction;
 use logger::{Metric, METRICS};
 use request::{Body, Error, ParsedRequest};
-use vmm::rpc_interface::logger::LoggerConfig;
+use rpc_interface::logger::LoggerConfig;
 
 pub fn parse_put_logger(body: &Body) -> Result<ParsedRequest, Error> {
     METRICS.put_api_requests.logger_count.inc();
@@ -21,7 +21,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use vmm::rpc_interface::logger::LoggerLevel;
+    use rpc_interface::logger::LoggerLevel;
 
     #[test]
     fn test_parse_put_logger_request() {

@@ -91,8 +91,7 @@ impl VsockStore {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::builder::tests::TempFilePath;
-    use utils::tempfile::TempFile;
+    use crate::tests::TempFilePath;
 
     pub(crate) fn default_config(tmp_sock_file: &TempFilePath) -> VsockDeviceConfig {
         let vsock_dev_id = "vsock_1";
@@ -105,7 +104,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_vsock_create() {
-        let tmp_sock_file = TempFilePath::new(TempFile::new().unwrap());
+        let tmp_sock_file = TempFilePath::new();
         let vsock_config = default_config(&tmp_sock_file);
         VsockStore::create_unixsock_vsock(vsock_config).unwrap();
     }
@@ -113,7 +112,7 @@ pub(crate) mod tests {
     #[test]
     fn test_vsock_insert() {
         let mut store = VsockStore::new();
-        let tmp_sock_file = TempFilePath::new(TempFile::new().unwrap());
+        let tmp_sock_file = TempFilePath::new();
         let mut vsock_config = default_config(&tmp_sock_file);
 
         store.insert(vsock_config.clone()).unwrap();

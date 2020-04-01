@@ -1,0 +1,22 @@
+[package]
+name = "rpc_interface"
+version = "0.1.0"
+authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
+
+[dependencies]
+libc = ">=0.2.39"
+serde = ">=1.0.27"
+serde_derive = ">=1.0.27"
+serde_json = ">=1.0.9"
+
+arch = { path = "../arch" }
+devices = { path = "../devices" }
+dumbo = { path = "../dumbo" }
+kernel = { path = "../kernel" }
+logger = { path = "../logger" }
+polly = { path = "../polly" }
+rate_limiter = { path = "../rate_limiter" }
+seccomp = { path = "../seccomp" }
+utils = { path = "../utils"}
+vmm = { path = "../vmm"}
+

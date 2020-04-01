@@ -4,7 +4,7 @@
 use std::convert::TryInto;
 use std::io;
 
-use rate_limiter::{RateLimiter, TokenBucket};
+use rate_limiter_crate::{RateLimiter, TokenBucket};
 
 /// A public-facing, stateless structure, holding all the data we need to create a TokenBucket
 /// (live) object.

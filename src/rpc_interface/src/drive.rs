@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Mutex};
 
-use crate::builder::BlockDeviceWithMetadata;
-use crate::rpc_interface::rate_limiter::RateLimiterConfig;
+use crate::rate_limiter::RateLimiterConfig;
 use devices::virtio::Block;
+use vmm::builder::BlockDeviceWithMetadata;
 
 type Result<T> = result::Result<T, DriveError>;
 

@@ -9,6 +9,7 @@ extern crate serde_json;
 extern crate logger;
 extern crate micro_http;
 extern crate mmds;
+extern crate rpc_interface;
 extern crate seccomp;
 extern crate utils;
 extern crate vmm;
@@ -30,8 +31,8 @@ use mmds::data_store::Mmds;
 use parsed_request::ParsedRequest;
 use seccomp::{BpfProgram, SeccompFilter};
 use utils::eventfd::EventFd;
-use vmm::rpc_interface::instance_info::InstanceInfo;
-use vmm::rpc_interface::{VmmAction, VmmActionError, VmmData};
+use rpc_interface::instance_info::InstanceInfo;
+use rpc_interface::{VmmAction, VmmActionError, VmmData};
 
 /// Shorthand type for a request containing a boxed VmmAction.
 pub type ApiRequest = Box<VmmAction>;
@@ -281,8 +282,8 @@ mod tests {
     use micro_http::HttpConnection;
     use mmds::MMDS;
     use vmm::builder::StartMicrovmError;
-    use vmm::rpc_interface::instance_info::InstanceInfo;
-    use vmm::rpc_interface::VmmActionError;
+    use rpc_interface::instance_info::InstanceInfo;
+    use rpc_interface::VmmActionError;
 
     #[test]
     fn test_error_messages() {

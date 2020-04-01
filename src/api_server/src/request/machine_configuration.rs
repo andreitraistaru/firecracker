@@ -4,7 +4,7 @@
 use super::super::VmmAction;
 use logger::{Metric, METRICS};
 use request::{method_to_error, Body, Error, Method, ParsedRequest, StatusCode};
-use vmm::rpc_interface::machine_config::VmConfig;
+use rpc_interface::machine_config::VmConfig;
 
 pub fn parse_get_machine_config() -> Result<ParsedRequest, Error> {
     METRICS.get_api_requests.machine_cfg_count.inc();

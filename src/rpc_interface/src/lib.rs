@@ -1,6 +1,26 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! microVM RPC API adapters and structures used to configure the VMM.
+
+extern crate libc;
+extern crate serde;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde_json;
+
+extern crate arch;
+extern crate devices;
+extern crate dumbo;
+extern crate kernel;
+#[cfg_attr(test, macro_use)]
+extern crate logger as logger_crate;
+extern crate polly;
+extern crate rate_limiter as rate_limiter_crate;
+extern crate seccomp;
+extern crate utils;
+extern crate vmm;
+
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -87,7 +107,7 @@ pub enum VmmActionError {
     /// failed because of bad user input.
     DriveConfig(drive::DriveError),
     /// Internal Vmm error.
-    InternalVmm(crate::Error),
+    InternalVmm(vmm::Error),
     /// The action `ConfigureLogger` failed because of bad user input.
     Logger(logger::LoggerConfigError),
     /// One of the actions `GetVmConfiguration` or `SetVmConfiguration` failed because of bad input.
@@ -101,7 +121,7 @@ pub enum VmmActionError {
     /// The requested operation is not supported before starting the microVM.
     OperationNotSupportedPreBoot,
     /// The action `StartMicroVm` failed because of an internal error.
-    StartMicrovm(super::builder::StartMicrovmError),
+    StartMicrovm(vmm::builder::StartMicrovmError),
     /// The action `SetVsockDevice` failed because of bad user input.
     VsockConfig(vsock::VsockConfigError),
 }
@@ -194,12 +214,33 @@ impl io::Write for Writer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::io::Write;
 
     use utils::tempfile::TempFile;
 
     use super::*;
+
+    /// Any file at inner path will be removed when the scope ends.
+    pub struct TempFilePath {
+        path: String,
+    }
+    impl TempFilePath {
+        pub fn new() -> Self {
+            let tmp_file = TempFile::new().unwrap();
+            TempFilePath {
+                path: String::from(tmp_file.as_path().to_str().unwrap()),
+            }
+        }
+        pub fn path(&self) -> &String {
+            &self.path
+        }
+    }
+    impl Drop for TempFilePath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 
     #[test]
     fn test_log_writer() {
