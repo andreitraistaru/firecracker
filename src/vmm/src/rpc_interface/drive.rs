@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Mutex};
 
-use crate::builder::BlockDevicesList;
+use crate::builder::BlockDeviceWithMetadata;
 use crate::rpc_interface::rate_limiter::RateLimiterConfig;
 use devices::virtio::Block;
 
@@ -84,74 +84,80 @@ pub struct BlockDeviceConfig {
 
 /// Wrapper for the collection that holds all the Block Devices
 #[derive(Default)]
-pub struct BlockDevices(pub(crate) BlockDevicesList);
+pub struct BlockDevices {
+    /// The list of block devices.
+    pub list: VecDeque<BlockDeviceWithMetadata>,
+    /// Index of the root block device, if any.
+    pub has_root_block: bool,
+}
 
 impl BlockDevices {
     /// Constructor for BlockDevices. It initializes an empty LinkedList.
     pub fn new() -> BlockDevices {
-        Self(BlockDevicesList {
-            list: VecDeque::<Arc<Mutex<Block>>>::new(),
+        Self {
+            list: VecDeque::<BlockDeviceWithMetadata>::new(),
             has_root_block: false,
-        })
+        }
     }
 
     /// Gets the index of the device with the specified `drive_id` if it exists in the list.
     pub fn get_index_of_drive_id(&self, drive_id: &str) -> Option<usize> {
-        self.0
-            .list
+        self.list
             .iter()
-            .position(|b| b.lock().unwrap().id().eq(drive_id))
+            .position(|b| b.block.lock().unwrap().id().eq(drive_id))
     }
 
     /// Inserts a `Block` in the block devices list using the specified configuration.
     /// If a block with the same id already exists, it will overwrite it.
     /// Inserting a secondary root block device will fail.
     pub fn insert(&mut self, config: BlockDeviceConfig) -> Result<()> {
-        let is_root_device = config.is_root_device;
         let position = self.get_index_of_drive_id(&config.drive_id);
-        let block_dev = Arc::new(Mutex::new(Self::create_block(config)?));
+        let new_block = BlockDeviceWithMetadata {
+            is_root_block: config.is_root_device,
+            block: Arc::new(Mutex::new(Self::create_block(config)?)),
+        };
         // If the id of the drive already exists in the list, the operation is update/overwrite.
         match position {
             // New block device.
             None => {
                 // Check whether the Device Config belongs to a root device,
                 // we need to satisfy the condition by which a VMM can only have one root device.
-                if is_root_device {
-                    if self.0.has_root_block {
+                if new_block.is_root_block {
+                    if self.has_root_block {
                         return Err(DriveError::RootBlockDeviceAlreadyAdded);
                     } else {
                         // Root Device should be the first in the list whether or not PARTUUID is
                         // specified in order to avoid bugs in case of switching from partuuid boot
                         // scenarios to /dev/vda boot type.
-                        self.0.list.push_front(block_dev);
-                        self.0.has_root_block = true;
+                        self.list.push_front(new_block);
+                        self.has_root_block = true;
                     }
                 } else {
-                    self.0.list.push_back(block_dev);
+                    self.list.push_back(new_block);
                 }
             }
             // Update existing block device.
             Some(mut index) => {
                 // Check if the root block device is being updated.
-                if index == 0 && self.0.has_root_block {
+                if index == 0 && self.has_root_block {
                     // Set root flag according to the updated block config.
-                    self.0.has_root_block = is_root_device;
-                } else if is_root_device {
+                    self.has_root_block = new_block.is_root_block;
+                } else if new_block.is_root_block {
                     // Check if a second root block device is being added.
-                    if self.0.has_root_block {
+                    if self.has_root_block {
                         return Err(DriveError::RootBlockDeviceAlreadyAdded);
                     } else {
                         // One of the non-root blocks is becoming root.
-                        self.0.has_root_block = true;
+                        self.has_root_block = true;
 
                         // Make sure the root device is on the first position.
-                        self.0.list.swap(0, index);
+                        self.list.swap(0, index);
                         // Block config to be updated has moved to first position.
                         index = 0;
                     }
                 }
                 // Update the slot with the new block.
-                self.0.list[index] = block_dev;
+                self.list[index] = new_block;
             }
         }
         Ok(())

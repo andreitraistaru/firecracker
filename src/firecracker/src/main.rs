@@ -271,7 +271,7 @@ fn build_microvm_from_json(
             );
             process::exit(i32::from(vmm::FC_EXIT_CODE_BAD_CONFIGURATION));
         });
-    let vmm = vmm::builder::build_microvm(&vm_resources, event_manager, &seccomp_filter)
+    let vmm = vmm::builder::build_microvm(vm_resources.into(), event_manager, &seccomp_filter)
         .unwrap_or_else(|err| {
             error!(
                 "Building VMM configured from cmdline json failed: {:?}",
@@ -281,7 +281,7 @@ fn build_microvm_from_json(
         });
     info!("Successfully started microvm that was configured from one single json");
 
-    (vm_resources, vmm)
+    (VmResourceStore::default(), vmm)
 }
 
 fn run_without_api(seccomp_filter: BpfProgram, config_json: Option<String>) {

@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
@@ -230,14 +231,13 @@ pub enum GuestMemorySpec {
     Initialized(GuestMemoryMmap),
 }
 
-/// Wrapper list of Block Devices, needed to also keep meta-information
-/// about the block devices like whether a root block is present.
-#[derive(Default)]
-pub struct BlockDevicesList {
+/// Wrapper over a Block Device, needed to also keep meta-information
+/// about the block devices like whether it is a root block.
+pub struct BlockDeviceWithMetadata {
     /// The list of block devices.
-    pub list: VecDeque<Arc<Mutex<Block>>>,
-    /// Index of the root block device, if any.
-    pub has_root_block: bool,
+    pub block: Arc<Mutex<Block>>,
+    /// Whether this is a root block device.
+    pub is_root_block: bool,
 }
 
 /// A data structure that defines resources to be used by a microVM.
@@ -251,12 +251,12 @@ pub struct VmResources {
     /// The kernel commandline validated against correctness.
     pub cmdline: kernel::cmdline::Cmdline,
     /// The descriptor to a kernel file, if one should be loaded into memory.
-    pub kernel_file: Option<std::fs::File>,
+    pub kernel_file: Option<File>,
     /// The descriptor to the initrd file, if one should be loaded into memory.
-    pub initrd_file: Option<std::fs::File>,
+    pub initrd_file: Option<File>,
 
     /// The list of block devices.
-    pub blocks: BlockDevicesList,
+    pub blocks: VecDeque<BlockDeviceWithMetadata>,
     /// The list of net devices.
     pub net_ifaces: Vec<Arc<Mutex<Net>>>,
     /// The Vsock device.
@@ -271,30 +271,28 @@ pub struct VmResources {
 /// An `Arc` reference of the built `Vmm` is also plugged in the `EventManager`, while another
 /// is returned.
 pub fn build_microvm(
-    vm_resources: &crate::rpc_interface::resources::VmResourceStore,
+    vm_resources: VmResources,
     event_manager: &mut EventManager,
     seccomp_filter: BpfProgramRef,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
-    let boot_config = vm_resources
-        .boot_source()
-        .ok_or(StartMicrovmError::MissingKernelConfig)?;
-
     // Timestamp for measuring microVM boot duration.
     let request_ts = TimestampUs::default();
 
-    let guest_memory = create_guest_memory(
-        vm_resources
-            .vm_config()
-            .mem_size_mib
-            .ok_or(StartMicrovmError::MissingMemSizeConfig)?,
-    )?;
-    let vcpu_config = vm_resources.vcpu_config();
-    let entry_addr = load_kernel(boot_config, &guest_memory)?;
-    let initrd = load_initrd_from_config(boot_config, &guest_memory)?;
+    let kernel_file = vm_resources
+        .kernel_file
+        .ok_or(StartMicrovmError::MissingKernelConfig)?;
+    let guest_mem = match vm_resources.mem {
+        GuestMemorySpec::SizeInMib(size) => create_guest_memory_with_size(size)?,
+        _ => return Err(StartMicrovmError::MissingMemSizeConfig),
+    };
+
+    let vcpu_config = vm_resources.vcpu_config;
+    let entry_addr = load_kernel(kernel_file, &guest_mem)?;
+    let initrd = load_initrd_if_present(vm_resources.initrd_file, &guest_mem)?;
     // Clone the command-line so that a failed boot doesn't pollute the original.
     #[allow(unused_mut)]
-    let mut kernel_cmdline = boot_config.cmdline.clone();
-    let mut vm = setup_kvm_vm(&guest_memory)?;
+    let mut kernel_cmdline = vm_resources.cmdline;
+    let mut vm = setup_kvm_vm(&guest_mem)?;
 
     // On x86_64 always create a serial device,
     // while on aarch64 only create it if 'console=' is specified in the boot args.
@@ -347,7 +345,7 @@ pub fn build_microvm(
         vcpus = create_vcpus_x86_64(
             &vm,
             &vcpu_config,
-            &guest_memory,
+            &guest_mem,
             entry_addr,
             request_ts,
             &pio_device_manager.io_bus,
@@ -365,7 +363,7 @@ pub fn build_microvm(
         vcpus = create_vcpus_aarch64(
             &vm,
             &vcpu_config,
-            &guest_memory,
+            &guest_mem,
             entry_addr,
             request_ts,
             &exit_evt,
@@ -383,7 +381,7 @@ pub fn build_microvm(
 
     let mut vmm = Vmm {
         events_observer: Some(Box::new(SerialStdin::get())),
-        guest_memory,
+        guest_memory: guest_mem,
         kernel_cmdline,
         vcpus_handles: Vec::new(),
         exit_evt,
@@ -393,9 +391,9 @@ pub fn build_microvm(
         pio_device_manager,
     };
 
-    attach_block_devices(&mut vmm, &vm_resources.block, event_manager)?;
-    attach_net_devices(&mut vmm, &vm_resources.network_interface, event_manager)?;
-    if let Some(vsock) = vm_resources.vsock.get() {
+    attach_block_devices(&mut vmm, vm_resources.blocks, event_manager)?;
+    attach_net_devices(&mut vmm, vm_resources.net_ifaces, event_manager)?;
+    if let Some(vsock) = vm_resources.vsock {
         attach_unixsock_vsock_device(&mut vmm, vsock, event_manager)?;
     }
 
@@ -419,7 +417,7 @@ pub fn build_microvm(
 }
 
 /// Creates GuestMemory of `mem_size_mib` MiB in size.
-pub fn create_guest_memory(
+pub fn create_guest_memory_with_size(
     mem_size_mib: usize,
 ) -> std::result::Result<GuestMemoryMmap, StartMicrovmError> {
     let mem_size = mem_size_mib << 20;
@@ -430,13 +428,13 @@ pub fn create_guest_memory(
 }
 
 fn load_kernel(
-    boot_config: &BootConfig,
+    mut kernel_file: File,
     guest_memory: &GuestMemoryMmap,
 ) -> std::result::Result<GuestAddress, StartMicrovmError> {
-    let mut kernel_file = boot_config
-        .kernel_file
-        .try_clone()
-        .map_err(|e| StartMicrovmError::Internal(Error::KernelFile(e)))?;
+    // Make a clone so that we don't mutate the original file cursor.
+    // let mut kernel_file = kernel_file
+    //     .try_clone()
+    //     .map_err(|e| StartMicrovmError::Internal(Error::KernelFile(e)))?;
 
     let entry_addr =
         kernel::loader::load_kernel(guest_memory, &mut kernel_file, arch::get_kernel_start())
@@ -445,16 +443,16 @@ fn load_kernel(
     Ok(entry_addr)
 }
 
-fn load_initrd_from_config(
-    boot_cfg: &BootConfig,
+fn load_initrd_if_present(
+    mut initrd_file: Option<File>,
     vm_memory: &GuestMemoryMmap,
 ) -> std::result::Result<Option<InitrdConfig>, StartMicrovmError> {
     use self::StartMicrovmError::InitrdRead;
 
-    Ok(match &boot_cfg.initrd_file {
-        Some(f) => Some(load_initrd(
+    Ok(match initrd_file {
+        Some(mut f) => Some(load_initrd(
             vm_memory,
-            &mut f.try_clone().map_err(InitrdRead)?,
+            &mut f,
         )?),
         None => None,
     })
@@ -695,13 +693,14 @@ fn attach_mmio_device(
 
 fn attach_block_devices(
     vmm: &mut Vmm,
-    blocks: &BlockDevices,
+    blocks: VecDeque<BlockDeviceWithMetadata>,
     event_manager: &mut EventManager,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
-    for (idx, block) in blocks.0.list.iter().enumerate() {
-        if blocks.0.has_root_block && idx == 0 {
+    for b in blocks.iter() {
+        let block = &b.block;
+        if b.is_root_block {
             let kernel_cmdline = &mut vmm.kernel_cmdline;
 
             let locked = block.lock().unwrap();
@@ -736,7 +735,7 @@ fn attach_block_devices(
 
 fn attach_net_devices(
     vmm: &mut Vmm,
-    network_ifaces: &NetworkInterfaces,
+    network_ifaces: Vec<Arc<Mutex<Net>>>,
     event_manager: &mut EventManager,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
@@ -761,7 +760,7 @@ fn attach_net_devices(
 
 fn attach_unixsock_vsock_device(
     vmm: &mut Vmm,
-    unix_vsock: &Arc<Mutex<Vsock<VsockUnixBackend>>>,
+    unix_vsock: Arc<Mutex<Vsock<VsockUnixBackend>>>,
     event_manager: &mut EventManager,
 ) -> std::result::Result<(), StartMicrovmError> {
     use self::StartMicrovmError::*;
@@ -784,8 +783,8 @@ fn attach_unixsock_vsock_device(
 
 #[cfg(test)]
 pub mod tests {
-    use std::fs::File;
     use std::io::Cursor;
+    use File;
 
     use super::*;
     use arch::DeviceType;

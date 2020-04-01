@@ -98,7 +98,7 @@ impl Into<VmResources> for VmResourceStore {
             initrd_file,
 
             /// The list of block devices.
-            blocks: self.block.0,
+            blocks: self.block.list,
             /// The list of net devices.
             net_ifaces: self.network_interface.if_list,
             /// The Vsock device.
