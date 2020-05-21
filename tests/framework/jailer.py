@@ -179,10 +179,23 @@ class JailerContext:
         if self.netns:
             utils.run_cmd('ip netns add {}'.format(self.netns))
 
-    def cleanup(self):
+    def cleanup(self, reuse_jail=False):
         """Clean up this jailer context."""
         # pylint: disable=subprocess-run-check
-        if self.jailer_id:
+        # When we want to reuse the jail, the only resources that get removed
+        # are the ones that firecracker creates (i.e api socket dev and tmp
+        # folders).
+        if reuse_jail:
+            os.remove(self.api_socket_path())
+            shutil.rmtree(os.path.join(
+                self.chroot_path(),
+                "dev"
+            ), ignore_errors=True)
+            shutil.rmtree(os.path.join(
+                self.chroot_path(),
+                "tmp"
+            ), ignore_errors=True)
+        else:
             shutil.rmtree(self.chroot_base_with_id(), ignore_errors=True)
 
         if self.netns:

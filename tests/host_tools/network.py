@@ -300,13 +300,18 @@ class Tap:
         namespace.
         """
         utils.run_cmd('ip tuntap add mode tap name ' + name)
-        utils.run_cmd('ip link set {} netns {}'.format(name, netns))
-        if ip:
-            utils.run_cmd('ip netns exec {} ifconfig {} {} up'.format(
-                netns,
-                name,
-                ip
-            ))
+
+        if netns:
+            utils.run_cmd('ip link set {} netns {}'.format(name, netns))
+            if ip:
+                utils.run_cmd('ip netns exec {} ifconfig {} {} up'.format(
+                    netns,
+                    name,
+                    ip
+                ))
+        else:
+            if ip:
+                utils.run_cmd('ifconfig {} {} up'.format(name, ip))
         self._name = name
         self._netns = netns
 
@@ -323,17 +328,27 @@ class Tap:
     def __del__(self):
         """Destructor doing tap interface clean up."""
         # pylint: disable=subprocess-run-check
-        _ = utils.run_cmd(
-            'ip netns exec {} ip link set {} down'.format(
-                self.netns,
-                self.name
+        if self.netns:
+            _ = utils.run_cmd(
+                'ip netns exec {} ip link set {} down'.format(
+                    self.netns,
+                    self.name
+                )
             )
-        )
-        _ = utils.run_cmd(
-            'ip netns exec {} ip link delete {}'.format(self.netns, self.name))
-        _ = utils.run_cmd(
-            'ip netns exec {} ip tuntap del mode tap name {}'.format(
-                self.netns,
-                self.name
+            _ = utils.run_cmd(
+                'ip netns exec {} ip link delete {}'
+                .format(self.netns, self.name)
             )
-        )
+            _ = utils.run_cmd(
+                'ip netns exec {} ip tuntap del mode tap name {}'.format(
+                    self.netns,
+                    self.name
+                )
+            )
+        else:
+            _ = utils.run_cmd('ip link set {} down'.format(self.name))
+            _ = utils.run_cmd('ip link delete {}'.format(self.name))
+            _ = utils.run_cmd(
+                'ip tuntap del mode tap name {}'
+                .format(self.name)
+            )

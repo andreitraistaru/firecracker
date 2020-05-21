@@ -17,6 +17,7 @@ from queue import Queue
 import re
 import select
 import time
+from tempfile import NamedTemporaryFile
 
 from retry import retry
 from retry.api import retry_call
@@ -30,7 +31,7 @@ from framework.defs import MICROVM_KERNEL_RELPATH, MICROVM_FSFILES_RELPATH
 from framework.http import Session
 from framework.jailer import JailerContext
 from framework.resources import Actions, BootSource, Drive, Logger, MMDS, \
-    MachineConfigure, Metrics, Network, Vm, Vsock
+    MachineConfigure, Metrics, Network, SnapshotCreate, SnapshotLoad, Vm, Vsock
 
 LOG = logging.getLogger("microvm")
 
@@ -99,10 +100,12 @@ class Microvm:
         self.boot = None
         self.drive = None
         self.logger = None
+        self.machine_cfg = None
         self.metrics = None
         self.mmds = None
         self.network = None
-        self.machine_cfg = None
+        self.snapshot_create = None
+        self.snapshot_load = None
         self.vm = None
         self.vsock = None
 
@@ -268,6 +271,15 @@ class Microvm:
         """Get the jailed path to a resource."""
         return self.jailer.jailed_path(path, create=False)
 
+    def tmp_path(self):
+        """Generate a temporary file name inside the jail."""
+        tmp_file = NamedTemporaryFile()
+        tmp_path = self.get_jailed_resource(
+            os.path.basename(tmp_file.name))
+        # The file should be deleted when closed.
+        tmp_file.close()
+        return tmp_path
+
     def setup(self):
         """Create a microvm associated folder on the host.
 
@@ -297,13 +309,8 @@ class Microvm:
         os.makedirs(self._kernel_path, exist_ok=True)
         os.makedirs(self._fsfiles_path, exist_ok=True)
 
-    def spawn(self, create_logger=True):
-        """Start a microVM as a daemon or in a screen session."""
-        # pylint: disable=subprocess-run-check
-        self._jailer.setup()
-        self._api_socket = self._jailer.api_socket_path()
-        self._api_session = Session()
-
+    def init_resources(self, create_logger):
+        """Initialize microVM resources."""
         self.actions = Actions(self._api_socket, self._api_session)
         self.boot = BootSource(self._api_socket, self._api_session)
         self.drive = Drive(self._api_socket, self._api_session)
@@ -315,6 +322,14 @@ class Microvm:
         self.metrics = Metrics(self._api_socket, self._api_session)
         self.mmds = MMDS(self._api_socket, self._api_session)
         self.network = Network(self._api_socket, self._api_session)
+        self.snapshot_create = SnapshotCreate(
+            self._api_socket,
+            self._api_session
+        )
+        self.snapshot_load = SnapshotLoad(
+            self._api_socket,
+            self._api_session
+        )
         self.vm = Vm(self._api_socket, self._api_session)
         self.vsock = Vsock(self._api_socket, self._api_session)
 
@@ -328,6 +343,15 @@ class Microvm:
             self.jailer.extra_args.update({'log-path': 'log_fifo',
                                            'level': 'Info'})
             self.start_console_logger(log_fifo)
+
+    def spawn(self, create_logger=True):
+        """Start a microVM as a daemon or in a screen session."""
+        # pylint: disable=subprocess-run-check
+        self._jailer.setup()
+        self._api_socket = self._jailer.api_socket_path()
+        self._api_session = Session()
+
+        self.init_resources(create_logger)
 
         jailer_param_list = self._jailer.construct_param_list()
 
@@ -551,6 +575,48 @@ class Microvm:
         """
         response = self.actions.put(action_type='InstanceStart')
         assert self._api_session.is_status_no_content(response.status_code)
+
+    def disable_netns(self):
+        """Disable network namespaces functionality, to use with cloning."""
+        # Cloning and network namespaces don't work well together yet.
+        self.jailer.netns = None
+        self.ssh_config['netns_file_path'] = None
+
+    def pause_to_snapshot(self, mem_file_path=None, snapshot_path=None):
+        """Pauses the microVM, and creates snapshot.
+
+        This function validates that the microVM pauses successfully and
+        returns the name of the snapshot files.
+        """
+        response = self.vm.patch(state='Paused')
+        assert self.api_session.is_status_no_content(response.status_code)
+
+        if not mem_file_path:
+            mem_file_path = self.tmp_path()
+        if not snapshot_path:
+            snapshot_path = self.tmp_path()
+        response = self.snapshot_create.put(mem_file_path=mem_file_path,
+                                            snapshot_path=snapshot_path)
+        assert self.api_session.is_status_no_content(response.status_code)
+        return mem_file_path, snapshot_path
+
+    def resume_from_snapshot(self, mem_file_path, snapshot_path):
+        """Resume snapshotted microVM in a new Firecracker process.
+
+        Starts a new Firecracker process, loads a microVM from snapshot
+        and resumes it.
+
+        This function validates that resuming works.
+        """
+        self.jailer.cleanup(reuse_jail=True)
+        self.spawn(create_logger=False)
+
+        response = self.snapshot_load.put(mem_file_path=mem_file_path,
+                                          snapshot_path=snapshot_path)
+        assert self.api_session.is_status_no_content(response.status_code)
+
+        response = self.vm.patch(state='Resumed')
+        assert self.api_session.is_status_no_content(response.status_code)
 
     def start_console_logger(self, log_fifo):
         """
