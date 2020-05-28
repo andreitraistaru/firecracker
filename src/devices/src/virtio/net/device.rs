@@ -23,7 +23,7 @@ use std::io::Write;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::{cmp, io, mem, result};
+use std::{cmp, mem, result};
 use utils::eventfd::EventFd;
 use utils::net::Tap;
 use virtio_gen::virtio_net::{
@@ -86,10 +86,18 @@ pub struct Net {
     pub(crate) rx_rate_limiter: RateLimiter,
     pub(crate) tx_rate_limiter: RateLimiter,
 
-    rx_deferred_frame: bool,
     rx_deferred_irqs: bool,
 
-    rx_bytes_read: usize,
+    // This says how many bytes of a pending, unprocessed frame are buffered in `frame_buf`.
+    // Only `self.read_from_mmds_or_tap()` should mutate this member in order to
+    // keep logic contained.
+    rx_buffered_bytes: usize,
+    // Buffer for pending frames.
+    // For performance reasons we keep the buffer in memory, even when there's no pending frame.
+    // The logic that ensures we only process valid data in this buffer resides in
+    // `self.process_rx()`.
+    // Only `self.read_from_mmds_or_tap()` should mutate this member in order to
+    // keep logic contained.
     rx_frame_buf: [u8; MAX_BUFFER_SIZE],
 
     tx_iovec: Vec<(GuestAddress, usize)>,
@@ -170,9 +178,8 @@ impl Net {
             queue_evts,
             rx_rate_limiter,
             tx_rate_limiter,
-            rx_deferred_frame: false,
             rx_deferred_irqs: false,
-            rx_bytes_read: 0,
+            rx_buffered_bytes: 0,
             rx_frame_buf: [0u8; MAX_BUFFER_SIZE],
             tx_frame_buf: [0u8; MAX_BUFFER_SIZE],
             tx_iovec: Vec::with_capacity(QUEUE_SIZE as usize),
@@ -216,8 +223,11 @@ impl Net {
 
     // Attempts to copy a single frame into the guest if there is enough
     // rate limiting budget.
+    // The caller of this function must guarantee that `self.rx_frame_buf` contains
+    // a valid frame of `frame_len` size.
+    //
     // Returns true on successful frame delivery.
-    fn rate_limited_rx_single_frame(&mut self) -> bool {
+    fn rate_limited_rx_single_frame(&mut self, frame_len: usize) -> bool {
         // If limiter.consume() fails it means there is no more TokenType::Ops
         // budget and rate limiting is in effect.
         if !self.rx_rate_limiter.consume(1, TokenType::Ops) {
@@ -227,7 +237,7 @@ impl Net {
         // budget and rate limiting is in effect.
         if !self
             .rx_rate_limiter
-            .consume(self.rx_bytes_read as u64, TokenType::Bytes)
+            .consume(frame_len as u64, TokenType::Bytes)
         {
             // revert the OPS consume()
             self.rx_rate_limiter.manual_replenish(1, TokenType::Ops);
@@ -235,7 +245,7 @@ impl Net {
         }
 
         // Attempt frame delivery.
-        let success = self.rx_single_frame();
+        let success = self.rx_single_frame(frame_len);
 
         // Undo the tokens consumption if guest delivery failed.
         if !success {
@@ -243,15 +253,18 @@ impl Net {
             self.rx_rate_limiter.manual_replenish(1, TokenType::Ops);
             // revert the BYTES consume()
             self.rx_rate_limiter
-                .manual_replenish(self.rx_bytes_read as u64, TokenType::Bytes);
+                .manual_replenish(frame_len as u64, TokenType::Bytes);
         }
         success
     }
 
-    // Copies a single frame from `self.rx_frame_buf` into the guest. Returns true
-    // if a buffer was used, and false if the frame must be deferred until a buffer
-    // is made available by the driver.
-    fn rx_single_frame(&mut self) -> bool {
+    // Copies a single frame from `self.rx_frame_buf` into the guest.
+    // The caller of this function must guarantee that `self.rx_frame_buf` contains
+    // a valid frame of `frame_len` size.
+    //
+    // Returns true if the frame was sent, and false if the frame must be deferred until a
+    // buffer is made available by the driver.
+    fn rx_single_frame(&mut self, frame_len: usize) -> bool {
         let mem = match self.device_state {
             DeviceState::Activated(ref mem) => mem,
             // This should never happen, it's been already validated in the event handler.
@@ -276,7 +289,7 @@ impl Net {
                         break;
                     }
 
-                    let limit = cmp::min(write_count + desc.len as usize, self.rx_bytes_read);
+                    let limit = cmp::min(write_count + desc.len as usize, frame_len);
                     let source_slice = &self.rx_frame_buf[write_count..limit];
                     let write_result = mem.write_slice(source_slice, desc.addr);
 
@@ -295,7 +308,7 @@ impl Net {
                         }
                     };
 
-                    if write_count >= self.rx_bytes_read {
+                    if write_count >= frame_len {
                         break;
                     }
                     next_desc = desc.next_descriptor();
@@ -313,7 +326,7 @@ impl Net {
         // Mark that we have at least one pending packet and we need to interrupt the guest.
         self.rx_deferred_irqs = true;
 
-        if write_count >= self.rx_bytes_read {
+        if write_count >= frame_len {
             METRICS.net.rx_bytes_count.add(write_count);
             METRICS.net.rx_packets_count.inc();
             true
@@ -373,8 +386,14 @@ impl Net {
         false
     }
 
+    // Function reads new packet in `self.rx_frame_buf` and always updates `self.rx_buffered_bytes`
+    // to the length of the newly read packet.
+    // In case no new packet is read, `self.rx_buffered_bytes` is set to zero.
+    //
     // We currently prioritize packets from the MMDS over regular network packets.
-    fn read_from_mmds_or_tap(&mut self) -> io::Result<usize> {
+    fn read_from_mmds_or_tap(&mut self) -> result::Result<(), DeviceError> {
+        self.rx_buffered_bytes = 0;
+
         if let Some(ns) = self.mmds_ns.as_mut() {
             if let Some(len) = ns.write_next_frame(frame_bytes_from_buf_mut(&mut self.rx_frame_buf))
             {
@@ -382,62 +401,55 @@ impl Net {
                 METRICS.mmds.tx_frames.inc();
                 METRICS.mmds.tx_bytes.add(len);
                 init_vnet_hdr(&mut self.rx_frame_buf);
-                return Ok(vnet_hdr_len() + len);
+                self.rx_buffered_bytes = vnet_hdr_len() + len;
+                return Ok(());
             }
         }
 
-        self.read_tap()
+        match self.read_tap() {
+            Ok(count) => {
+                METRICS.net.rx_count.inc();
+                self.rx_buffered_bytes = count;
+                Ok(())
+            }
+            Err(e) => {
+                // The tap device is non-blocking, so any error aside from EAGAIN is
+                // unexpected.
+                match e.raw_os_error() {
+                    Some(err) if err == EAGAIN => Ok(()),
+                    _ => {
+                        error!("Failed to read tap: {:?}", e);
+                        METRICS.net.rx_fails.inc();
+                        Err(DeviceError::FailedReadTap)
+                    }
+                }
+            }
+        }
     }
 
     fn process_rx(&mut self) -> result::Result<(), DeviceError> {
+        // If there is no currently buffered frame, read one from MMDS or the TAP.
+        if self.rx_buffered_bytes == 0 {
+            self.read_from_mmds_or_tap()?;
+        }
         // Read as many frames as possible.
         loop {
-            match self.read_from_mmds_or_tap() {
-                Ok(count) => {
-                    self.rx_bytes_read = count;
-                    METRICS.net.rx_count.inc();
-                    if !self.rate_limited_rx_single_frame() {
-                        self.rx_deferred_frame = true;
-                        break;
-                    }
-                }
-                Err(e) => {
-                    // The tap device is non-blocking, so any error aside from EAGAIN is
-                    // unexpected.
-                    match e.raw_os_error() {
-                        Some(err) if err == EAGAIN => (),
-                        _ => {
-                            error!("Failed to read tap: {:?}", e);
-                            METRICS.net.rx_fails.inc();
-                            return Err(DeviceError::FailedReadTap);
-                        }
-                    };
-                    break;
-                }
+            // No new packets available.
+            if self.rx_buffered_bytes == 0 {
+                break;
             }
+            // Process buffered frame.
+            if !self.rate_limited_rx_single_frame(self.rx_buffered_bytes) {
+                // Break if processing failed.
+                break;
+            }
+            // Process was successful, try to read the next frame.
+            self.read_from_mmds_or_tap()?;
         }
 
         if self.rx_deferred_irqs {
             self.rx_deferred_irqs = false;
             self.signal_used_queue()
-        } else {
-            Ok(())
-        }
-    }
-
-    fn resume_rx(&mut self) -> result::Result<(), DeviceError> {
-        if self.rx_deferred_frame {
-            if self.rate_limited_rx_single_frame() {
-                self.rx_deferred_frame = false;
-                // process_rx() was interrupted possibly before consuming all
-                // packets in the tap; try continuing now.
-                self.process_rx()
-            } else if self.rx_deferred_irqs {
-                self.rx_deferred_irqs = false;
-                self.signal_used_queue()
-            } else {
-                Ok(())
-            }
         } else {
             Ok(())
         }
@@ -529,8 +541,7 @@ impl Net {
                 &self.tx_frame_buf[..read_count],
                 &mut self.tap,
                 self.guest_mac,
-            ) && !self.rx_deferred_frame
-            {
+            ) {
                 // MMDS consumed this frame/request, let's also try to process the response.
                 process_rx_for_mmds = true;
             }
@@ -566,7 +577,7 @@ impl Net {
     }
 
     #[cfg(not(test))]
-    fn read_tap(&mut self) -> io::Result<usize> {
+    fn read_tap(&mut self) -> std::io::Result<usize> {
         self.tap.read(&mut self.rx_frame_buf)
     }
 
@@ -574,13 +585,12 @@ impl Net {
         METRICS.net.rx_queue_event_count.inc();
 
         if let Err(e) = self.queue_evts[RX_INDEX].read() {
-            // rate limiters present but with _very high_ allowed rate
             error!("Failed to get rx queue event: {:?}", e);
             METRICS.net.event_fails.inc();
         } else {
             // If the limiter is not blocked, resume the receiving of bytes.
             if !self.rx_rate_limiter.is_blocked() {
-                self.resume_rx().unwrap_or_else(report_net_event_fail);
+                self.process_rx().unwrap_or_else(report_net_event_fail);
             }
         }
     }
@@ -591,30 +601,17 @@ impl Net {
             // This should never happen, it's been already validated in the event handler.
             DeviceState::Inactive => unreachable!(),
         };
+
         METRICS.net.rx_tap_event_count.inc();
-        if self.queues[RX_INDEX].is_empty(mem) {
+        // If there's no more space in the queue and we already have a buffered
+        // pending frame, don't read any more from the TAP.
+        if self.queues[RX_INDEX].is_empty(mem) && self.rx_buffered_bytes != 0 {
             METRICS.net.no_rx_avail_buffer.inc();
             return;
         }
 
-        // While limiter is blocked, don't process any more incoming.
-        if self.rx_rate_limiter.is_blocked() {
-            return;
-        }
-
-        if self.rx_deferred_frame
-        // Process a deferred frame first if available. Don't read from tap again
-        // until we manage to receive this deferred frame.
-        {
-            if self.rate_limited_rx_single_frame() {
-                self.rx_deferred_frame = false;
-                self.process_rx().unwrap_or_else(report_net_event_fail);
-            } else if self.rx_deferred_irqs {
-                self.rx_deferred_irqs = false;
-                self.signal_used_queue()
-                    .unwrap_or_else(report_net_event_fail);
-            }
-        } else {
+        // If the limiter is not blocked, process incoming.
+        if !self.rx_rate_limiter.is_blocked() {
             self.process_rx().unwrap_or_else(report_net_event_fail);
         }
     }
@@ -624,9 +621,8 @@ impl Net {
         if let Err(e) = self.queue_evts[TX_INDEX].read() {
             error!("Failed to get tx queue event: {:?}", e);
             METRICS.net.event_fails.inc();
-        } else if !self.tx_rate_limiter.is_blocked()
-        // If the limiter is not blocked, continue transmitting bytes.
-        {
+        } else if !self.tx_rate_limiter.is_blocked() {
+            // If the limiter is not blocked, continue transmitting bytes.
             self.process_tx().unwrap_or_else(report_net_event_fail);
         }
     }
@@ -639,7 +635,7 @@ impl Net {
         match self.rx_rate_limiter.event_handler() {
             Ok(_) => {
                 // There might be enough budget now to receive the frame.
-                self.resume_rx().unwrap_or_else(report_net_event_fail);
+                self.process_rx().unwrap_or_else(report_net_event_fail);
             }
             Err(e) => {
                 error!("Failed to get rx rate-limiter event: {:?}", e);
@@ -838,8 +834,8 @@ pub(crate) mod tests {
             GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap()
         }
 
-        pub fn rx_single_frame_no_irq_coalescing(&mut self) -> bool {
-            let ret = self.rx_single_frame();
+        pub fn rx_single_frame_no_irq_coalescing(&mut self, frame_len: usize) -> bool {
+            let ret = self.rx_single_frame(frame_len);
             if self.rx_deferred_irqs {
                 self.rx_deferred_irqs = false;
                 let _ = self.signal_used_queue();
@@ -1009,16 +1005,16 @@ pub(crate) mod tests {
 
         // Some corner cases for rx_single_frame().
         {
-            assert_eq!(net.rx_bytes_read, 0);
+            assert_eq!(net.rx_buffered_bytes, 0);
 
             // Let's imagine we received some data.
-            net.rx_bytes_read = MAX_BUFFER_SIZE;
+            net.rx_buffered_bytes = MAX_BUFFER_SIZE;
             {
                 // a read only descriptor
                 rxq.avail.ring[0].set(0);
                 rxq.avail.idx.set(1);
                 rxq.dtable[0].set(daddr, 0x1000, 0, 0);
-                assert!(!net.rx_single_frame_no_irq_coalescing());
+                assert!(!net.rx_single_frame_no_irq_coalescing(net.rx_buffered_bytes));
                 assert_eq!(rxq.used.idx.get(), 1);
 
                 // resetting values
@@ -1036,7 +1032,7 @@ pub(crate) mod tests {
                 check_metric_after_block!(
                     &METRICS.net.rx_fails,
                     1,
-                    assert!(!net.rx_single_frame_no_irq_coalescing())
+                    assert!(!net.rx_single_frame_no_irq_coalescing(net.rx_buffered_bytes))
                 );
                 assert_eq!(rxq.used.idx.get(), 1);
 
@@ -1047,7 +1043,7 @@ pub(crate) mod tests {
             }
 
             // set rx_count back to 0
-            net.rx_bytes_read = 0;
+            net.rx_buffered_bytes = 0;
         }
 
         // Now let's move on to the actual device events.
@@ -1067,7 +1063,7 @@ pub(crate) mod tests {
         {
             // testing RX_TAP_EVENT
 
-            assert!(!net.rx_deferred_frame);
+            assert_eq!(net.rx_buffered_bytes, 0);
 
             // this should work just fine
             rxq.avail.idx.set(1);
@@ -1077,13 +1073,13 @@ pub(crate) mod tests {
             net.interrupt_evt.write(1).unwrap();
             let tap_event = EpollEvent::new(EventSet::IN, net.tap.as_raw_fd() as u64);
             net.process(&tap_event, &mut event_manager);
-            assert!(net.rx_deferred_frame);
+            assert_ne!(net.rx_buffered_bytes, 0);
             assert_eq!(net.interrupt_evt.read().unwrap(), 3);
             // The #cfg(test) enabled version of read_tap always returns 1234 bytes (or the len of
             // the buffer, whichever is smaller).
             assert_eq!(rxq.used.ring[0].get().len, 1234);
 
-            // Since deferred_frame is now true, activating the same event again will trigger
+            // Since buffered_bytes is now != 0, activating the same event again will trigger
             // a different execution path.
 
             // reset some parts of the queue first
@@ -1093,13 +1089,13 @@ pub(crate) mod tests {
             // this should also be successful
             net.interrupt_evt.write(1).unwrap();
             net.process(&tap_event, &mut event_manager);
-            assert!(net.rx_deferred_frame);
+            assert_ne!(net.rx_buffered_bytes, 0);
             assert_eq!(net.interrupt_evt.read().unwrap(), 2);
 
             // ... but the following shouldn't, because we emulate receiving much more data than
             // we can fit inside a single descriptor
 
-            net.rx_bytes_read = MAX_BUFFER_SIZE;
+            net.rx_buffered_bytes = MAX_BUFFER_SIZE;
             net.queues[RX_INDEX] = rxq.create_queue();
             rxq.used.idx.set(0);
 
@@ -1109,14 +1105,14 @@ pub(crate) mod tests {
                 1,
                 net.process(&tap_event, &mut event_manager)
             );
-            assert!(net.rx_deferred_frame);
+            assert_ne!(net.rx_buffered_bytes, 0);
             assert_eq!(net.interrupt_evt.read().unwrap(), 2);
 
             // A mismatch shows the reception was unsuccessful.
-            assert_ne!(rxq.used.ring[0].get().len as usize, net.rx_bytes_read);
+            assert_ne!(rxq.used.ring[0].get().len as usize, net.rx_buffered_bytes);
 
             // We set this back to a manageable size, for the following test.
-            net.rx_bytes_read = 1234;
+            net.rx_buffered_bytes = 1234;
         }
 
         {
@@ -1351,12 +1347,16 @@ pub(crate) mod tests {
         net.activate(mem.clone()).unwrap();
 
         // The RX queue is empty.
+        // Simulate some read data.
+        net.rx_buffered_bytes = 1440;
         let tap_event = EpollEvent::new(EventSet::IN, net.tap.as_raw_fd() as u64);
         check_metric_after_block!(
             &METRICS.net.no_rx_avail_buffer,
             1,
             net.process(&tap_event, &mut event_manager)
         );
+        // Reset buffer.
+        net.rx_buffered_bytes = 0;
 
         // Fake an avail buffer; this time, tap reading should error out.
         rxq.avail.idx.set(1);
@@ -1479,7 +1479,7 @@ pub(crate) mod tests {
             net.rx_rate_limiter = rl;
 
             // set up RX
-            assert!(!net.rx_deferred_frame);
+            assert_eq!(net.rx_buffered_bytes, 0);
             rxq.avail.idx.set(1);
             rxq.avail.ring[0].set(0);
             rxq.dtable[0].set(daddr, 0x1000, VIRTQ_DESC_F_WRITE, 0);
@@ -1494,7 +1494,7 @@ pub(crate) mod tests {
 
                 // assert that limiter is blocked
                 assert!(net.rx_rate_limiter.is_blocked());
-                assert!(net.rx_deferred_frame);
+                assert_ne!(net.rx_buffered_bytes, 0);
                 // assert that no operation actually completed (limiter blocked it)
                 assert_eq!(net.interrupt_evt.read().unwrap(), 2);
                 // make sure the data is still queued for processing
@@ -1593,7 +1593,7 @@ pub(crate) mod tests {
             net.rx_rate_limiter = rl;
 
             // set up RX
-            assert!(!net.rx_deferred_frame);
+            assert_eq!(net.rx_buffered_bytes, 0);
             rxq.avail.idx.set(1);
             rxq.avail.ring[0].set(0);
             rxq.dtable[0].set(daddr, 0x1000, VIRTQ_DESC_F_WRITE, 0);
@@ -1608,7 +1608,7 @@ pub(crate) mod tests {
 
                 // assert that limiter is blocked
                 assert!(net.rx_rate_limiter.is_blocked());
-                assert!(net.rx_deferred_frame);
+                assert_ne!(net.rx_buffered_bytes, 0);
                 // assert that no operation actually completed (limiter blocked it)
                 assert_eq!(net.interrupt_evt.read().unwrap(), 2);
                 // make sure the data is still queued for processing
