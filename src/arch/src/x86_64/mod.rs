@@ -171,7 +171,6 @@ pub fn configure_system(
     }
 
     params.0.acpi_rsdp_addr = rsdp_addr.0;
-    println!("setting acpi RSDP to {:x}", params.0.acpi_rsdp_addr);
 
     let zero_page_addr = GuestAddress(layout::ZERO_PAGE_START);
     guest_mem
