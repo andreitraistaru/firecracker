@@ -13,7 +13,7 @@ use crate::seccomp_filters::{get_filters, SeccompConfig};
 use crate::utilities::mock_resources::{MockBootSourceConfig, MockVmConfig, MockVmResources};
 use crate::vmm_config::boot_source::BootSourceConfig;
 use crate::vmm_config::instance_info::InstanceInfo;
-use polly::event_manager::EventManager;
+use polly::event_manager::{EventManager, ExitCode};
 use utils::terminal::Terminal;
 
 const VMM_ERR_EXIT: i32 = 42;
@@ -58,6 +58,27 @@ pub fn default_vmm(kernel_image: Option<&str>) -> (Arc<Mutex<Vmm>>, EventManager
 #[cfg(target_arch = "x86_64")]
 pub fn dirty_tracking_vmm(kernel_image: Option<&str>) -> (Arc<Mutex<Vmm>>, EventManager) {
     create_vmm(kernel_image, true)
+}
+
+pub fn run_vmm_to_completion(mut event_manager: EventManager) -> Option<ExitCode> {
+    // On x86_64, the vmm should exit once its workload completes and signals the exit event.
+    // On aarch64, the test kernel doesn't exit, so the vmm is force-stopped.
+    #[cfg(target_arch = "x86_64")]
+    {
+        let (exit_code, _event_count) = event_manager.run_core(500).unwrap();
+        exit_code
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let (exit_code, _event_count) = event_manager.run_core(500).unwrap();
+        if exit_code.is_some() {
+            return exit_code;
+        }
+        vmm.lock().unwrap().stop();
+        // Allow exit event to be processed.
+        let (exit_code, _event_count) = event_manager.run_core(500).unwrap();
+        exit_code
+    }
 }
 
 pub fn wait_vmm_child_process(vmm_pid: i32) {

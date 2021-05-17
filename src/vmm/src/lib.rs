@@ -60,7 +60,7 @@ use devices::virtio::{
 };
 use devices::BusDevice;
 use logger::{error, info, warn, LoggerError, MetricsError, METRICS};
-use polly::event_manager::{EventManager, Subscriber};
+use polly::event_manager::{EventManager, ExitCode, Subscriber};
 use rate_limiter::BucketUpdate;
 use seccompiler::BpfProgram;
 use snapshot::Persist;
@@ -355,25 +355,11 @@ impl Vmm {
             .map_err(Error::I8042Error)
     }
 
-    /// Waits for all vCPUs to exit and terminates the Firecracker process.
-    pub fn stop(&mut self, exit_code: i32) {
+    /// Signals Vmm should exit.
+    pub fn stop(&mut self) {
         info!("Vmm is stopping.");
-
-        if let Some(observer) = self.events_observer.as_mut() {
-            if let Err(e) = observer.on_vmm_stop() {
-                warn!("{}", Error::VmmObserverTeardown(e));
-            }
-        }
-
-        // Write the metrics before exiting.
-        if let Err(e) = METRICS.write() {
-            error!("Failed to write metrics while stopping: {}", e);
-        }
-
-        // Exit from Firecracker using the provided exit code. Safe because we're terminating
-        // the process anyway.
-        unsafe {
-            libc::_exit(exit_code);
+        if let Err(e) = self.exit_evt.write(1) {
+            error!("Failed signaling Vmm exit event: {}", e);
         }
     }
 
@@ -728,12 +714,23 @@ fn construct_kvm_mpidrs(vcpu_states: &[VcpuState]) -> Vec<u64> {
 impl Drop for Vmm {
     fn drop(&mut self) {
         let _ = self.exit_vcpus();
+
+        if let Some(observer) = self.events_observer.as_mut() {
+            if let Err(e) = observer.on_vmm_stop() {
+                warn!("{}", Error::VmmObserverTeardown(e));
+            }
+        }
+
+        // Write the metrics before exiting.
+        if let Err(e) = METRICS.write() {
+            error!("Failed to write metrics while stopping: {}", e);
+        }
     }
 }
 
 impl Subscriber for Vmm {
     /// Handle a read event (EPOLLIN).
-    fn process(&mut self, event: &EpollEvent, _: &mut EventManager) {
+    fn process_exitable(&mut self, event: &EpollEvent, _: &mut EventManager) -> Option<ExitCode> {
         let source = event.fd();
         let event_set = event.event_set();
 
@@ -751,9 +748,11 @@ impl Subscriber for Vmm {
                     _ => None,
                 })
                 .unwrap_or(FC_EXIT_CODE_OK);
-            self.stop(i32::from(exit_code));
+            self.stop();
+            Some(i32::from(exit_code))
         } else {
             error!("Spurious EventManager event for handler: Vmm");
+            None
         }
     }
 

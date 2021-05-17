@@ -11,6 +11,7 @@ use utils::epoll::{self, Epoll, EpollEvent};
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub type Pollable = RawFd;
+pub type ExitCode = i32;
 
 /// Errors associated with epoll events handling.
 pub enum Error {
@@ -57,7 +58,32 @@ pub trait Subscriber {
     ///                   The only functions safe to call on this `EventManager` reference
     ///                   are `register`, `unregister` and `modify` which correspond to
     ///                   the `libc::epoll_ctl` operations.
-    fn process(&mut self, event: &EpollEvent, event_manager: &mut EventManager);
+    fn process(&mut self, _event: &EpollEvent, _event_manager: &mut EventManager) {
+        panic!("Either process() or process_exitable() must be implemented for Subscriber");
+    }
+
+    /// Variant of the process() callback that lets the subscriber signal a desire to exit
+    /// by returning a non-None ExitCode.
+    ///
+    /// This is what's actually called when dispatching subscriptions, but it delegates
+    /// to the plain form.  That way most subscribers implement process() and can avoid
+    /// needing to `return None` to signal not exiting.
+    ///
+    /// # Arguments
+    /// * event - the available `EpollEvent` ready for processing
+    /// * event_manager - Reference to the `EventManager` that gives the implementor
+    ///                   the possibility to directly call the required update operations.
+    ///                   The only functions safe to call on this `EventManager` reference
+    ///                   are `register`, `unregister` and `modify` which correspond to
+    ///                   the `libc::epoll_ctl` operations.
+    fn process_exitable(
+        &mut self,
+        event: &EpollEvent,
+        event_manager: &mut EventManager,
+    ) -> Option<ExitCode> {
+        self.process(event, event_manager);
+        None
+    }
 
     /// Returns a list of `EpollEvent` that this subscriber is interested in.
     fn interest_list(&self) -> Vec<EpollEvent>;
@@ -170,41 +196,72 @@ impl EventManager {
         Ok(())
     }
 
-    /// Wait for events, then dispatch to the registered event handlers.
-    pub fn run(&mut self) -> Result<usize> {
-        self.run_with_timeout(-1)
-    }
-
     /// Wait for events for a maximum timeout of `miliseconds`. Dispatch the events to the
     /// registered signal handlers.
-    pub fn run_with_timeout(&mut self, milliseconds: i32) -> Result<usize> {
+    ///
+    /// First return is None if the events were processed and no exit events were encountered.
+    /// If an exit event happens and `--cleanup-level` is 2, the exit code will be returned.
+    /// Lower cleanup levels that get exit events will call libc::exit(), thus not return
+    ///
+    /// Second return is the number of dispatched events, which is only used by the test code.
+    pub fn run_core(&mut self, milliseconds: i32) -> Result<(Option<ExitCode>, usize)> {
         let event_count = match self.epoll.wait(milliseconds, &mut self.ready_events[..]) {
             Ok(event_count) => event_count,
             Err(e) if e.raw_os_error() == Some(libc::EINTR) => 0,
             Err(e) => return Err(Error::Poll(e)),
         };
-        self.dispatch_events(event_count);
+        let opt_exit_code = self.dispatch_events(event_count);
 
+        Ok((opt_exit_code, event_count)) // event count is checked by the tests
+    }
+
+    /// Version of run used by Firecracker, which doesn't need the count of dispatched events
+    /// or a timeout.  It wants to be able to receive an exit code if `--cleanup-level` is 2.
+    pub fn run_maybe_exiting(&mut self) -> Result<Option<ExitCode>> {
+        let (opt_exit_code, _event_count) = self.run_core(-1)?;
+        Ok(opt_exit_code)
+    }
+
+    /// Variation of run used by tests which want a count of dispatched events, and also
+    /// a timeout.  The tests were written before the concept of clean shutdown, so they
+    /// assume any exit events would have terminated Firecracker abruptly.
+    pub fn run_with_timeout(&mut self, milliseconds: i32) -> Result<usize> {
+        let (opt_exit_code, event_count) = self.run_core(milliseconds)?;
+        assert!(opt_exit_code.is_none());
         Ok(event_count)
     }
 
-    fn dispatch_events(&mut self, event_count: usize) {
+    /// Variation of run used by tests which don't want to use a timeout.
+    pub fn run(&mut self) -> Result<usize> {
+        self.run_with_timeout(-1)
+    }
+
+    fn dispatch_events(&mut self, event_count: usize) -> Option<ExitCode> {
         // Use the temporary, pre-allocated buffer to check ready events.
         for ev_index in 0..event_count {
             let event = &self.ready_events[ev_index].clone();
             let pollable = event.fd();
 
             if self.subscribers.contains_key(&pollable) {
-                self.subscribers
+                let opt_exit_code = self
+                    .subscribers
                     .get_mut(&pollable)
                     .unwrap() // Safe because we have already checked existence
                     .clone()
                     .lock()
                     .expect("Poisoned lock")
-                    .process(&event, self);
+                    .process_exitable(&event, self);
+
+                if opt_exit_code != None {
+                    // Note: allowing other handlers to run could create an
+                    // ambiguity of which exit code to use if more than one asked
+                    // to exit.  Thus we signal exit on the first handler that asks.
+                    return opt_exit_code;
+                }
             }
             // TODO: Should we log an error in case the subscriber does not exist?
         }
+        None
     }
 }
 

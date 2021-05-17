@@ -22,7 +22,9 @@ use vmm::utilities::mock_resources::MockVmResources;
 use vmm::utilities::mock_resources::NOISY_KERNEL_IMAGE;
 #[cfg(target_arch = "x86_64")]
 use vmm::utilities::test_utils::dirty_tracking_vmm;
-use vmm::utilities::test_utils::{create_vmm, default_vmm, set_panic_hook, wait_vmm_child_process};
+use vmm::utilities::test_utils::{
+    create_vmm, default_vmm, run_vmm_to_completion, set_panic_hook, wait_vmm_child_process,
+};
 use vmm::vmm_config::instance_info::InstanceInfo;
 
 #[test]
@@ -67,16 +69,9 @@ fn test_build_microvm() {
             // Force the child to exit on panic to unblock the waiting parent.
             set_panic_hook();
 
-            let (vmm, mut event_manager) = default_vmm(None);
-
-            // On x86_64, the vmm should exit once its workload completes and signals the exit event.
-            // On aarch64, the test kernel doesn't exit, so the vmm is force-stopped.
-            let _ = event_manager.run_with_timeout(500).unwrap();
-
-            #[cfg(target_arch = "x86_64")]
-            vmm.lock().unwrap().stop(-1); // If we got here, something went wrong.
-            #[cfg(target_arch = "aarch64")]
-            vmm.lock().unwrap().stop(0);
+            let (_, event_manager) = default_vmm(None);
+            let exit_code = run_vmm_to_completion(event_manager);
+            assert_eq!(exit_code, Some(0));
         }
         vmm_pid => {
             // Parent process: wait for the vmm to exit.
@@ -113,7 +108,7 @@ fn test_pause_resume_microvm() {
             // Child process: build and run vmm, then attempts to pause and resume it.
             set_panic_hook();
 
-            let (vmm, mut event_manager) = default_vmm(None);
+            let (vmm, event_manager) = default_vmm(None);
 
             // There's a race between this thread and the vcpu thread, but this thread
             // should be able to pause vcpu thread before it finishes running its test-binary.
@@ -123,12 +118,8 @@ fn test_pause_resume_microvm() {
             assert!(vmm.lock().unwrap().pause_vm().is_ok());
             assert!(vmm.lock().unwrap().resume_vm().is_ok());
 
-            let _ = event_manager.run_with_timeout(500).unwrap();
-
-            #[cfg(target_arch = "x86_64")]
-            vmm.lock().unwrap().stop(-1); // If we got here, something went wrong.
-            #[cfg(target_arch = "aarch64")]
-            vmm.lock().unwrap().stop(0);
+            let exit_code = run_vmm_to_completion(event_manager);
+            assert_eq!(exit_code, Some(0));
         }
         vmm_pid => {
             // Parent process: wait for the vmm to exit.
@@ -145,7 +136,7 @@ fn test_dirty_bitmap_error() {
         0 => {
             set_panic_hook();
 
-            let (vmm, mut event_manager) = default_vmm(None);
+            let (vmm, event_manager) = default_vmm(None);
 
             // The vmm will start with dirty page tracking = OFF.
             // With dirty tracking disabled, the underlying KVM_GET_DIRTY_LOG ioctl will fail
@@ -156,12 +147,8 @@ fn test_dirty_bitmap_error() {
                 "Some(DirtyBitmap(Error(2)))"
             );
 
-            let _ = event_manager.run_with_timeout(500).unwrap();
-
-            #[cfg(target_arch = "x86_64")]
-            vmm.lock().unwrap().stop(-1); // If we got here, something went wrong.
-            #[cfg(target_arch = "aarch64")]
-            vmm.lock().unwrap().stop(0);
+            let exit_code = run_vmm_to_completion(event_manager);
+            assert_eq!(exit_code, Some(0));
         }
         vmm_pid => {
             // Parent process: wait for the vmm to exit.
@@ -196,7 +183,7 @@ fn test_dirty_bitmap_success() {
                 })
                 .sum();
             assert!(num_dirty_pages > 0);
-            vmm.lock().unwrap().stop(0);
+            vmm.lock().unwrap().stop();
         }
         vmm_pid => {
             // Parent process: wait for the vmm to exit.
@@ -225,7 +212,7 @@ fn test_disallow_snapshots_without_pausing() {
             // It is now allowed.
             vmm.lock().unwrap().save_state().unwrap();
             // Stop.
-            vmm.lock().unwrap().stop(0);
+            vmm.lock().unwrap().stop();
         }
         vmm_pid => {
             // Parent process: wait for the vmm to exit.
@@ -269,7 +256,7 @@ fn verify_create_snapshot(is_diff: bool) -> (TempFile, TempFile) {
                     .unwrap();
             }
 
-            vmm.lock().unwrap().stop(0);
+            vmm.lock().unwrap().stop();
         }
         vmm_pid => {
             // Parent process: wait for the vmm to exit.
@@ -340,7 +327,7 @@ fn verify_load_snapshot(snapshot_file: TempFile, memory_file: TempFile) {
             )
             .unwrap();
             // For now we're happy we got this far, we don't test what the guest is actually doing.
-            vmm.lock().unwrap().stop(0);
+            vmm.lock().unwrap().stop();
         }
         vmm_pid => {
             // Parent process: wait for the vmm to exit.

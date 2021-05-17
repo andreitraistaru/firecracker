@@ -11,7 +11,7 @@ use std::process;
 use std::sync::{Arc, Mutex};
 
 use logger::{error, info, warn, IncMetric, ProcessTimeReporter, LOGGER, METRICS};
-use polly::event_manager::EventManager;
+use polly::event_manager::{EventManager, ExitCode};
 use seccompiler::BpfThreadMap;
 use snapshot::Snapshot;
 use utils::arg_parser::{ArgParser, Argument, Arguments};
@@ -31,7 +31,7 @@ const DEFAULT_API_SOCK_PATH: &str = "/run/firecracker.socket";
 const DEFAULT_INSTANCE_ID: &str = "anonymous-instance";
 const FIRECRACKER_VERSION: &str = env!("FIRECRACKER_VERSION");
 
-fn main() {
+fn main_exitable() -> ExitCode {
     LOGGER
         .configure(Some(DEFAULT_INSTANCE_ID.to_string()))
         .expect("Failed to register logger");
@@ -288,7 +288,7 @@ fn main() {
             instance_info,
             process_time_reporter,
             boot_timer_enabled,
-        );
+        )
     } else {
         let seccomp_filters: BpfThreadMap = seccomp_filters
             .into_iter()
@@ -299,8 +299,23 @@ fn main() {
             vmm_config_json,
             instance_info,
             boot_timer_enabled,
-        );
+        )
     }
+}
+
+fn main() {
+    // This idiom is the prescribed way to get a clean shutdown of Rust (that will report
+    // no leaks in Valgrind or sanitizers).  Calling `unsafe { libc::exit() }` does no
+    // cleanup, and std::process::exit() does more--but does not run destructors.  So the
+    // best thing to do is to is bubble up the exit code through the whole stack, and
+    // only exit when everything potentially destructible has cleaned itself up.
+    //
+    // https://doc.rust-lang.org/std/process/fn.exit.html
+    //
+    // See process_exitable() method of Subscriber trait for what triggers the exit_code.
+    //
+    let exit_code = main_exitable();
+    std::process::exit(exit_code);
 }
 
 // Exit gracefully with a generic error code.
@@ -405,7 +420,7 @@ fn run_without_api(
     config_json: Option<String>,
     instance_info: InstanceInfo,
     bool_timer_enabled: bool,
-) {
+) -> ExitCode {
     let mut event_manager = EventManager::new().expect("Unable to create EventManager");
 
     // Right before creating the signalfd,
@@ -446,8 +461,12 @@ fn run_without_api(
 
     // Run the EventManager that drives everything in the microVM.
     loop {
-        event_manager
-            .run()
+        let opt_exit_code = event_manager
+            .run_maybe_exiting()
             .expect("Failed to start the event manager");
+
+        if let Some(exit_code) = opt_exit_code {
+            return exit_code;
+        }
     }
 }
