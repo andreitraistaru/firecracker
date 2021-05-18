@@ -84,42 +84,24 @@ pub struct SignalManager {
 #[inline]
 fn exit_unexpected() {
     // Safe because we're terminating the process anyway.
-    unsafe { _exit(i32::from(super::FC_EXIT_CODE_UNEXPECTED_ERROR)) };
+    unsafe { _exit(super::FC_EXIT_CODE_UNEXPECTED_ERROR) };
 }
 
 // Given a signal number, return the respective metric and exit code.
 fn get_metric_and_exitcode(signo: c_int) -> Option<(&'static dyn IncMetric, Option<i32>)> {
     match signo {
-        SIGXFSZ => Some((
-            &METRICS.signals.sigxfsz,
-            Some(super::FC_EXIT_CODE_SIGXFSZ as i32),
-        )),
-        SIGXCPU => Some((
-            &METRICS.signals.sigxcpu,
-            Some(super::FC_EXIT_CODE_SIGXCPU as i32),
-        )),
-        SIGBUS => Some((
-            &METRICS.signals.sigbus,
-            Some(super::FC_EXIT_CODE_SIGBUS as i32),
-        )),
-        SIGSEGV => Some((
-            &METRICS.signals.sigsegv,
-            Some(super::FC_EXIT_CODE_SIGSEGV as i32),
-        )),
+        SIGXFSZ => Some((&METRICS.signals.sigxfsz, Some(super::FC_EXIT_CODE_SIGXFSZ))),
+        SIGXCPU => Some((&METRICS.signals.sigxcpu, Some(super::FC_EXIT_CODE_SIGXCPU))),
+        SIGBUS => Some((&METRICS.signals.sigbus, Some(super::FC_EXIT_CODE_SIGBUS))),
+        SIGSEGV => Some((&METRICS.signals.sigsegv, Some(super::FC_EXIT_CODE_SIGSEGV))),
         // Dummy entry, never going to exit due to SIGPIPE.
         SIGPIPE => Some((&METRICS.signals.sigpipe, None)),
         SIGSYS => Some((
             &METRICS.seccomp.num_faults,
-            Some(super::FC_EXIT_CODE_BAD_SYSCALL as i32),
+            Some(super::FC_EXIT_CODE_BAD_SYSCALL),
         )),
-        SIGHUP => Some((
-            &METRICS.signals.sighup,
-            Some(super::FC_EXIT_CODE_SIGHUP as i32),
-        )),
-        SIGILL => Some((
-            &METRICS.signals.sigill,
-            Some(super::FC_EXIT_CODE_SIGILL as i32),
-        )),
+        SIGHUP => Some((&METRICS.signals.sighup, Some(super::FC_EXIT_CODE_SIGHUP))),
+        SIGILL => Some((&METRICS.signals.sigill, Some(super::FC_EXIT_CODE_SIGILL))),
         _ => None,
     }
 }

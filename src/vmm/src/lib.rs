@@ -69,27 +69,27 @@ use utils::eventfd::EventFd;
 use vm_memory::{GuestMemory, GuestMemoryMmap, GuestMemoryRegion, GuestRegionMmap};
 
 /// Success exit code.
-pub const FC_EXIT_CODE_OK: u8 = 0;
+pub const FC_EXIT_CODE_OK: i32 = 0;
 /// Generic error exit code.
-pub const FC_EXIT_CODE_GENERIC_ERROR: u8 = 1;
+pub const FC_EXIT_CODE_GENERIC_ERROR: i32 = 1;
 /// Generic exit code for an error considered not possible to occur if the program logic is sound.
-pub const FC_EXIT_CODE_UNEXPECTED_ERROR: u8 = 2;
+pub const FC_EXIT_CODE_UNEXPECTED_ERROR: i32 = 2;
 /// Firecracker was shut down after intercepting a restricted system call.
-pub const FC_EXIT_CODE_BAD_SYSCALL: u8 = 148;
+pub const FC_EXIT_CODE_BAD_SYSCALL: i32 = 148;
 /// Firecracker was shut down after intercepting `SIGBUS`.
-pub const FC_EXIT_CODE_SIGBUS: u8 = 149;
+pub const FC_EXIT_CODE_SIGBUS: i32 = 149;
 /// Firecracker was shut down after intercepting `SIGSEGV`.
-pub const FC_EXIT_CODE_SIGSEGV: u8 = 150;
+pub const FC_EXIT_CODE_SIGSEGV: i32 = 150;
 /// Firecracker was shut down after intercepting `SIGXFSZ`.
-pub const FC_EXIT_CODE_SIGXFSZ: u8 = 151;
+pub const FC_EXIT_CODE_SIGXFSZ: i32 = 151;
 /// Firecracker was shut down after intercepting `SIGXCPU`.
-pub const FC_EXIT_CODE_SIGXCPU: u8 = 154;
+pub const FC_EXIT_CODE_SIGXCPU: i32 = 154;
 /// Firecracker was shut down after intercepting `SIGPIPE`.
-pub const FC_EXIT_CODE_SIGPIPE: u8 = 155;
+pub const FC_EXIT_CODE_SIGPIPE: i32 = 155;
 /// Firecracker was shut down after intercepting `SIGHUP`.
-pub const FC_EXIT_CODE_SIGHUP: u8 = 156;
+pub const FC_EXIT_CODE_SIGHUP: i32 = 156;
 /// Firecracker was shut down after intercepting `SIGILL`.
-pub const FC_EXIT_CODE_SIGILL: u8 = 157;
+pub const FC_EXIT_CODE_SIGILL: i32 = 157;
 /// Bad configuration for microvm's resources, when using a single json.
 pub const FC_EXIT_CODE_BAD_CONFIGURATION: i32 = 152;
 /// Command line arguments parsing error.
@@ -749,7 +749,7 @@ impl Subscriber for Vmm {
                 })
                 .unwrap_or(FC_EXIT_CODE_OK);
             self.stop();
-            Some(i32::from(exit_code))
+            Some(exit_code)
         } else {
             error!("Spurious EventManager event for handler: Vmm");
             None

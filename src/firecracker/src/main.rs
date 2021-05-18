@@ -175,18 +175,18 @@ fn main_exitable() -> ExitCode {
             if arg_parser.arguments().flag_present("help") {
                 println!("Firecracker v{}\n", FIRECRACKER_VERSION);
                 println!("{}", arg_parser.formatted_help());
-                process::exit(i32::from(vmm::FC_EXIT_CODE_OK));
+                process::exit(vmm::FC_EXIT_CODE_OK);
             }
 
             if arg_parser.arguments().flag_present("version") {
                 println!("Firecracker v{}\n", FIRECRACKER_VERSION);
                 print_supported_snapshot_versions();
-                process::exit(i32::from(vmm::FC_EXIT_CODE_OK));
+                process::exit(vmm::FC_EXIT_CODE_OK);
             }
 
             if let Some(snapshot_path) = arg_parser.arguments().single_value("describe-snapshot") {
                 print_snapshot_data_format(snapshot_path);
-                process::exit(i32::from(vmm::FC_EXIT_CODE_OK));
+                process::exit(vmm::FC_EXIT_CODE_OK);
             }
 
             arg_parser.arguments()
@@ -213,10 +213,10 @@ fn main_exitable() -> ExitCode {
         // It's safe to unwrap here because the field's been provided with a default value.
         let level = arguments.single_value("level").unwrap().to_owned();
         let logger_level = LoggerLevel::from_string(level).unwrap_or_else(|err| {
-            process::exit(i32::from(generic_error_exit(&format!(
+            process::exit(generic_error_exit(&format!(
                 "Invalid value for logger level: {}. Possible values: [Error, Warning, Info, Debug]",
                 err
-            ))));
+            )));
         });
         let show_level = arguments.flag_present("show-level");
         let show_log_origin = arguments.flag_present("show-log-origin");
@@ -228,10 +228,10 @@ fn main_exitable() -> ExitCode {
             show_log_origin,
         );
         init_logger(logger_config, &instance_info).unwrap_or_else(|err| {
-            process::exit(i32::from(generic_error_exit(&format!(
+            process::exit(generic_error_exit(&format!(
                 "Could not initialize logger:: {}",
                 err
-            ))));
+            )));
         });
     }
 
@@ -242,12 +242,12 @@ fn main_exitable() -> ExitCode {
     )
     .unwrap_or_else(|error| {
         error!("Seccomp error: {}", error);
-        process::exit(i32::from(vmm::FC_EXIT_CODE_GENERIC_ERROR));
+        process::exit(vmm::FC_EXIT_CODE_GENERIC_ERROR);
     });
 
     let mut seccomp_filters = get_filters(seccomp_config).unwrap_or_else(|error| {
         error!("Seccomp error: {}", error);
-        process::exit(i32::from(vmm::FC_EXIT_CODE_GENERIC_ERROR));
+        process::exit(vmm::FC_EXIT_CODE_GENERIC_ERROR);
     });
 
     let vmm_config_json = arguments
@@ -319,7 +319,7 @@ fn main() {
 }
 
 // Exit gracefully with a generic error code.
-fn generic_error_exit(msg: &str) -> u8 {
+fn generic_error_exit(msg: &str) -> i32 {
     error!("{}", msg);
     vmm::FC_EXIT_CODE_GENERIC_ERROR
 }
@@ -355,27 +355,27 @@ fn print_supported_snapshot_versions() {
 // Print data format of provided snapshot state file.
 fn print_snapshot_data_format(snapshot_path: &str) {
     let mut snapshot_reader = File::open(snapshot_path).unwrap_or_else(|err| {
-        process::exit(i32::from(generic_error_exit(&format!(
+        process::exit(generic_error_exit(&format!(
             "Unable to open snapshot state file: {:?}",
             err
-        ))));
+        )));
     });
     let data_format_version = Snapshot::get_data_version(&mut snapshot_reader, &VERSION_MAP)
         .unwrap_or_else(|err| {
-            process::exit(i32::from(generic_error_exit(&format!(
+            process::exit(generic_error_exit(&format!(
                 "Invalid data format version of snapshot file: {:?}",
                 err
-            ))));
+            )));
         });
 
     let (key, _) = FC_VERSION_TO_SNAP_VERSION
         .iter()
         .find(|(_, &val)| val == data_format_version)
         .unwrap_or_else(|| {
-            process::exit(i32::from(generic_error_exit(&format!(
+            process::exit(generic_error_exit(&format!(
                 "Cannot translate snapshot data version {} to Firecracker microVM version",
                 data_format_version
-            ))));
+            )));
         });
     println!("v{}", key);
 }
