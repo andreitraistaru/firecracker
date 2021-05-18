@@ -91,7 +91,7 @@ pub const FC_EXIT_CODE_SIGHUP: u8 = 156;
 /// Firecracker was shut down after intercepting `SIGILL`.
 pub const FC_EXIT_CODE_SIGILL: u8 = 157;
 /// Bad configuration for microvm's resources, when using a single json.
-pub const FC_EXIT_CODE_BAD_CONFIGURATION: u8 = 152;
+pub const FC_EXIT_CODE_BAD_CONFIGURATION: i32 = 152;
 /// Command line arguments parsing error.
 pub const FC_EXIT_CODE_ARG_PARSING: u8 = 153;
 

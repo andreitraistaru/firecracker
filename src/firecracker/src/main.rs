@@ -387,15 +387,14 @@ fn build_microvm_from_json(
     config_json: String,
     instance_info: InstanceInfo,
     boot_timer_enabled: bool,
-) -> (VmResources, Arc<Mutex<vmm::Vmm>>) {
-    let mut vm_resources =
-        VmResources::from_json(&config_json, &instance_info).unwrap_or_else(|err| {
-            error!(
-                "Configuration for VMM from one single json failed: {:?}",
-                err
-            );
-            process::exit(i32::from(vmm::FC_EXIT_CODE_BAD_CONFIGURATION));
-        });
+) -> std::result::Result<(VmResources, Arc<Mutex<vmm::Vmm>>), ExitCode> {
+    let mut vm_resources = VmResources::from_json(&config_json, &instance_info).map_err(|err| {
+        error!(
+            "Configuration for VMM from one single json failed: {:?}",
+            err
+        );
+        vmm::FC_EXIT_CODE_BAD_CONFIGURATION
+    })?;
     vm_resources.boot_timer = boot_timer_enabled;
     let vmm = vmm::builder::build_microvm_for_boot(
         &instance_info,
@@ -403,16 +402,16 @@ fn build_microvm_from_json(
         event_manager,
         seccomp_filters,
     )
-    .unwrap_or_else(|err| {
+    .map_err(|err| {
         error!(
             "Building VMM configured from cmdline json failed: {:?}",
             err
         );
-        process::exit(i32::from(vmm::FC_EXIT_CODE_BAD_CONFIGURATION));
-    });
+        vmm::FC_EXIT_CODE_BAD_CONFIGURATION
+    })?;
     info!("Successfully started microvm that was configured from one single json");
 
-    (vm_resources, vmm)
+    Ok((vm_resources, vmm))
 }
 
 fn run_without_api(
@@ -444,14 +443,16 @@ fn run_without_api(
     // Build the microVm. We can ignore the returned values here because:
     // - VmResources is not used without api,
     // - An `Arc` reference of the built `Vmm` is plugged in the `EventManager` by the builder.
-    build_microvm_from_json(
+    if let Err(exit_code) = build_microvm_from_json(
         seccomp_filters,
         &mut event_manager,
         // Safe to unwrap since '--no-api' requires this to be set.
         config_json.unwrap(),
         instance_info,
         bool_timer_enabled,
-    );
+    ) {
+        return exit_code;
+    }
 
     // Start the metrics.
     firecracker_metrics
