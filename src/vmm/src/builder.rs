@@ -223,8 +223,10 @@ fn create_vmm_and_vcpus(
     // Set up Kvm Vm and register memory regions.
     let mut vm = setup_kvm_vm(&guest_memory, track_dirty_pages)?;
 
-    // Vmm exit event.
-    let exit_evt = EventFd::new(libc::EFD_NONBLOCK)
+    let vcpus_exit_evt = EventFd::new(libc::EFD_NONBLOCK)
+        .map_err(Error::EventFd)
+        .map_err(Internal)?;
+    let vmm_teardown_event = EventFd::new(libc::EFD_NONBLOCK)
         .map_err(Error::EventFd)
         .map_err(Internal)?;
 
@@ -240,7 +242,7 @@ fn create_vmm_and_vcpus(
     #[cfg(target_arch = "x86_64")]
     let pio_device_manager = {
         setup_interrupt_controller(&mut vm)?;
-        vcpus = create_vcpus(&vm, vcpu_count, &exit_evt).map_err(Internal)?;
+        vcpus = create_vcpus(&vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
 
         // Make stdout non blocking.
         set_stdout_nonblocking();
@@ -253,7 +255,7 @@ fn create_vmm_and_vcpus(
         )
         .map_err(Internal)?;
         // x86_64 uses the i8042 reset event as the Vmm exit event.
-        let reset_evt = exit_evt
+        let reset_evt = vcpus_exit_evt
             .try_clone()
             .map_err(Error::EventFd)
             .map_err(Internal)?;
@@ -267,17 +269,19 @@ fn create_vmm_and_vcpus(
     // Search for `kvm_arch_vcpu_create` in arch/arm/kvm/arm.c.
     #[cfg(target_arch = "aarch64")]
     {
-        vcpus = create_vcpus(&vm, vcpu_count, &exit_evt).map_err(Internal)?;
+        vcpus = create_vcpus(&vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
         setup_interrupt_controller(&mut vm, vcpu_count)?;
     }
 
     let vmm = Vmm {
         events_observer: Some(Box::new(SerialStdin::get())),
         instance_info: instance_info.clone(),
+        vm,
         guest_memory,
         vcpus_handles: Vec::new(),
-        exit_evt,
-        vm,
+        vcpus_exit_evt,
+        teardown_evt: vmm_teardown_event,
+        exit_code: None,
         mmio_device_manager,
         #[cfg(target_arch = "x86_64")]
         pio_device_manager,
@@ -946,7 +950,11 @@ pub mod tests {
     pub(crate) fn default_vmm() -> Vmm {
         let guest_memory = create_guest_memory(128, false).unwrap();
 
-        let exit_evt = EventFd::new(libc::EFD_NONBLOCK)
+        let vcpus_exit_evt = EventFd::new(libc::EFD_NONBLOCK)
+            .map_err(Error::EventFd)
+            .map_err(StartMicrovmError::Internal)
+            .unwrap();
+        let teardown_evt = EventFd::new(libc::EFD_NONBLOCK)
             .map_err(Error::EventFd)
             .map_err(StartMicrovmError::Internal)
             .unwrap();
@@ -969,10 +977,12 @@ pub mod tests {
         Vmm {
             events_observer: Some(Box::new(SerialStdin::get())),
             instance_info: InstanceInfo::default(),
+            vm,
             guest_memory,
             vcpus_handles: Vec::new(),
-            exit_evt,
-            vm,
+            vcpus_exit_evt,
+            teardown_evt,
+            exit_code: None,
             mmio_device_manager,
             #[cfg(target_arch = "x86_64")]
             pio_device_manager,

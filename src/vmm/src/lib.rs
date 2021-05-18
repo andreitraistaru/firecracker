@@ -36,9 +36,8 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::os::unix::io::AsRawFd;
-use std::sync::mpsc::RecvTimeoutError;
-use std::sync::Mutex;
-use std::sync::{Arc, Barrier};
+use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
 #[cfg(target_arch = "x86_64")]
@@ -235,11 +234,15 @@ pub struct Vmm {
     instance_info: InstanceInfo,
 
     // Guest VM core resources.
-    guest_memory: GuestMemoryMmap,
-
-    vcpus_handles: Vec<VcpuHandle>,
-    exit_evt: EventFd,
     vm: Vm,
+    guest_memory: GuestMemoryMmap,
+    vcpus_handles: Vec<VcpuHandle>,
+    // Used by Vcpus and devices to initiate teardown; Vmm should never write here.
+    vcpus_exit_evt: EventFd,
+    // Internally used by vmm.stop() to signal teardown; should not be used elsewhere.
+    teardown_evt: EventFd,
+    // Teardown exit reason.
+    exit_code: Option<ExitCode>,
 
     // Guest VM devices.
     mmio_device_manager: MMIODeviceManager,
@@ -331,14 +334,6 @@ impl Vmm {
         Ok(())
     }
 
-    /// Sends an exit command to the vCPUs.
-    pub fn exit_vcpus(&mut self) -> Result<()> {
-        self.broadcast_vcpu_event(
-            VcpuEvent::Exit,
-            VcpuResponse::Exited(FC_EXIT_CODE_GENERIC_ERROR),
-        )
-        .map_err(|_| Error::VcpuExit)
-    }
     /// Returns a reference to the inner `GuestMemoryMmap` object if present, or `None` otherwise.
     pub fn guest_memory(&self) -> &GuestMemoryMmap {
         &self.guest_memory
@@ -353,14 +348,6 @@ impl Vmm {
             .expect("i8042 lock was poisoned")
             .trigger_ctrl_alt_del()
             .map_err(Error::I8042Error)
-    }
-
-    /// Signals Vmm should exit.
-    pub fn stop(&mut self) {
-        info!("Vmm is stopping.");
-        if let Err(e) = self.exit_evt.write(1) {
-            error!("Failed signaling Vmm exit event: {}", e);
-        }
     }
 
     /// Saves the state of a paused Microvm.
@@ -684,6 +671,50 @@ impl Vmm {
             Err(BalloonError::DeviceNotFound)
         }
     }
+
+    /*
+       To avoid cycles, all teardown paths take the following route:
+       +------------------------+----------------------------+------------------------+
+       |        Vmm             |           Action           |           Vcpu         |
+       +------------------------+----------------------------+------------------------+
+     1 |                        |                            | vcpu.exit(exit_code)   |
+     2 |                        |                            | vcpu.exit_evt.write(1) |
+     3 |                        | <--- EventFd::exit_evt --- |                        |
+     4 | vmm.stop()             |                            |                        |
+     5 |                        | --- VcpuEvent::Finish ---> |                        |
+     6 |                        |                            | StateMachine::finish() |
+     7 |                        |  ------- EventFd ------+   |                        |
+       |                        |  <-----teardown_evt----+   |                        |
+     8 | vmm.process_exitable() |                            |                        |
+     9 | VcpuHandle::join()     |                            |                        |
+    10 | vmm.process_exitable() returns Some(exit_code) breaking the main event loop  |
+       +------------------------+----------------------------+------------------------+
+        Vcpu initiated teardown starts from `fn Vcpu::exit()` (step 1).
+        Vmm initiated teardown starts from `pub fn Vmm::stop()` (step 4).
+        Because the last step in the cycle is handling EventFd in Subscriber
+        implementation, the Vmm can also propagate an exit code/reason.
+    */
+
+    /// Signals Vmm to stop and exit.
+    pub fn stop(&mut self) {
+        info!("Vmm is stopping.");
+
+        // We send a "Finish" event.  If a VCPU has already exited, this is the only
+        // message it will accept... but running and paused will take it as well.
+        // It breaks out of the state machine loop so that the thread can be joined.
+        for (idx, handle) in self.vcpus_handles.iter().enumerate() {
+            if let Err(e) = handle.send_event(VcpuEvent::Finish) {
+                error!(
+                    "Failed to send VcpuEvent::Finish to vCPU {}. Error: {}",
+                    idx, e
+                );
+            }
+        }
+        // Signal Vmm::process_exitable() of teardown event.
+        if let Err(e) = self.teardown_evt.write(1) {
+            error!("Failed signaling vmm exit event: {}", e);
+        }
+    }
 }
 
 /// Process the content of the MPIDR_EL1 register in order to be able to pass it to KVM
@@ -713,8 +744,6 @@ fn construct_kvm_mpidrs(vcpu_states: &[VcpuState]) -> Vec<u64> {
 
 impl Drop for Vmm {
     fn drop(&mut self) {
-        let _ = self.exit_vcpus();
-
         if let Some(observer) = self.events_observer.as_mut() {
             if let Err(e) = observer.on_vmm_stop() {
                 warn!("{}", Error::VmmObserverTeardown(e));
@@ -725,6 +754,8 @@ impl Drop for Vmm {
         if let Err(e) = METRICS.write() {
             error!("Failed to write metrics while stopping: {}", e);
         }
+
+        assert!(self.vcpus_handles.is_empty());
     }
 }
 
@@ -734,22 +765,37 @@ impl Subscriber for Vmm {
         let source = event.fd();
         let event_set = event.event_set();
 
-        if source == self.exit_evt.as_raw_fd() && event_set == EventSet::IN {
-            let _ = self.exit_evt.read();
-            // Query each vcpu for the exit_code.
-            // If the exit_code can't be found on any vcpu, it means that the exit signal
-            // has been issued by the i8042 controller in which case we exit with
-            // FC_EXIT_CODE_OK.
-            let exit_code = self
-                .vcpus_handles
-                .iter()
-                .find_map(|handle| match handle.response_receiver().try_recv() {
-                    Ok(VcpuResponse::Exited(exit_code)) => Some(exit_code),
-                    _ => None,
-                })
-                .unwrap_or(FC_EXIT_CODE_OK);
+        if source == self.vcpus_exit_evt.as_raw_fd() && event_set == EventSet::IN {
+            let _ = self.vcpus_exit_evt.read();
+
+            // Query each vcpu for their exit_code.
+            for handle in &self.vcpus_handles {
+                match handle.response_receiver().try_recv() {
+                    Ok(VcpuResponse::Exited(status)) => {
+                        if self.exit_code.is_none() {
+                            self.exit_code = Some(status);
+                        } else {
+                            warn!("Multiple exit states detected, using first exit code");
+                        }
+                    }
+                    Ok(_response) => {} // Don't care about these, we are exiting.
+                    Err(TryRecvError::Empty) => {} // Nothing pending in channel
+                    Err(e) => {
+                        panic!("Error while looking for VCPU exit status: {}", e);
+                    }
+                }
+            }
             self.stop();
-            Some(exit_code)
+            None
+        } else if source == self.teardown_evt.as_raw_fd() && event_set == EventSet::IN {
+            // The actual thread::join() that runs to release the thread's resource is done in
+            // the VcpuHandle's Drop trait.  We can trigger that to happen now by clearing the
+            // list of handles. Do it here instead of Vmm::Drop to avoid dependency cycles.
+            // (Vmm's Drop will also assert this list is empty).
+            self.vcpus_handles.clear();
+
+            // Break the main event loop, propagating the Vmm exit-code.
+            Some(self.exit_code.unwrap_or(FC_EXIT_CODE_OK))
         } else {
             error!("Spurious EventManager event for handler: Vmm");
             None
@@ -757,9 +803,9 @@ impl Subscriber for Vmm {
     }
 
     fn interest_list(&self) -> Vec<EpollEvent> {
-        vec![EpollEvent::new(
-            EventSet::IN,
-            self.exit_evt.as_raw_fd() as u64,
-        )]
+        vec![
+            EpollEvent::new(EventSet::IN, self.vcpus_exit_evt.as_raw_fd() as u64),
+            EpollEvent::new(EventSet::IN, self.teardown_evt.as_raw_fd() as u64),
+        ]
     }
 }

@@ -87,10 +87,8 @@ fn test_exit_vcpus() {
     match pid {
         0 => {
             set_panic_hook();
-
             let (vmm, _) = default_vmm(None);
-
-            assert!(vmm.lock().unwrap().exit_vcpus().is_ok());
+            vmm.lock().unwrap().stop();
         }
         vmm_pid => {
             // Parent process: wait for the vmm to exit.
