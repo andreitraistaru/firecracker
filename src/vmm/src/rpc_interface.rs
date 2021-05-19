@@ -1033,7 +1033,8 @@ mod tests {
     fn test_preboot_get_balloon_config() {
         let req = VmmAction::GetBalloonConfig;
         let expected_cfg = BalloonDeviceConfig::default();
-        check_preboot_request(req, |result, _| {
+        check_preboot_request(req, |result, res| {
+            assert!(res.balloon_config_called);
             assert_eq!(result, Ok(VmmData::BalloonConfig(expected_cfg)))
         });
     }
