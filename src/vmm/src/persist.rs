@@ -554,16 +554,21 @@ fn guest_memory_from_uffd(
     let bytes_sent = socket
         .send_with_fd(
             backend_mappings.as_bytes(),
-            // TODO: use `into_raw_fd` so we don't close uffd on drop. In the happy case we
-            // can close the fd since other process has it open and is serving pages.
+            // In the happy case we can close the fd since the other process has it open and is
+            // using it to serve us pages.
             // The problem is that if other process crashes/exits, firecracker guest memory
             // will simply revert to anon-mem behavior which would lead to silent errors and UB.
+            //
             // If the fault serving process exits while we hold a copy of the FD as well, the
             // uffd will still be alive but with no one to serve faults leading to guest freeze
             // (which is an unfortunate, but explicit and defined behavior).
+            //
+            // IntoRawFd impl for Uffd still closes FD on Uffd::drop(), therefore using
+            // AsRawFd and mem::forget() to keep the uffd open in this process as well.
             uffd.as_raw_fd(),
         )
         .expect("cannot send uffd");
+    std::mem::forget(uffd);
     info!(
         "Sent Uffd + {} bytes containing memory mappings on UDS {:?}",
         bytes_sent, mem_uds_path
