@@ -11,7 +11,7 @@ use super::{
     builder::build_microvm_for_boot, persist::create_snapshot, persist::restore_from_snapshot,
     resources::VmResources, Vmm,
 };
-use crate::persist::{CreateSnapshotError, LoadSnapshotError, UffdBackendDescription};
+use crate::persist::{CreateSnapshotError, LoadSnapshotError};
 use crate::resources::VmmConfig;
 use crate::version_map::VERSION_MAP;
 use crate::vmm_config::balloon::{
@@ -210,8 +210,6 @@ pub enum VmmData {
     InstanceInformation(InstanceInfo),
     /// The microVM configuration represented by `VmConfig`.
     MachineConfiguration(VmConfig),
-    /// The memory description and UFFD to serve that memory.
-    UffdBackendDescription(UffdBackendDescription),
 }
 
 /// Shorthand result type for external VMM commands.
@@ -446,7 +444,7 @@ impl<'a> PrebootApiController<'a> {
             load_params,
             VERSION_MAP.clone(),
         )
-        .and_then(|(vmm, maybe_uffd)| {
+        .and_then(|vmm| {
             info!("created vmm, continuing");
             let ret = if load_params.resume_vm {
                 info!("inline resume");
@@ -457,7 +455,7 @@ impl<'a> PrebootApiController<'a> {
             ret.map(|()| {
                 self.built_vmm = Some(vmm);
                 info!("built vmm, continuing");
-                maybe_uffd.map_or(VmmData::Empty, |desc| VmmData::UffdBackendDescription(desc))
+                VmmData::Empty
             })
             .map_err(LoadSnapshotError::ResumeMicroVm)
         })
