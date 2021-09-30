@@ -6,6 +6,7 @@
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::{io::AsRawFd, net::UnixStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -31,13 +32,16 @@ use cpuid::common::{get_vendor_id_from_cpuid, get_vendor_id_from_host};
 use crate::vmm_config::instance_info::InstanceInfo;
 #[cfg(target_arch = "aarch64")]
 use arch::regs::{get_manufacturer_id_from_host, get_manufacturer_id_from_state};
-use logger::{error, info};
+use logger::{debug, error, info};
 use seccompiler::BpfThreadMap;
+use serde::Serialize;
 use snapshot::Snapshot;
+use userfaultfd::UffdBuilder;
+use utils::sock_ctrl_msg::ScmSocket;
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 use virtio_gen::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
-use vm_memory::GuestMemoryMmap;
+use vm_memory::{GuestMemory, GuestMemoryMmap};
 
 #[cfg(target_arch = "x86_64")]
 const FC_V0_23_MAX_DEVICES: u32 = 11;
@@ -64,6 +68,23 @@ pub struct MicrovmState {
     pub vcpu_states: Vec<VcpuState>,
     /// Device states.
     pub device_states: DeviceStates,
+}
+
+/// This describes the mapping between Firecracker base virtual address and offset in the
+/// buffer or file backend for a guest memory region. It is used to tell an external
+/// process/thread where to populate the guest memory data for this range.
+///
+/// E.g. Guest memory contents for a region of `size` bytes can be found in the backend
+/// at `offset` bytes from the beginning, and should be copied/populated into `base_host_address`.
+#[derive(Clone, Debug, Serialize)]
+pub struct RegionBackendMapping {
+    /// Base host virtual address where the guest memory contents for this region
+    /// should be copied/populated.
+    pub base_h_va: u64,
+    /// Region size.
+    pub size: usize,
+    /// Offset in the backend file/buffer where the region contents are.
+    pub offset: u64,
 }
 
 /// Errors related to saving and restoring Microvm state.
@@ -494,12 +515,61 @@ fn guest_memory_from_file(
         .map_err(DeserializeMemory)
 }
 
+// TODO: turn expect()s into Err(smth).
 fn guest_memory_from_uffd(
-    _mem_file_path: &Path,
-    _mem_state: &GuestMemoryState,
-    _track_dirty_pages: bool,
+    mem_uds_path: &Path,
+    mem_state: &GuestMemoryState,
+    track_dirty_pages: bool,
 ) -> std::result::Result<GuestMemoryMmap, LoadSnapshotError> {
-    unimplemented!()
+    use self::LoadSnapshotError::DeserializeMemory;
+
+    let guest_memory =
+        GuestMemoryMmap::restore(None, mem_state, track_dirty_pages).map_err(DeserializeMemory)?;
+
+    let uffd = UffdBuilder::new()
+        .close_on_exec(true)
+        .non_blocking(true)
+        .create()
+        .expect("uffd creation");
+    let mut backend_mappings = Vec::with_capacity(guest_memory.num_regions());
+    for (mem_region, state_region) in guest_memory.iter().zip(mem_state.regions.iter()) {
+        let host_base_addr = mem_region.as_ptr();
+        let size = mem_region.size();
+        info!(
+            "Uffd register mem region base hVA = {:p}, len={:?}, state len={:?}, file_offt={:?}",
+            host_base_addr, size, state_region.size, state_region.offset,
+        );
+        uffd.register(host_base_addr as _, size as _)
+            .expect("uffd.register()");
+        backend_mappings.push(RegionBackendMapping {
+            base_h_va: host_base_addr as u64,
+            size,
+            offset: state_region.offset,
+        });
+    }
+    let backend_mappings = serde_json::to_string(&backend_mappings).unwrap();
+
+    debug!("Connecting to UDS {:?} to send Uffd.", mem_uds_path);
+    let socket = UnixStream::connect(mem_uds_path).expect("cannot connect to UDS");
+    let bytes_sent = socket
+        .send_with_fd(
+            backend_mappings.as_bytes(),
+            // TODO: use `into_raw_fd` so we don't close uffd on drop. In the happy case we
+            // can close the fd since other process has it open and is serving pages.
+            // The problem is that if other process crashes/exits, firecracker guest memory
+            // will simply revert to anon-mem behavior which would lead to silent errors and UB.
+            // If the fault serving process exits while we hold a copy of the FD as well, the
+            // uffd will still be alive but with no one to serve faults leading to guest freeze
+            // (which is an unfortunate, but explicit and defined behavior).
+            uffd.as_raw_fd(),
+        )
+        .expect("cannot send uffd");
+    info!(
+        "Sent Uffd + {} bytes containing memory mappings on UDS {:?}",
+        bytes_sent, mem_uds_path
+    );
+
+    Ok(guest_memory)
 }
 
 #[cfg(target_arch = "x86_64")]

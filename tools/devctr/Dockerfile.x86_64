@@ -26,6 +26,7 @@ ENV LC_ALL=C.UTF-8
 RUN apt-get update \
     && apt-get -y install --no-install-recommends \
         binutils-dev \
+        clang \
         cmake \
         curl \
         file \
@@ -41,6 +42,9 @@ RUN apt-get update \
         libssl1.0-dev \
         lsof \
         make \
+        musl \
+        musl-dev \
+        musl-tools \
         net-tools \
         openssh-client \
         pkgconf \
@@ -91,6 +95,12 @@ RUN mkdir "$TMP_BUILD_DIR" \
         && ln -s "$CARGO_GIT_REGISTRY_DIR" "$CARGO_HOME/git" \
     && cd / \
     && rm -rf "$TMP_BUILD_DIR"
+
+# help musl-gcc find linux headers
+RUN cd /usr/include/x86_64-linux-musl \
+    && ln -s ../x86_64-linux-gnu/asm asm \
+    && ln -s ../linux linux \
+    && ln -s ../asm-generic asm-generic
 
 # Build iperf3-vsock
 RUN mkdir "$TMP_BUILD_DIR" && cd "$TMP_BUILD_DIR" \
