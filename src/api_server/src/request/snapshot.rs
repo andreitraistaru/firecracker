@@ -107,7 +107,8 @@ mod tests {
 
         let mut expected_cfg = LoadSnapshotParams {
             snapshot_path: PathBuf::from("foo"),
-            mem_file_path: PathBuf::from("bar"),
+            mem_backend_type: Default::default(),
+            mem_backend_path: PathBuf::from("bar"),
             enable_diff_snapshots: false,
             resume_vm: false,
         };
@@ -125,7 +126,8 @@ mod tests {
 
         expected_cfg = LoadSnapshotParams {
             snapshot_path: PathBuf::from("foo"),
-            mem_file_path: PathBuf::from("bar"),
+            mem_backend_type: Default::default(),
+            mem_backend_path: PathBuf::from("bar"),
             enable_diff_snapshots: true,
             resume_vm: false,
         };
@@ -144,7 +146,8 @@ mod tests {
 
         expected_cfg = LoadSnapshotParams {
             snapshot_path: PathBuf::from("foo"),
-            mem_file_path: PathBuf::from("bar"),
+            mem_backend_type: Default::default(),
+            mem_backend_path: PathBuf::from("bar"),
             enable_diff_snapshots: false,
             resume_vm: true,
         };

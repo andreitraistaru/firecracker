@@ -18,8 +18,26 @@ pub enum SnapshotType {
 }
 
 impl Default for SnapshotType {
-    fn default() -> SnapshotType {
+    fn default() -> Self {
         SnapshotType::Full
+    }
+}
+
+/// Specifies the type of guest memory backend:
+/// 1) A file that contains the guest memory to be loaded,
+/// 2) An UDS where a custom page-fault handler process is listening for
+///    the UFFD set up by Firecracker to handle its guest memory page faults.
+#[derive(Debug, Deserialize, PartialEq)]
+pub enum MemBackendType {
+    /// Guest memory contents will be loaded from a file.
+    File,
+    /// Guest memory will be served through UFFD by a separate process.
+    UffdOverUDS,
+}
+
+impl Default for MemBackendType {
+    fn default() -> Self {
+        MemBackendType::File
     }
 }
 
@@ -41,13 +59,15 @@ pub struct CreateSnapshotParams {
 }
 
 /// Stores the configuration that will be used for loading a snapshot.
-#[derive(Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LoadSnapshotParams {
     /// Path to the file that contains the microVM state to be loaded.
     pub snapshot_path: PathBuf,
-    /// Path to the file that contains the guest memory to be loaded.
-    pub mem_file_path: PathBuf,
+    /// Specifies guest memory backend type.
+    pub mem_backend_type: MemBackendType,
+    /// Path to the backend used to handle the guest memory.
+    pub mem_backend_path: PathBuf,
     /// Setting this flag will enable KVM dirty page tracking and will
     /// allow taking subsequent incremental snapshots.
     #[serde(default)]

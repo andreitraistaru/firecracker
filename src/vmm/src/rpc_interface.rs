@@ -206,10 +206,10 @@ pub enum VmmData {
     Empty,
     /// The complete microVM configuration in JSON format.
     FullVmConfig(VmmConfig),
-    /// The microVM configuration represented by `VmConfig`.
-    MachineConfiguration(VmConfig),
     /// The microVM instance information.
     InstanceInformation(InstanceInfo),
+    /// The microVM configuration represented by `VmConfig`.
+    MachineConfiguration(VmConfig),
 }
 
 /// Shorthand result type for external VMM commands.
@@ -1214,7 +1214,8 @@ mod tests {
         // Without resume.
         let req = VmmAction::LoadSnapshot(LoadSnapshotParams {
             snapshot_path: PathBuf::new(),
-            mem_file_path: PathBuf::new(),
+            mem_backend_type: Default::default(),
+            mem_backend_path: PathBuf::new(),
             enable_diff_snapshots: false,
             resume_vm: false,
         });
@@ -1227,7 +1228,8 @@ mod tests {
         // With resume.
         let req = VmmAction::LoadSnapshot(LoadSnapshotParams {
             snapshot_path: PathBuf::new(),
-            mem_file_path: PathBuf::new(),
+            mem_backend_type: Default::default(),
+            mem_backend_path: PathBuf::new(),
             enable_diff_snapshots: false,
             resume_vm: true,
         });
@@ -1601,7 +1603,8 @@ mod tests {
         check_runtime_request_err(
             VmmAction::LoadSnapshot(LoadSnapshotParams {
                 snapshot_path: PathBuf::new(),
-                mem_file_path: PathBuf::new(),
+                mem_backend_type: Default::default(),
+                mem_backend_path: PathBuf::new(),
                 enable_diff_snapshots: false,
                 resume_vm: false,
             }),
@@ -1620,7 +1623,8 @@ mod tests {
         // Load snapshot should no longer be allowed.
         let req = VmmAction::LoadSnapshot(LoadSnapshotParams {
             snapshot_path: PathBuf::new(),
-            mem_file_path: PathBuf::new(),
+            mem_backend_type: Default::default(),
+            mem_backend_path: PathBuf::new(),
             enable_diff_snapshots: false,
             resume_vm: false,
         });
