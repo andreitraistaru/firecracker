@@ -94,7 +94,7 @@ pub struct UffdBackendDescription {
     pub regions: Vec<RegionBackendMapping>,
     /// Uffd used to handle pagefaults and populate regions with content from backend.
     #[serde(skip_serializing)]
-    pub uffd: Uffd,
+    pub uffd: Option<Uffd>,
 }
 
 /// Errors related to saving and restoring Microvm state.
@@ -567,7 +567,7 @@ fn guest_memory_from_uffd(
 
     let uffd_backend_desc = UffdBackendDescription {
         regions: backend_mappings,
-        uffd,
+        uffd: Some(uffd),
     };
     info!("created uffd backend description");
     let uffd_mappings_json = serde_json::to_string(&uffd_backend_desc).unwrap();
@@ -576,11 +576,20 @@ fn guest_memory_from_uffd(
     // Serve UFFD PFs on another thread in this process.
     // let mem_file_path = params.mem_backend_path.clone();
     // std::thread::spawn(move || uffd_handler(uffd_backend_desc, mem_file_path));
+    info!("connecting to UDS {:?}", mem_uds_path);
     let socket = UnixStream::connect(mem_uds_path).expect("cannot connect to UDS");
+    info!("Sending uffd + mem mappings");
     socket
         .send_with_fd(
             uffd_mappings_json.as_bytes(),
-            uffd_backend_desc.uffd.as_raw_fd(),
+            // TODO: use `into_raw_fd` so we don't close uffd on drop. In the happy case we
+            // can close the fd since other process has it open and is serving pages.
+            // The problem is that if other process crashes/exits, firecracker guest memory
+            // will simply revert to anon-mem behavior which would lead to silent errors and UB.
+            // If the fault serving process exits while we hold a copy of the FD as well, the
+            // uffd will still be alive but with no one to serve faults leading to guest freeze
+            // (which is an unfortunate, but explicit and defined behavior).
+            uffd_backend_desc.uffd.as_ref().unwrap().as_raw_fd(),
         )
         .expect("cannot send uffd");
     info!("sent uffd");
