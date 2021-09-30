@@ -2,7 +2,7 @@ use libc::c_void;
 use nix::poll::{poll, PollFd, PollFlags};
 use nix::sys::mman::{mmap, MapFlags, ProtFlags};
 use nix::unistd::{sysconf, SysconfVar};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::fs::File;
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
@@ -10,21 +10,19 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::{Arc, Barrier};
-use std::time::Duration;
 use userfaultfd::Uffd;
 use vmm_sys_util::sock_ctrl_msg::ScmSocket;
 
-// these are copy/pasted from firecracker vmm
+// copy/pasted from firecracker vmm
 mod firecracker_imports {
-    use super::*;
-
+    use super::Deserialize;
     /// This describes the mapping between Firecracker base virtual address and offset in the
     /// buffer or file backend for a guest memory region. It is used to tell an external
     /// process/thread where to populate the guest memory data for this range.
     ///
     /// E.g. Guest memory contents for a region of `size` bytes can be found in the backend
     /// at `offset` bytes from the beginning, and should be copied/populated into `base_host_address`.
-    #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+    #[derive(Clone, Debug, Default, Deserialize)]
     pub struct RegionBackendMapping {
         /// Base host virtual address where the guest memory contents for this region
         /// should be copied/populated.
@@ -34,24 +32,13 @@ mod firecracker_imports {
         /// Offset in the backend file/buffer where the region contents are.
         pub offset: u64,
     }
-
-    /// Describes memory regions backed by inner uffd.
-    #[derive(Debug, Default, Deserialize, Serialize)]
-    pub struct UffdBackendDescription {
-        /// Region mappings: host addr <-> backend offset.
-        pub regions: Vec<RegionBackendMapping>,
-        /// Uffd used to handle pagefaults and populate regions with content from backend.
-        #[serde(skip_deserializing, skip_serializing)]
-        pub uffd: Option<Uffd>,
-    }
 }
-use firecracker_imports::UffdBackendDescription;
+use firecracker_imports::RegionBackendMapping;
 
-fn uffd_handler(uffd_desc: UffdBackendDescription, mem_file_path: PathBuf) {
+fn uffd_handler(regions: Vec<RegionBackendMapping>, uffd: Uffd, mem_file_path: PathBuf) {
     let page_size = sysconf(SysconfVar::PAGE_SIZE).unwrap().unwrap() as usize;
-    let uffd = uffd_desc.uffd.as_ref().unwrap();
 
-    let memsize = uffd_desc.regions.iter().map(|r| r.size).sum();
+    let memsize = regions.iter().map(|r| r.size).sum();
     let file = File::open(mem_file_path).expect("cannot open memfile");
     assert_eq!(memsize as u64, file.metadata().unwrap().len());
 
@@ -99,7 +86,7 @@ fn uffd_handler(uffd_desc: UffdBackendDescription, mem_file_path: PathBuf) {
                 dst
             );
             let mut found_mapping = None;
-            for r in uffd_desc.regions.iter() {
+            for r in regions.iter() {
                 let fault_page_addr = dst as u64;
                 if r.base_h_va <= fault_page_addr && fault_page_addr < r.base_h_va + r.size as u64 {
                     found_mapping = Some(r.clone());
@@ -171,21 +158,19 @@ fn uffd_thread(uffd_sock_path: String, mem_file_path: String, barrier: Arc<Barri
     let (bytes_read, file) = stream
         .recv_with_fd(&mut message_buf[..])
         .expect("cannot recv_with_fd");
+    message_buf.resize(bytes_read, 0);
     let passed_fd = file.is_some();
+
     let body = String::from_utf8(message_buf).unwrap();
     println!(
-        "API response with {} bytes and {} FD:\n{}",
-        bytes_read,
-        passed_fd,
-        body
+        "API response with {} bytes and {} FD:\n{:?}",
+        bytes_read, passed_fd, body
     );
 
-    let mut mem_desc = serde_json::from_str::<UffdBackendDescription>(&body)
-        .expect("deser failed");
-    mem_desc.uffd = Some(unsafe { Uffd::from_raw_fd(file.unwrap().into_raw_fd()) });
+    let mem_desc = serde_json::from_str::<Vec<RegionBackendMapping>>(&body).expect("deser failed");
+    let uffd = unsafe { Uffd::from_raw_fd(file.unwrap().into_raw_fd()) };
 
-    uffd_handler(mem_desc, mem_file_path.into());
-    // std::mem::forget(mem_desc);
+    uffd_handler(mem_desc, uffd, mem_file_path.into());
     println!("Uffd thread done!");
 }
 
@@ -193,8 +178,8 @@ fn main() {
     println!("Connecting to Firecracker API.");
 
     // TODO: make paths configurable thru cmdline params.
-    let snapshot_path = "foo.image";
-    let mem_file_path = "foo.mem";
+    let snapshot_path = "./foo.image";
+    let mem_file_path = "/tmp/foo.mem";
     let path_to_api_socket = "/tmp/firecracker-sb0.sock";
     let path_to_uffd_socket = "/tmp/firecracker-sb0-uffd.sock";
 
@@ -205,11 +190,10 @@ fn main() {
     let uffd_sock_path = path_to_uffd_socket.to_string();
     let mem_fpath = mem_file_path.to_string();
     let uds_barrier = barrier.clone();
-    std::thread::spawn(move || uffd_thread(uffd_sock_path, mem_fpath, uds_barrier));
+
+    let handle = std::thread::spawn(move || uffd_thread(uffd_sock_path, mem_fpath, uds_barrier));
     // Wait for uffd thread to start listening on uffd UDS before sending API call to fc.
     barrier.wait();
-    // TODO: remove sleep
-    std::thread::sleep(Duration::from_micros(500));
     println!("Sending Load Snap API call.");
 
     let body = format!(
@@ -224,4 +208,6 @@ fn main() {
     firecracker_api_call(&mut socket, "PUT /snapshot/load", &body);
 
     firecracker_api_call(&mut socket, "PATCH /vm", "{\"state\":\"Resumed\"}");
+
+    handle.join().expect("uffd thread crashed");
 }

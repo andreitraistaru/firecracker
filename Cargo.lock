@@ -1090,7 +1090,11 @@ version = "0.26.0"
 dependencies = [
  "libc",
  "micro_http",
+ "nix 0.23.0",
  "regex",
+ "serde",
+ "serde_json",
+ "userfaultfd",
  "utils",
  "vmm-sys-util",
 ]
@@ -1228,7 +1232,6 @@ dependencies = [
  "linux-loader",
  "logger",
  "mmds",
- "nix 0.23.0",
  "rate_limiter",
  "seccompiler",
  "serde",
