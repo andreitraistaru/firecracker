@@ -569,14 +569,14 @@ pub fn restore_from_snapshot(
     let mem_state = &microvm_state.memory_state;
 
     // Add uffd support, but keep it hardcoded off.
-    let uffd_backend = true;
+    let uffd_backend = false;
 
     let mem_file = if uffd_backend {
         // No memfile used, uffd will provide memory contents.
         None
     } else {
         // Memory contents coming from memfile.
-        Some(File::open(&params.mem_file_path).map_err(MemoryBackingFile)?)
+        Some(File::open(&params.mem_backend_path).map_err(MemoryBackingFile)?)
     };
     let guest_memory = GuestMemoryMmap::restore(mem_file.as_ref(), mem_state, track_dirty_pages)
         .map_err(DeserializeMemory)?;
@@ -615,7 +615,7 @@ pub fn restore_from_snapshot(
 
         // DEBUG
         // Serve UFFD PFs on another thread in this process.
-        let mem_file_path = params.mem_file_path.clone();
+        let mem_file_path = params.mem_backend_path.clone();
         std::thread::spawn(move || uffd_handler(uffd_backend_desc.take().unwrap(), mem_file_path));
     }
 
