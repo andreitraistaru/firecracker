@@ -20,3 +20,11 @@ seccompiler = { path = "../seccompiler" }
 snapshot = { path = "../snapshot"}
 utils = { path = "../utils" }
 vmm = { path = "../vmm" }
+
+[dev-dependencies]
+nix = "0.23.0"
+regex = ">=1.0.0"
+serde = { version = ">=1.0.27", features = ["derive"] }
+serde_json = ">=1.0.9"
+userfaultfd = ">=0.4.0"
+micro_http = { git = "https://github.com/firecracker-microvm/micro-http", rev = "36e59a0" }
