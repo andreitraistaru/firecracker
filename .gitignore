@@ -8,4 +8,6 @@ __pycache__
 *.pyc
 .vscode
 test_results/*
+tools/measure_i8042_boot_time_impact/data/*
+tools/measure_i8042_boot_time_impact/data.csv
 *.core

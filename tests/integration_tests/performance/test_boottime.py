@@ -109,3 +109,60 @@ def _configure_and_run_vm(microvm, network_info=None, initrd=False):
 
     microvm.start()
     return _tap if network_info else None
+
+
+def test_boottime_no_network_i8042(test_microvm_with_i8042):
+    """
+    Measure boot time of microVM without a network device for i8042 performance impact analysis.
+
+    @type: performance
+    """
+    vm = test_microvm_with_i8042
+    vm.jailer.extra_args.update({"boot-timer": None})
+    _ = _configure_and_run_vm(vm)
+
+    boottime_us = 0
+    timestamps = vm.find_log_message(TIMESTAMP_LOG_REGEX)
+    if timestamps:
+        boottime_us = int(timestamps[0])
+    assert boottime_us > 0
+
+    return boottime_us, f""
+
+
+def test_boottime_with_network_i8042(test_microvm_with_i8042, network_config):
+    """
+    Measure boot time of microVM with a network device for i8042 performance impact analysis.
+
+    @type: performance
+    """
+    vm = test_microvm_with_i8042
+    vm.jailer.extra_args.update({"boot-timer": None})
+    _tap = _configure_and_run_vm(vm, {"config": network_config, "iface_id": "1"})
+
+    boottime_us = 0
+    timestamps = vm.find_log_message(TIMESTAMP_LOG_REGEX)
+    if timestamps:
+        boottime_us = int(timestamps[0])
+    assert boottime_us > 0
+
+    return boottime_us, f""
+
+
+def test_boottime_initrd_i8042(test_microvm_with_i8042_initrd):
+    """
+    Measure boot time of microVM when using an initrd for i8042 performance impact analysis.
+
+    @type: performance
+    """
+    vm = test_microvm_with_i8042_initrd
+    vm.jailer.extra_args.update({"boot-timer": None})
+    _tap = _configure_and_run_vm(vm, initrd=True)
+
+    boottime_us = 0
+    timestamps = vm.find_log_message(TIMESTAMP_LOG_REGEX)
+    if timestamps:
+        boottime_us = int(timestamps[0])
+    assert boottime_us > 0
+
+    return boottime_us, f""

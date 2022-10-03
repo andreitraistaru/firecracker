@@ -616,7 +616,7 @@ class Microvm:
             f"`{messages}` were not found in this log: {self.log_data}"
         )
 
-    @retry(delay=0.1, tries=5)
+    @retry(delay=0.1, tries=10)
     def find_log_message(self, regex):
         """Wait until `regex` appears in logging output and return it."""
         reg_res = re.findall(regex, self.log_data)
