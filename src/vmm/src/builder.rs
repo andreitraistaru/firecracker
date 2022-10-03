@@ -272,12 +272,8 @@ fn create_vmm_and_vcpus(
             Box::new(io::stdout()),
         )
         .map_err(Internal)?;
-        // x86_64 uses the i8042 reset event as the Vmm exit event.
-        let reset_evt = vcpus_exit_evt
-            .try_clone()
-            .map_err(Error::EventFd)
-            .map_err(Internal)?;
-        create_pio_dev_manager_with_legacy_devices(&vm, serial_device, reset_evt)
+
+        create_pio_dev_manager_with_legacy_devices(&vm, serial_device)
             .map_err(Internal)?
     };
 
@@ -791,10 +787,9 @@ pub fn setup_rtc_device() -> Arc<Mutex<RTCDevice>> {
 fn create_pio_dev_manager_with_legacy_devices(
     vm: &Vm,
     serial: Arc<Mutex<SerialDevice>>,
-    i8042_reset_evfd: EventFd,
 ) -> std::result::Result<PortIODeviceManager, super::Error> {
     let mut pio_dev_mgr =
-        PortIODeviceManager::new(serial, i8042_reset_evfd).map_err(Error::CreateLegacyDevice)?;
+        PortIODeviceManager::new(serial).map_err(Error::CreateLegacyDevice)?;
     pio_dev_mgr
         .register_devices(vm.fd())
         .map_err(Error::LegacyIOBus)?;
@@ -1093,7 +1088,6 @@ pub mod tests {
                 ),
                 input: None,
             })),
-            EventFd::new(libc::EFD_NONBLOCK).unwrap(),
         )
         .unwrap()
     }

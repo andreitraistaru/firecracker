@@ -132,9 +132,6 @@ pub enum Error {
     /// Cannot read from an Event file descriptor.
     #[error("Event fd error: {0}")]
     EventFd(io::Error),
-    /// I8042 Error.
-    #[error("I8042 error: {0}")]
-    I8042Error(devices::legacy::I8042DeviceError),
     /// Cannot access kernel file.
     #[error("Cannot access kernel file: {0}")]
     KernelFile(io::Error),
@@ -452,12 +449,7 @@ impl Vmm {
     /// Injects CTRL+ALT+DEL keystroke combo in the i8042 device.
     #[cfg(target_arch = "x86_64")]
     pub fn send_ctrl_alt_del(&mut self) -> Result<()> {
-        self.pio_device_manager
-            .i8042
-            .lock()
-            .expect("i8042 lock was poisoned")
-            .trigger_ctrl_alt_del()
-            .map_err(Error::I8042Error)
+        todo!()
     }
 
     /// Saves the state of a paused Microvm.

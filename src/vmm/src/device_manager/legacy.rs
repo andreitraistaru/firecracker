@@ -55,12 +55,11 @@ fn create_serial(com_event: EventFdTrigger) -> Result<Arc<Mutex<SerialDevice>>> 
 }
 
 /// The `PortIODeviceManager` is a wrapper that is used for registering legacy devices
-/// on an I/O Bus. It currently manages the uart and i8042 devices.
+/// on an I/O Bus. It currently manages the uart device.
 /// The `LegacyDeviceManger` should be initialized only by using the constructor.
 pub struct PortIODeviceManager {
     pub io_bus: devices::Bus,
     pub stdio_serial: Arc<Mutex<SerialDevice>>,
-    pub i8042: Arc<Mutex<devices::legacy::I8042Device>>,
 
     // Communication event on ports 1 & 3.
     pub com_evt_1_3: EventFdTrigger,
@@ -87,14 +86,9 @@ impl PortIODeviceManager {
     const SERIAL_PORT_ADDRESSES: [u64; 4] = [0x3f8, 0x2f8, 0x3e8, 0x2e8];
     /// Size of legacy serial ports.
     const SERIAL_PORT_SIZE: u64 = 0x8;
-    /// i8042 keyboard data register address. See
-    /// <https://elixir.bootlin.com/linux/latest/source/drivers/input/serio/i8042-io.h#L41>.
-    const I8042_KDB_DATA_REGISTER_ADDRESS: u64 = 0x060;
-    /// i8042 keyboard data register size.
-    const I8042_KDB_DATA_REGISTER_SIZE: u64 = 0x5;
 
-    /// Create a new DeviceManager handling legacy devices (uart, i8042).
-    pub fn new(serial: Arc<Mutex<SerialDevice>>, i8042_reset_evfd: EventFd) -> Result<Self> {
+    /// Create a new DeviceManager handling legacy devices (uart).
+    pub fn new(serial: Arc<Mutex<SerialDevice>>) -> Result<Self> {
         let io_bus = devices::Bus::new();
         let com_evt_1_3 = serial
             .lock()
@@ -105,15 +99,9 @@ impl PortIODeviceManager {
         let com_evt_2_4 = EventFdTrigger::new(EventFd::new(EFD_NONBLOCK)?);
         let kbd_evt = EventFd::new(libc::EFD_NONBLOCK)?;
 
-        let i8042 = Arc::new(Mutex::new(devices::legacy::I8042Device::new(
-            i8042_reset_evfd,
-            kbd_evt.try_clone()?,
-        )));
-
         Ok(PortIODeviceManager {
             io_bus,
             stdio_serial: serial,
-            i8042,
             com_evt_1_3,
             com_evt_2_4,
             kbd_evt,
@@ -143,11 +131,6 @@ impl PortIODeviceManager {
             serial_2_4,
             Self::SERIAL_PORT_ADDRESSES[3],
             Self::SERIAL_PORT_SIZE,
-        )?;
-        self.io_bus.insert(
-            self.i8042.clone(),
-            Self::I8042_KDB_DATA_REGISTER_ADDRESS,
-            Self::I8042_KDB_DATA_REGISTER_SIZE,
         )?;
 
         vm_fd

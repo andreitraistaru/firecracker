@@ -5,7 +5,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-mod i8042;
 #[cfg(target_arch = "aarch64")]
 mod rtc_pl031;
 pub mod serial;
@@ -16,7 +15,6 @@ use std::ops::Deref;
 use utils::eventfd::EventFd;
 use vm_superio::Trigger;
 
-pub use self::i8042::{Error as I8042DeviceError, I8042Device};
 #[cfg(target_arch = "aarch64")]
 pub use self::rtc_pl031::RTCDevice;
 pub use self::serial::{SerialDevice, SerialEventsWrapper, SerialWrapper};
