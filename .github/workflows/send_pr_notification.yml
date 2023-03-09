@@ -1,0 +1,13 @@
+name: Send notification on PR opened
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+jobs:
+  send_notification:
+    runs-on: ubuntu-latest
+    steps:
+      - name: notify
+        run: |
+          curl -d '{ "GITHUB_PR_URL": "${{ github.event.pull_request.html_url }}" }' ${{ secrets.SLACK_PR_NOTIFICATION_WEBHOOK }}
