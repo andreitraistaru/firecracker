@@ -4,6 +4,7 @@ on:
   pull_request_target:
     types: [opened, reopened]
 
+
 jobs:
   send_notification:
     runs-on: ubuntu-latest
