@@ -6,7 +6,7 @@ on:
 
 jobs:
   send_notification:
-    if: github.event.label.name == "Status:\ Reviewer"
+    if: ${{ github.event.label.name == "Status:\ Reviewer" }}
     runs-on: ubuntu-latest
     steps:
       - name: notify
