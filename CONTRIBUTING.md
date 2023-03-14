@@ -94,11 +94,7 @@ Your contribution needs to meet the following standards:
     performance improvements).
   - Safety, as per [`clippy::undocumented_unsafe_blocks`](https://rust-lang.github.io/rust-clippy/master/#undocumented_unsafe_blocks).
     This comment must list all invariants of the called function, and
-    explain why there are upheld. If relevant, it must also prove that
-    [undefined behavior](https://doc.rust-lang.org/reference/behavior-considered-undefined.html)
-    is not possible.
-
-  [^1]: Performance improvements in non-hot paths are unlikely to be considered valuable.
+    explain why there arovements in non-hot paths are unlikely to be considered valuable.
 
   E.g.
 
