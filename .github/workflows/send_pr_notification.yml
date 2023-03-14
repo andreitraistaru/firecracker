@@ -1,5 +1,6 @@
 name: Send notification on PR opened
 
+
 on:
   pull_request_target:
     types: [labeled]
