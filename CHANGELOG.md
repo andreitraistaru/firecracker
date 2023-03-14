@@ -1,11 +1,12 @@
 # Changelog
 
-## [Unre
-leased]
+## [Unreleased]
 
 ### Fixed
 
-- Fixed feature flags in T2S CPU template on Intel Ice Lake.
+- Fixed feature flags in
+-  T2S CPU template on Intel Ice Lake.
+
 
 ## [1.3.0]
 
