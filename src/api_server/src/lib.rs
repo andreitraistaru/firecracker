@@ -192,6 +192,7 @@ impl ApiServer {
             for server_request in request_vec {
                 let request_processing_start_us =
                     utils::time::get_time_us(utils::time::ClockType::Monotonic);
+                debug!("server_request:process IN");
                 server
                     .respond(
                         // Use `self.handle_request()` as the processing callback.
@@ -203,6 +204,7 @@ impl ApiServer {
                         error!("API Server encountered an error on response: {}", err);
                         Ok(())
                     })?;
+                debug!("server_request:process OUT");
 
                 let delta_us = utils::time::get_time_us(utils::time::ClockType::Monotonic)
                     - request_processing_start_us;
@@ -225,21 +227,31 @@ impl ApiServer {
         request: &Request,
         request_processing_start_us: u64,
     ) -> Response {
+        debug!("handle_request: IN");
         match ParsedRequest::try_from_request(request).map(|r| r.into_parts()) {
             Ok((req_action, mut parsing_info)) => {
+                debug!("handle_request:ParsedRequest::try_from_request:req_action IN");
                 let mut response = match req_action {
                     RequestAction::Sync(vmm_action) => {
-                        self.serve_vmm_action_request(vmm_action, request_processing_start_us)
+                        debug!("handle_request:Sync(vmm_action) IN");
+                        let ret = self.serve_vmm_action_request(vmm_action, request_processing_start_us);
+                        debug!("handle_request:Sync(vmm_action) OUT");
+                        ret
                     }
                     RequestAction::ShutdownInternal => {
+                        debug!("handle_request:ShutdownInternal IN");
                         self.shutdown_flag = true;
-                        Response::new(Version::Http11, StatusCode::NoContent)
+                        let ret = Response::new(Version::Http11, StatusCode::NoContent);
+                        debug!("handle_request:ShutdownInternal OUT");
+                        ret
                     }
                 };
+                debug!("handle_request:ParsedRequest::try_from_request:req_action --");
                 if let Some(message) = parsing_info.take_deprecation_message() {
                     warn!("{}", message);
                     response.set_deprecation();
                 }
+                debug!("handle_request:ParsedRequest::try_from_request:req_action OUT");
                 response
             }
             Err(err) => {
@@ -247,6 +259,7 @@ impl ApiServer {
                 err.into()
             }
         }
+        // debug!("handle_request: OUT");
     }
 
     fn serve_vmm_action_request(
@@ -276,8 +289,11 @@ impl ApiServer {
         self.api_request_sender
             .send(vmm_action)
             .expect("Failed to send VMM message");
+        debug!("api_server::serve_vmm_action_request() API request sent");
         self.to_vmm_fd.write(1).expect("Cannot update send VMM fd");
+        debug!("api_server::serve_vmm_action_request() calling API response");
         let vmm_outcome = *(self.vmm_response_receiver.recv().expect("VMM disconnected"));
+        debug!("api_server::serve_vmm_action_request() received API response");
         let response = ParsedRequest::convert_to_response(&vmm_outcome);
 
         if vmm_outcome.is_ok() {
