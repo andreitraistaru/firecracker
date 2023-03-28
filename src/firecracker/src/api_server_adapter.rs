@@ -76,6 +76,7 @@ impl MutEventSubscriber for ApiServerAdapter {
 
         debug!("firecracker::api_server_adapter::ApiServerAdapter::process() IN");
         if source == self.api_event_fd.as_raw_fd() && event_set == EventSet::IN {
+            let _ = self.api_event_fd.read();
             debug!("firecracker::api_server_adapter::ApiServerAdapter::process() EventSet::IN");
             match self.from_api.try_recv() {
                 Ok(api_request) => {
@@ -115,7 +116,6 @@ impl MutEventSubscriber for ApiServerAdapter {
                 }
             };
             debug!("firecracker::api_server_adapter::ApiServerAdapter::process() read");
-            let _ = self.api_event_fd.read();
             debug!("firecracker::api_server_adapter::ApiServerAdapter::process() read done");
         } else {
             error!("Spurious EventManager event for handler: ApiServerAdapter");
@@ -145,7 +145,7 @@ pub(crate) fn run_with_api(
     // FD to notify of API events. This is a blocking eventfd by design.
     // It is used in the config/pre-boot loop which is a simple blocking loop
     // which only consumes API events.
-    let api_event_fd = EventFd::new(0).expect("Cannot create API Eventfd.");
+    let api_event_fd = EventFd::new(libc::EFD_SEMAPHORE).expect("Cannot create API Eventfd.");
 
     // Channels for both directions between Vmm and Api threads.
     let (to_vmm, from_api) = channel();
