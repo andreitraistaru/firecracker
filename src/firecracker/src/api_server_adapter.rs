@@ -39,6 +39,7 @@ impl ApiServerAdapter {
         vmm: Arc<Mutex<Vmm>>,
         event_manager: &mut EventManager,
     ) -> FcExitCode {
+        debug!("api_server_adapter():run_microvm() IN");
         let api_adapter = Arc::new(Mutex::new(Self {
             api_event_fd,
             from_api,
@@ -46,6 +47,7 @@ impl ApiServerAdapter {
             controller: RuntimeApiController::new(vm_resources, vmm.clone()),
         }));
         event_manager.add_subscriber(api_adapter);
+        debug!("api_server_adapter():run_microvm() before starting the VMM thread loop");
         loop {
             event_manager
                 .run()
@@ -142,10 +144,12 @@ pub(crate) fn run_with_api(
     mmds_size_limit: usize,
     metadata_json: Option<&str>,
 ) -> FcExitCode {
+    debug!("api_server_adapter::run_with_api() IN");
     // FD to notify of API events. This is a blocking eventfd by design.
     // It is used in the config/pre-boot loop which is a simple blocking loop
     // which only consumes API events.
     let api_event_fd = EventFd::new(libc::EFD_SEMAPHORE).expect("Cannot create API Eventfd.");
+    debug!("api_server_adapter::run_with_api() after api_event_fd with EFD_SEMAPHORE flag created");
 
     // Channels for both directions between Vmm and Api threads.
     let (to_vmm, from_api) = channel();
@@ -161,6 +165,7 @@ pub(crate) fn run_with_api(
         .expect("Missing seccomp filter for API thread.");
 
     // Start the separate API thread.
+    debug!("api_server_adapter::run_with_api() before starting the API thread");
     let api_thread = thread::Builder::new()
         .name("fc_api".to_owned())
         .spawn(move || {
@@ -189,12 +194,14 @@ pub(crate) fn run_with_api(
         })
         .expect("API thread spawn failed.");
 
+    debug!("api_server_adapter::run_with_api() before creating Event manager");
     let mut event_manager = EventManager::new().expect("Unable to create EventManager");
     // Create the firecracker metrics object responsible for periodically printing metrics.
     let firecracker_metrics = Arc::new(Mutex::new(super::metrics::PeriodicMetrics::new()));
     event_manager.add_subscriber(firecracker_metrics.clone());
 
     // Configure, build and start the microVM.
+    debug!("api_server_adapter::run_with_api() before building and starting the microvm");
     let build_result = match config_json {
         Some(json) => super::build_microvm_from_json(
             seccomp_filters,
@@ -230,6 +237,7 @@ pub(crate) fn run_with_api(
             metadata_json,
         ),
     };
+    debug!("api_server_adapter::run_with_api() after building and starting the microvm");
 
     let exit_code = match build_result {
         Ok((vm_resources, vmm)) => {
@@ -266,6 +274,7 @@ pub(crate) fn run_with_api(
     if socket_ready_receiver.recv() == Ok(true) {
         // "sock" var is declared outside of this "if" scope so that the socket's fd stays
         // alive until all bytes are sent through; otherwise fd will close before being flushed.
+        debug!("api_server_adapter::run_with_api() connecting to the socket to send /shutdown-internal");
         sock = UnixStream::connect(bind_path).unwrap();
         sock.write_all(b"PUT /shutdown-internal HTTP/1.1\r\n\r\n")
             .unwrap();
@@ -273,5 +282,6 @@ pub(crate) fn run_with_api(
     // This call to thread::join() should block until the API thread has processed the
     // shutdown-internal and returns from its function.
     api_thread.join().unwrap();
+    debug!("api_server_adapter::run_with_api() OUT");
     exit_code
 }

@@ -170,10 +170,12 @@ impl ApiServer {
         api_payload_limit: usize,
         socket_ready: mpsc::Sender<bool>,
     ) -> Result<()> {
+        debug!("api_server::bind_and_run() (first log from fc_api thread) IN");
         let mut server = HttpServer::new(path).unwrap_or_else(|e| {
             error!("Error creating the HTTP server: {}", e);
             std::process::exit(vmm::FcExitCode::GenericError as i32);
         });
+        debug!("api_server::bind_and_run() after creating the http server");
         // Announce main thread that the socket path was created.
         // As per the doc, "A send operation can only fail if the receiving end of a channel is disconnected".
         // so this means that the main thread has exited.
@@ -198,8 +200,10 @@ impl ApiServer {
             );
         }
 
+        debug!("api_server::bind_and_run() before starting the http server");
         server.start_server().expect("Cannot start HTTP server");
 
+        debug!("api_server::bind_and_run() before starting the API thread loop");
         loop {
             let request_vec = match server.requests() {
                 Ok(vec) => vec,

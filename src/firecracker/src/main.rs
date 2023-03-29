@@ -11,7 +11,7 @@ use std::process;
 use std::sync::{Arc, Mutex};
 
 use event_manager::SubscriberOps;
-use logger::{error, info, ProcessTimeReporter, StoreMetric, LOGGER, METRICS};
+use logger::{error, debug, info, ProcessTimeReporter, StoreMetric, LOGGER, METRICS};
 use seccompiler::BpfThreadMap;
 use snapshot::Snapshot;
 use utils::arg_parser::{ArgParser, Argument};
@@ -335,7 +335,9 @@ fn main_exitable() -> FcExitCode {
         })
         .unwrap_or_else(|| api_payload_limit);
 
+    debug!("main():main_exitable() after argparser created");
     if api_enabled {
+        debug!("main():main_exitable() api_enabled = true");
         let bind_path = arguments
             .single_value("api-sock")
             .map(PathBuf::from)
@@ -358,6 +360,8 @@ fn main_exitable() -> FcExitCode {
 
         let process_time_reporter =
             ProcessTimeReporter::new(start_time_us, start_time_cpu_us, parent_cpu_time_us);
+
+        debug!("main():main_exitable() before run_with_api");
         api_server_adapter::run_with_api(
             &mut seccomp_filters,
             vmm_config_json,
@@ -396,7 +400,9 @@ fn main() {
     //
     // See process_exitable() method of Subscriber trait for what triggers the exit_code.
     //
+    debug!("main() IN");
     let exit_code = main_exitable();
+    debug!("main() OUT");
     std::process::exit(exit_code as i32);
 }
 
