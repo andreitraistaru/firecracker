@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::{io, panic, process};
 
 use event_manager::SubscriberOps;
-use logger::{error, info, ProcessTimeReporter, StoreMetric, LOGGER, METRICS};
+use logger::{error, info, debug, ProcessTimeReporter, StoreMetric, LOGGER, METRICS};
 use seccompiler::BpfThreadMap;
 use snapshot::Snapshot;
 use utils::arg_parser::{ArgParser, Argument};
@@ -70,6 +70,8 @@ pub fn enable_ssbd_mitigation() {
 }
 
 fn main_exitable() -> FcExitCode {
+    debug!("main():main_exitable() IN");
+
     LOGGER
         .configure(Some(DEFAULT_INSTANCE_ID.to_string()))
         .expect("Failed to register logger");
@@ -358,11 +360,15 @@ fn main_exitable() -> FcExitCode {
         })
         .unwrap_or_else(|| api_payload_limit);
 
+    debug!("main():main_exitable() - finishing up with the argparser");
     if api_enabled {
+        debug!("main():main_exitable() - api_enabled = true");
         let bind_path = arguments
             .single_value("api-sock")
             .map(PathBuf::from)
             .expect("Missing argument: api-sock");
+
+        debug!("main():main_exitable() - api-sock = {bind_path}");
 
         let start_time_us = arguments.single_value("start-time-us").map(|s| {
             s.parse::<u64>()
@@ -381,6 +387,7 @@ fn main_exitable() -> FcExitCode {
 
         let process_time_reporter =
             ProcessTimeReporter::new(start_time_us, start_time_cpu_us, parent_cpu_time_us);
+        debug!("main():main_exitable() - before ::run_with_api()");
         api_server_adapter::run_with_api(
             &mut seccomp_filters,
             vmm_config_json,
@@ -406,6 +413,8 @@ fn main_exitable() -> FcExitCode {
             metadata_json.as_deref(),
         )
     }
+
+    debug!("main():main_exitable() OUT");
 }
 
 fn main() {
@@ -419,7 +428,9 @@ fn main() {
     //
     // See process_exitable() method of Subscriber trait for what triggers the exit_code.
     //
+    debug!("main() IN");
     let exit_code = main_exitable();
+    debug!("main() OUT");
     std::process::exit(exit_code as i32);
 }
 

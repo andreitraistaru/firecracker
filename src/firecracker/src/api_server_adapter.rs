@@ -11,7 +11,7 @@ use std::thread;
 
 use api_server::{ApiRequest, ApiResponse, ApiServer, ServerError};
 use event_manager::{EventOps, Events, MutEventSubscriber, SubscriberOps};
-use logger::{error, warn, ProcessTimeReporter};
+use logger::{error, debug, warn, ProcessTimeReporter};
 use seccompiler::BpfThreadMap;
 use utils::epoll::EventSet;
 use utils::eventfd::EventFd;
@@ -126,10 +126,12 @@ pub(crate) fn run_with_api(
     mmds_size_limit: usize,
     metadata_json: Option<&str>,
 ) -> FcExitCode {
+    debug!("api_server_adapter::run_with_api() IN");
     // FD to notify of API events. This is a blocking eventfd by design.
     // It is used in the config/pre-boot loop which is a simple blocking loop
     // which only consumes API events.
     let api_event_fd = EventFd::new(libc::EFD_SEMAPHORE).expect("Cannot create API Eventfd.");
+    debug!("api_server_adapter::run_with_api() api_event_fd with EFD_SEMAPHORE flag created");
 
     // Channels for both directions between Vmm and Api threads.
     let (to_vmm, from_api) = channel();
@@ -145,6 +147,7 @@ pub(crate) fn run_with_api(
         .expect("Missing seccomp filter for API thread.");
 
     // Start the separate API thread.
+    debug!("api_server_adapter::run_with_api() before starting API thread...");
     let api_thread = thread::Builder::new()
         .name("fc_api".to_owned())
         .spawn(move || {
@@ -175,11 +178,13 @@ pub(crate) fn run_with_api(
         .expect("API thread spawn failed.");
 
     let mut event_manager = EventManager::new().expect("Unable to create EventManager");
+    debug!("api_server_adapter::run_with_api() after eventmanager created");
     // Create the firecracker metrics object responsible for periodically printing metrics.
     let firecracker_metrics = Arc::new(Mutex::new(super::metrics::PeriodicMetrics::new()));
     event_manager.add_subscriber(firecracker_metrics.clone());
 
     // Configure, build and start the microVM.
+    debug!("api_server_adapter::run_with_api() before building and starting microvm...");
     let build_result = match config_json {
         Some(json) => super::build_microvm_from_json(
             seccomp_filters,
@@ -258,5 +263,6 @@ pub(crate) fn run_with_api(
     // This call to thread::join() should block until the API thread has processed the
     // shutdown-internal and returns from its function.
     api_thread.join().unwrap();
+    debug!("api_server_adapter::run_with_api() OUT");
     exit_code
 }
