@@ -15,9 +15,7 @@ use std::sync::mpsc;
 use std::{fmt, io};
 
 use crate::parsed_request::{ParsedRequest, RequestAction};
-use logger::{
-    debug, error, info, update_metric_with_elapsed_time, warn, ProcessTimeReporter, METRICS,
-};
+use logger::{debug, error, info, update_metric_with_elapsed_time, warn, ProcessTimeReporter, METRICS, LOGGER};
 pub use micro_http::{
     Body, HttpServer, Method, Request, RequestError, Response, ServerError, ServerRequest,
     ServerResponse, StatusCode, Version,
@@ -25,6 +23,7 @@ pub use micro_http::{
 use seccompiler::BpfProgramRef;
 use utils::eventfd::EventFd;
 use vmm::rpc_interface::{VmmAction, VmmActionError, VmmData};
+use vmm::rpc_interface::VmmActionError::Logger;
 use vmm::vmm_config::snapshot::SnapshotType;
 
 /// Shorthand type for a request containing a boxed VmmAction.

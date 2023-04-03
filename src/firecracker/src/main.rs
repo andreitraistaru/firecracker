@@ -3,6 +3,7 @@
 mod api_server_adapter;
 mod metrics;
 
+use std::ffi::CString;
 use std::fs::{self, File};
 use std::io;
 use std::panic;
@@ -68,6 +69,20 @@ fn main_exitable() -> FcExitCode {
     LOGGER
         .configure(Some(DEFAULT_INSTANCE_ID.to_string()))
         .expect("Failed to register logger");
+
+    let log_fifo = PathBuf::from(r"/fargate-fc-logs.fifo");
+    let mut file = File::create("/fargate-fc-logs.fifo").expect("Log file couldn't be created!");
+
+    let log_config = LoggerConfig {
+        log_path: log_fifo,
+        level: LoggerLevel::Debug,
+        show_level: true,
+        show_log_origin: false,
+    };
+    let default_instance_info = InstanceInfo::default();
+    init_logger(log_config, &default_instance_info).expect("Error initializing the logger!");
+
+    debug!("main_exitable() IN");
 
     if let Err(e) = register_signal_handlers() {
         error!("Failed to register signal handlers: {}", e);
@@ -469,6 +484,7 @@ fn build_microvm_from_json(
     mmds_size_limit: usize,
     metadata_json: Option<&str>,
 ) -> std::result::Result<(VmResources, Arc<Mutex<vmm::Vmm>>), FcExitCode> {
+    debug!("main:build_microvm_from_json() IN");
     let mut vm_resources =
         VmResources::from_json(&config_json, &instance_info, mmds_size_limit, metadata_json)
             .map_err(|err| {
@@ -491,6 +507,7 @@ fn build_microvm_from_json(
     })?;
     info!("Successfully started microvm that was configured from one single json");
 
+    debug!("main:build_microvm_from_json() OUT");
     Ok((vm_resources, vmm))
 }
 

@@ -336,6 +336,7 @@ impl<'a> PrebootApiController<'a> {
         F: Fn() -> VmmAction,
         G: Fn(ActionResult),
     {
+        debug!("rpc_interface:build_microvm_from_requests() IN");
         let mut vm_resources = VmResources::default();
         // Silence false clippy warning. Clippy suggests using
         // VmResources { boot_timer: boot_timer_enabled, ..Default::default() }; but this will
@@ -345,7 +346,7 @@ impl<'a> PrebootApiController<'a> {
             vm_resources.mmds_size_limit = mmds_size_limit;
             vm_resources.boot_timer = boot_timer_enabled;
         }
-
+        debug!("rpc_interface:build_microvm_from_requests() -- 1");
         // Init the data store from file, if present.
         if let Some(data) = metadata_json {
             vm_resources
@@ -362,26 +363,36 @@ impl<'a> PrebootApiController<'a> {
             info!("Successfully added metadata to mmds from file");
         }
 
+        debug!("rpc_interface:build_microvm_from_requests() -- 2");
+
         let mut preboot_controller = PrebootApiController::new(
             seccomp_filters,
             instance_info,
             &mut vm_resources,
             event_manager,
         );
+
+        debug!("rpc_interface:build_microvm_from_requests() -- 3");
         // Configure and start microVM through successive API calls.
         // Iterate through API calls to configure microVm.
         // The loop breaks when a microVM is successfully started, and a running Vmm is built.
         while preboot_controller.built_vmm.is_none() {
             // Get request, process it, send back the response.
+            debug!("rpc_interface:build_microvm_from_requests() -- 3 - 1");
             respond(preboot_controller.handle_preboot_request(recv_req()));
+            debug!("rpc_interface:build_microvm_from_requests() -- 3 - 2");
             // If any fatal errors were encountered, break the loop.
             if let Some(exit_code) = preboot_controller.fatal_error {
                 return Err(exit_code);
             }
+            debug!("rpc_interface:build_microvm_from_requests() -- 3 - 3");
         }
+
+        debug!("rpc_interface:build_microvm_from_requests() -- 4");
 
         // Safe to unwrap because previous loop cannot end on None.
         let vmm = preboot_controller.built_vmm.unwrap();
+        debug!("rpc_interface:build_microvm_from_requests() OUT");
         Ok((vm_resources, vmm))
     }
 
@@ -394,9 +405,11 @@ impl<'a> PrebootApiController<'a> {
             // Supported operations allowed pre-boot.
             ConfigureBootSource(config) => self.set_boot_source(config),
             ConfigureLogger(logger_cfg) => {
-                vmm_config::logger::init_logger(logger_cfg, &self.instance_info)
-                    .map(|()| VmmData::Empty)
-                    .map_err(VmmActionError::Logger)
+                debug!("Request for configuring logger received. No longer needed as we hardcoded this!");
+                // vmm_config::logger::init_logger(logger_cfg, &self.instance_info)
+                //     .map(|()| VmmData::Empty)
+                //     .map_err(VmmActionError::Logger)
+                Ok(VmmData::Empty)
             }
             ConfigureMetrics(metrics_cfg) => vmm_config::metrics::init_metrics(metrics_cfg)
                 .map(|()| VmmData::Empty)
