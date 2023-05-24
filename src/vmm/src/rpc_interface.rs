@@ -392,9 +392,10 @@ impl<'a> PrebootApiController<'a> {
             // Supported operations allowed pre-boot.
             ConfigureBootSource(config) => self.set_boot_source(config),
             ConfigureLogger(logger_cfg) => {
-                vmm_config::logger::init_logger(logger_cfg, &self.instance_info)
-                    .map(|()| VmmData::Empty)
-                    .map_err(VmmActionError::Logger)
+                // vmm_config::logger::init_logger(logger_cfg, &self.instance_info)
+                //     .map(|()| VmmData::Empty)
+                //     .map_err(VmmActionError::Logger)
+                Ok(VmmData::Empty)
             }
             ConfigureMetrics(metrics_cfg) => vmm_config::metrics::init_metrics(metrics_cfg)
                 .map(|()| VmmData::Empty)
