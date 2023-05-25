@@ -727,6 +727,15 @@ cmd_shell() {
     return $ret
 }
 
+cmd_sh() {
+    run_devctr \
+        --privileged \
+        --ulimit nofile=4096:4096 \
+        --ulimit memlock=-1:-1 \
+        --workdir "$CTR_FC_ROOT_DIR" \
+        -- \
+        bash --norc -c "$*"
+}
 
 cmd_create_snapshot_artifacts() {
     privileged=true

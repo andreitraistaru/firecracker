@@ -82,11 +82,6 @@ fn open_file_nonblock(path: &Path) -> Result<File, io::Error> {
 }
 
 fn main_exitable() -> FcExitCode {
-    debug!("main():main_exitable() IN");
-
-    let log_file = File::create("/firecracker_logs.txt").expect("Log file could not be created!");
-    drop(log_file);
-
     let writer = FcLineWriter::new(open_file_nonblock(&PathBuf::from("/firecracker_logs.txt").as_path()).expect("Error"));
 
     LOGGER
@@ -450,7 +445,9 @@ fn main() {
     //
     // See process_exitable() method of Subscriber trait for what triggers the exit_code.
     //
-    debug!("main() IN");
+    let log_file = File::create("/firecracker_logs.txt").expect("Log file could not be created!");
+    drop(log_file);
+
     let exit_code = main_exitable();
     debug!("main() OUT");
     std::process::exit(exit_code as i32);
